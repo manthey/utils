@@ -38,7 +38,7 @@ set history=50
 set nocompatible
 
 "syntastic requires pathogen (see https://github.com/scrooloose/syntastic)
-execute pathogen#infect()
+silent! call pathogen#infect()
 
 let g:syntastic_always_populate_loc_list = 1
 let g:syntastic_auto_loc_list = 1
@@ -61,35 +61,36 @@ autocmd FileType c,cpp,javascript,jade,php,ruby,python autocmd BufWritePre <buff
 " maximum of 500 files in the backup directory
 set backupdir=$HOME/.vim_backup
 if strlen(finddir(&g:backupdir))==0
-   call mkdir(&g:backupdir, "p", 0770)
+    call mkdir(&g:backupdir, "p", 0770)
 endif
 if has("win32")
-   call system("for /f \"tokens=* skip=500\" \%F in ('dir ".shellescape(&g:backupdir)." /o-d /tc /b') do del ".shellescape(&g:backupdir."\\\%F"))
+    call system("for /f \"tokens=* skip=500\" \%F in ('dir ".shellescape(&g:backupdir)." /o-d /tc /b') do del ".shellescape(&g:backupdir."\\\%F"))
 else
-   call system("find ".shellescape(&g:backupdir)." -type f -print0 | xargs -0 ls -A1tr | head -n -500 | xargs -d '\n' rm -f")
+    call system("find ".shellescape(&g:backupdir)." -type f -print0 | xargs -0 ls -A1tr | head -n -500 | xargs -d '\n' rm -f")
 endif
 execute "set backupext=_".strftime("%y%m%d%H%M")
 set nobackup
 
 function! s:save_copy(filename, ismod)
-   " File must exist and be modified since creation
-   let filename = fnamemodify(a:filename, ":p")
-   if !filereadable(filename)
-      return
-   endif
-   if (!a:ismod)
-      return
-   endif
-   if (getfsize(filename) > 10000000)
-      return
-   endif
-   let backup=fnamemodify(&backupdir, ":p").fnamemodify(filename, ":t")."_".strftime("%y%m%d%H%M%S", getftime(filename))
-   if has("win32")
-      let cmd = "copy /y ".shellescape(filename)." ".shellescape(backup)
-   else
-      let cmd = "cp ".fnameescape(filename)." ".fnameescape(backup)
-   endif
-   let result = system(cmd)
+    " File must exist and be modified since creation
+    let filename = fnamemodify(a:filename, ":p")
+    if !filereadable(filename)
+        return
+    endif
+    if (!a:ismod)
+        return
+    endif
+    " Don't backup files that are more than 10 Mb
+    if (getfsize(filename) > 10000000)
+        return
+    endif
+    let backup=fnamemodify(&backupdir, ":p").fnamemodify(filename, ":t")."_".strftime("%y%m%d%H%M%S", getftime(filename))
+    if has("win32")
+        let cmd = "copy /y ".shellescape(filename)." ".shellescape(backup)
+    else
+        let cmd = "cp ".fnameescape(filename)." ".fnameescape(backup)
+    endif
+    let result = system(cmd)
 endfunction
 
 autocmd BufWritePre * let ismod=&mod
@@ -102,14 +103,13 @@ syntax on
 " save information for 100 files, with up to 50 lines for each register
 set viminfo='100,\"50
 if v:lang =~ "utf8$" || v:lang =~ "UTF-8$"
-   set fileencodings=utf-8,latin1
+    set fileencodings=utf-8,latin1
 endif
 if has("autocmd")
-   " When editing a file, always jump to the last cursor position
-   autocmd BufReadPost *
-   \ if line("'\"") > 0 && line ("'\"") <= line("$") |
-   \   exe "normal! g'\"" |
-   \ endif
+    " When editing a file, always jump to the last cursor position
+    autocmd BufReadPost *
+    \ if line("'\"") > 0 && line ("'\"") <= line("$") |
+    \   exe "normal! g'\"" |
+    \ endif
 endif
 autocmd FileType c set nocindent
-
