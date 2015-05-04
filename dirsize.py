@@ -2,10 +2,8 @@
 
 import os
 import sys
-import time
 
 Verbose = 0
-UpdateRate = 1
 
 
 def format_number(val):
@@ -30,10 +28,13 @@ if __name__ == "__main__":
     bases = []
     help = False
     depth = 0
+    sort = "name"
     for pos in xrange(1, len(sys.argv)):
         arg = sys.argv[pos]
         if arg.startswith("--depth="):
             depth = int(arg.split("=")[1])
+        elif arg == "--size":
+            sort = "len"
         elif arg == "-v":
             Verbose += 1
         elif not arg.startswith("-") and not arg.startswith("/"):
@@ -43,15 +44,17 @@ if __name__ == "__main__":
     if help:
         print """Find the size of all items in the current path.
 
-Syntax: dirsize.py [(root directory) ...] -v
+Syntax: dirsize.py [(root directory) ...] --depth=(depth) --size -v
 
 If no directory is specified, the current directory is used.
+--depth specifies which directories to fully enumerate.  0 shows all files and
+  directories in the root directoty, 1 shows all files the root, and all files
+  and directories in subdirectories of the root.
+--size sorts the results by size, smallest to largest.
 -v increases verbosity."""
         sys.exit(0)
     if not len(bases):
         bases.append(".")
-    starttime = time.time()
-    lasttime = 0
     for base in bases:
         list = {}
         absroot = os.path.abspath(base)
@@ -62,11 +65,12 @@ If no directory is specified, the current directory is used.
             for file in files:
                 path = os.path.abspath(os.path.join(base, root, file))
                 pos = len("/".join(path.replace("\\", "/").split(
-                    "/")[:rootlen+depth+1]))
-                key = path[len(absroot)+1:pos]
+                    "/")[:rootlen + depth + 1]))
+                key = path[len(absroot) + 1:pos]
                 if key not in list:
                     list[key] = {
                         "base": base,
+                        "name": key,
                         "root": path[len(absroot) + 1:pos],
                         "len": 0
                     }
@@ -75,7 +79,7 @@ If no directory is specified, the current directory is used.
                     list[key]["len"] += flen
                 except:
                     pass
-        keys = list.keys()
-        keys.sort()
+        keys = [skey for (sval, skey) in sorted(
+            [(list[lkey][sort], lkey) for lkey in list])]
         for key in keys:
             print format_number(list[key]["len"]), key
