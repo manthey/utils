@@ -21,8 +21,10 @@ set nolbr
 set hls
 " make Spell turn on spell checking
 command Spell set spell spelllang=en_us
+" Set some file types based on extension
+autocmd BufNewFile,BufRead *.json set filetype=json
 " turn on spell checking for some file extensions
-autocmd BufRead,BufNewFile *.md setlocal spell spelllang=en_us
+autocmd BufNewFile,BufRead *.md setlocal spell spelllang=en_us
 " and for some file types
 autocmd FileType gitcommit setlocal spell spelllang=en_us
 " type zg when over a 'misspelled' word to add it to the spellfile dictionary
@@ -54,19 +56,19 @@ function! s:StripTrailingWhitespaces()
     call cursor(l, c)
 endfun
 
-autocmd FileType c,cpp,javascript,jade,php,ruby,python autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
 
 
 " backup to a single hidden directory with date-stamped backups.  Keep a
-" maximum of 500 files in the backup directory
+" maximum of 2500 files in the backup directory
 set backupdir=$HOME/.vim_backup
 if strlen(finddir(&g:backupdir))==0
     call mkdir(&g:backupdir, "p", 0770)
 endif
 if has("win32")
-    call system("for /f \"tokens=* skip=500\" \%F in ('dir ".shellescape(&g:backupdir)." /o-d /tc /b') do del ".shellescape(&g:backupdir."\\\%F"))
+    call system("for /f \"tokens=* skip=2500\" \%F in ('dir ".shellescape(&g:backupdir)." /o-d /tc /b') do del ".shellescape(&g:backupdir."\\\%F"))
 else
-    call system("find ".shellescape(&g:backupdir)." -type f -print0 | xargs -0 ls -A1tr | head -n -500 | xargs -d '\n' rm -f")
+    call system("find ".shellescape(&g:backupdir)." -type f -print0 | xargs -0 ls -A1tr | head -n -2500 | xargs -d '\n' rm -f")
 endif
 execute "set backupext=_".strftime("%y%m%d%H%M")
 set nobackup
