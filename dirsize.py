@@ -58,8 +58,10 @@ If no directory is specified, the current directory is used.
     for base in bases:
         list = {}
         absroot = os.path.abspath(base)
-        orig_absroot = absroot
-        absroot = absroot.rstrip("\\")
+        absroot = absroot.rstrip('"')
+        if len(absroot) > 1:
+            absroot = absroot.rstrip("\\")
+        orig_absroot = absroot + ('\\' if absroot[-1:] == ':' else '')
         rootlen = len(absroot.replace("\\", "/").split("/"))
         for root, dirs, files in os.walk(orig_absroot, True):
             for file in files:
@@ -77,7 +79,7 @@ If no directory is specified, the current directory is used.
                 try:
                     flen = os.path.getsize(path)
                     list[key]["len"] += flen
-                except:
+                except Exception:
                     pass
         keys = [skey for (sval, skey) in sorted(
             [(list[lkey][sort], lkey) for lkey in list])]
