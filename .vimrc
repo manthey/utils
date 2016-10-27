@@ -28,6 +28,7 @@ autocmd BufNewFile,BufRead *.md setlocal spell spelllang=en_us
 " and for some file types
 autocmd FileType gitcommit setlocal spell spelllang=en_us
 " type zg when over a 'misspelled' word to add it to the spellfile dictionary
+"      z= to show spelling suggestions.
 " default to utf-8
 set enc=utf-8
 " show the cursor position
@@ -46,7 +47,7 @@ let g:syntastic_always_populate_loc_list = 1
 let g:syntastic_auto_loc_list = 1
 let g:syntastic_check_on_open = 0
 let g:syntastic_check_on_wq = 0
-let g:syntastic_javascript_checkers=['jscs','jshint']
+let g:syntastic_javascript_checkers=['eslint']
 
 " remove trailing whitespace
 function! s:StripTrailingWhitespaces()
@@ -56,7 +57,7 @@ function! s:StripTrailingWhitespaces()
     call cursor(l, c)
 endfun
 
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,jade autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
 
 
 " backup to a single hidden directory with date-stamped backups.  Keep a
