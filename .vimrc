@@ -23,6 +23,8 @@ set hls
 command Spell set spell spelllang=en_us
 " Set some file types based on extension
 autocmd BufNewFile,BufRead *.json set filetype=json
+autocmd BufNewFile,BufRead *.pac set filetype=javascript
+autocmd BufNewFile,BufRead *.styl set filetype=stylus
 " turn on spell checking for some file extensions
 autocmd BufNewFile,BufRead *.md setlocal spell spelllang=en_us
 " and for some file types
@@ -55,10 +57,34 @@ function! s:StripTrailingWhitespaces()
     let c = col(".")
     %s/\s\+$//e
     call cursor(l, c)
-endfun
+endfunction
 
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,jade autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
+" remove empty lines at the end of a file
+function! s:TrimEndLines()
+    let s:l = line(".")
+    let s:c = col(".")
+    %s#\($\n\s*\)*\%$##
+    call cursor(s:l, s:c)
+endfunction
 
+function! s:AddEndLine()
+    let l = line(".")
+    let c = col(".")
+    let m = &modified
+    $s#$#\r#
+    let &modified = m
+    call cursor(l, c)
+endfunction
+
+function! s:AddEndLineAfterWrite()
+    call s:AddEndLine()
+    call cursor(s:l, s:c)
+endfunction
+
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePre <buffer> :call s:TrimEndLines()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufEnter <buffer> :call s:AddEndLine()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
 
 " backup to a single hidden directory with date-stamped backups.  Keep a
 " maximum of 2500 files in the backup directory
