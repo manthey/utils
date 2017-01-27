@@ -6,7 +6,48 @@ import subprocess
 import sys
 
 
-def get_coverage(build, collection=None, onlyLocal=False):  # noqa
+def add_xml_to_coverage(xml, cover):
+    basepath = ''
+    if '<source>' in xml:
+        basepath = xml.split('<source>', 1)[1].split('</source>')[0]
+    else:
+        path = os.path.join(os.path.expanduser(build), 'Makefile')
+        if not os.path.exists(path):
+            return
+        basepath = os.path.abspath(open(path).read().split(
+            'CMAKE_SOURCE_DIR = ')[1].split('\n')[0])
+    # print '-->', basepath
+    parts = xml.split('<class ')
+    for part in parts[1:]:
+        filename = part.split('filename="', 1)[1].split('"', 1)[0]
+        filename = os.path.join(basepath, filename)
+        if os.path.realpath(filename).startswith(os.getcwd() + os.sep):
+            filename = os.path.realpath(filename)
+        if (os.path.abspath(filename) == filename and
+                filename.startswith(os.getcwd() + os.sep)):
+            filename = filename[len(os.getcwd() + os.sep):]
+        if ((onlyLocal and os.path.abspath(filename) == filename) or
+                'manthey' in filename):
+            continue
+        lines = {}
+        for line in part.split('<line ')[1:]:
+            number = int(line.split('number="')[1].split('"')[0])
+            hits = int(line.split('hits="')[1].split('"')[0])
+            lines[number] = hits
+        if len(lines):
+            if filename in cover:
+                for number in cover[filename]['lines']:
+                    lines[number] = max(
+                        lines.get(number),
+                        cover[filename]['lines'][number])
+            cover[filename] = {
+                'lines': lines,
+                'total': len(lines),
+                'miss': len([line for line in lines if lines[line] <= 0])
+            }
+
+
+def get_coverage(build, collection=None, onlyLocal=False):
     """Return a dictionary of all files that are tracked.  Each key is the
      path and each entry is a dictionary of 'total': number of tracked
      statements, 'miss': number of uncovered statements, and 'lines': a
@@ -26,55 +67,30 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
         file = files[key]
         paths = [
             os.path.join(os.path.expanduser(build), file),
-            os.path.join(os.path.expanduser(build),
-                         '../dist/cobertura/phantomjs', file),
             os.path.join(os.path.expanduser(build), '../coverage/cobertura',
                          file),
         ]
-        xml = None
+        root = os.path.join(os.path.expanduser(build), '../dist/cobertura')
+        for subdir in os.listdir(root):
+            if os.path.isdir(os.path.join(root, subdir)):
+                paths.append(os.path.join(root, subdir, file))
+        paths.append(None)
+        anyPath = False
         for path in paths:
-            try:
-                xml = open(path).read()
-                break
-            except IOError:
-                pass
-        if xml is None:
-            xml = subprocess.Popen(
-                'coverage xml -o -', cwd=os.path.expanduser(build), shell=True,
-                stdout=subprocess.PIPE).stdout.read()
-        basepath = ''
-        if '<source>' in xml:
-            basepath = xml.split('<source>', 1)[1].split('</source>')[0]
-        else:
-            path = os.path.join(os.path.expanduser(build), 'Makefile')
-            if not os.path.exists(path):
-                continue
-            basepath = os.path.abspath(open(path).read().split(
-                'CMAKE_SOURCE_DIR = ')[1].split('\n')[0])
-        # print '-->', basepath
-        parts = xml.split('<class ')
-        for part in parts[1:]:
-            filename = part.split('filename="', 1)[1].split('"', 1)[0]
-            filename = os.path.join(basepath, filename)
-            if os.path.realpath(filename).startswith(os.getcwd() + os.sep):
-                filename = os.path.realpath(filename)
-            if (os.path.abspath(filename) == filename and
-                    filename.startswith(os.getcwd() + os.sep)):
-                filename = filename[len(os.getcwd() + os.sep):]
-            if ((onlyLocal and os.path.abspath(filename) == filename) or
-                    'manthey' in filename):
-                continue
-            lines = {}
-            for line in part.split('<line ')[1:]:
-                number = int(line.split('number="')[1].split('"')[0])
-                hits = int(line.split('hits="')[1].split('"')[0])
-                lines[number] = hits
-            if len(lines):
-                cover[filename] = {
-                    'lines': lines,
-                    'total': len(lines),
-                    'miss': len([line for line in lines if lines[line] <= 0])
-                }
+            xml = None
+            if path is not None and os.path.exists(path):
+                try:
+                    xml = open(path).read()
+                    anyPath = True
+                except IOError:
+                    continue
+            if path is None and not anyPath:
+                xml = subprocess.Popen(
+                    'coverage xml -o -', cwd=os.path.expanduser(build),
+                    shell=True,
+                    stdout=subprocess.PIPE).stdout.read()
+            if xml:
+                add_xml_to_coverage(xml, cover)
     return cover
 
 
