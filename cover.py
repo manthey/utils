@@ -71,9 +71,10 @@ def get_coverage(build, collection=None, onlyLocal=False):
                          file),
         ]
         root = os.path.join(os.path.expanduser(build), '../dist/cobertura')
-        for subdir in os.listdir(root):
-            if os.path.isdir(os.path.join(root, subdir)):
-                paths.append(os.path.join(root, subdir, file))
+        if os.path.isdir(root):
+            for subdir in os.listdir(root):
+                if os.path.isdir(os.path.join(root, subdir)):
+                    paths.append(os.path.join(root, subdir, file))
         paths.append(None)
         anyPath = False
         for path in paths:
