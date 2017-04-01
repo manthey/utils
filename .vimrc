@@ -81,10 +81,10 @@ function! s:AddEndLineAfterWrite()
     call cursor(s:l, s:c)
 endfunction
 
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePre <buffer> :call s:TrimEndLines()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufEnter <buffer> :call s:AddEndLine()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,yaml,stylus,pug autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,yaml,stylus,pug autocmd BufWritePre <buffer> :call s:TrimEndLines()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,yaml,stylus,pug autocmd BufEnter <buffer> :call s:AddEndLine()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,yaml,stylus,pug autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
 
 " backup to a single hidden directory with date-stamped backups.  Keep a
 " maximum of 2500 files in the backup directory
