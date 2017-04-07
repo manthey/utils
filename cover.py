@@ -1,12 +1,54 @@
 #!/usr/bin/python
 
+import json
 import os
 import re
 import subprocess
 import sys
 
 
-def add_xml_to_coverage(xml, cover):
+def localizeFilename(filename):
+    """
+    Convert a filename to a path relative to the current working directory, if
+    reasonable.  This resolves bind mounts, too.
+
+    Enter: filename: the name of the file to convert.
+    Exit:  filename: the possibly localized filename.
+           isLocal: true if the filename is relative to the cwd.
+    """
+    cwd = os.getcwd() + os.sep
+    filename = os.path.realpath(filename)
+    if (os.path.abspath(filename) == filename and filename.startswith(cwd)):
+        filename = filename[len(cwd):]
+    isLocal = filename != os.path.abspath(filename)
+    if not isLocal:
+        try:
+            mounts = [mount for mount in json.loads(
+                os.popen('findmnt -m -J 2>/dev/null').read())['filesystems']
+                if mount.get('target') and mount.get('source') and
+                '[' in mount['source']]
+            for mount in mounts:
+                if filename.startswith(mount['target'] + os.sep):
+                    altname = (mount['source'].split('[', 1)[1].split(']')[0] +
+                               filename[len(mount['target']):])
+                    if os.path.exists(altname) and altname.startswith(cwd):
+                        filename = altname[len(cwd):]
+                        isLocal = True
+                        break
+        except Exception:
+            pass
+    return filename, isLocal
+
+
+def add_xml_to_coverage(xml, cover, onlyLocal=False):
+    """
+    Add an xml coverage record to the total coverage data.
+
+    Enter: xml: xml with coverage information.
+           cover: coverage dictionary to modify.
+           onlyLocal: if True, omit files that are in different root
+                      directories.
+    """
     basepath = ''
     if '<source>' in xml:
         basepath = xml.split('<source>', 1)[1].split('</source>')[0]
@@ -21,13 +63,8 @@ def add_xml_to_coverage(xml, cover):
     for part in parts[1:]:
         filename = part.split('filename="', 1)[1].split('"', 1)[0]
         filename = os.path.join(basepath, filename)
-        if os.path.realpath(filename).startswith(os.getcwd() + os.sep):
-            filename = os.path.realpath(filename)
-        if (os.path.abspath(filename) == filename and
-                filename.startswith(os.getcwd() + os.sep)):
-            filename = filename[len(os.getcwd() + os.sep):]
-        if ((onlyLocal and os.path.abspath(filename) == filename) or
-                'manthey' in filename):
+        filename, isLocal = localizeFilename(filename)
+        if ((onlyLocal and not isLocal) or 'manthey' in filename):
             continue
         lines = {}
         for line in part.split('<line ')[1:]:
@@ -67,6 +104,7 @@ def get_coverage(build, collection=None, onlyLocal=False):
         file = files[key]
         paths = [
             os.path.join(os.path.expanduser(build), file),
+            os.path.join(os.path.expanduser(build), 'coverage', file),
             os.path.join(os.path.expanduser(build), '../coverage/cobertura',
                          file),
         ]
@@ -91,7 +129,7 @@ def get_coverage(build, collection=None, onlyLocal=False):
                     shell=True,
                     stdout=subprocess.PIPE).stdout.read()
             if xml:
-                add_xml_to_coverage(xml, cover)
+                add_xml_to_coverage(xml, cover, onlyLocal)
     return cover
 
 
@@ -256,7 +294,7 @@ if __name__ == '__main__':  # noqa
     gitdiff = False
     gitdifffull = False
     build = '~/girder-build'
-    for buildpath in ('_build', 'build'):
+    for buildpath in ('_build', 'build', '~/girder/_build'):
         if os.path.exists(buildpath):
             build = buildpath
             break
@@ -266,7 +304,7 @@ if __name__ == '__main__':  # noqa
     include = []
     report = None
     collection = {}
-    onlyLocal = False
+    onlyLocal = True
     for arg in sys.argv[1:]:
         if arg.startswith('-'):
             if arg == '--all':
