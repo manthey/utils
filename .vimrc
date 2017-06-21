@@ -29,6 +29,10 @@ autocmd BufNewFile,BufRead *.styl set filetype=stylus
 autocmd BufNewFile,BufRead *.md setlocal spell spelllang=en_us
 " and for some file types
 autocmd FileType gitcommit setlocal spell spelllang=en_us
+" On git commits, reflow paragraphs and set the text width to 72.
+autocmd FileType gitcommit set tw=72
+autocmd FileType gitcommit set formatoptions+=a
+
 " type zg when over a 'misspelled' word to add it to the spellfile dictionary
 "      z= to show spelling suggestions.
 " default to utf-8
@@ -55,6 +59,10 @@ let g:syntastic_javascript_checkers=['eslint']
 function! s:StripTrailingWhitespaces()
     let l = line(".")
     let c = col(".")
+    try
+        silent undojoin
+    catch
+    endtry
     %s/\s\+$//e
     call cursor(l, c)
 endfunction
@@ -63,6 +71,10 @@ endfunction
 function! s:TrimEndLines()
     let s:l = line(".")
     let s:c = col(".")
+    try
+        silent undojoin
+    catch
+    endtry
     %s#\($\n\s*\)*\%$##
     call cursor(s:l, s:c)
 endfunction
@@ -71,6 +83,10 @@ function! s:AddEndLine()
     let l = line(".")
     let c = col(".")
     let m = &modified
+    try
+        silent undojoin
+    catch
+    endtry
     $s#$#\r#
     let &modified = m
     call cursor(l, c)
@@ -81,10 +97,10 @@ function! s:AddEndLineAfterWrite()
     call cursor(s:l, s:c)
 endfunction
 
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,yaml,stylus,pug autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,yaml,stylus,pug autocmd BufWritePre <buffer> :call s:TrimEndLines()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,yaml,stylus,pug autocmd BufEnter <buffer> :call s:AddEndLine()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,yaml,stylus,pug autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePre <buffer> :call s:TrimEndLines()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufEnter <buffer> :call s:AddEndLine()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
 
 " backup to a single hidden directory with date-stamped backups.  Keep a
 " maximum of 2500 files in the backup directory
