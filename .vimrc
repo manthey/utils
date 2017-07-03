@@ -55,6 +55,8 @@ let g:syntastic_check_on_open = 0
 let g:syntastic_check_on_wq = 0
 let g:syntastic_javascript_checkers=['eslint']
 
+let g:SuperTabNoCompleteAfter=['^', '\s', '\*', '//']
+
 " remove trailing whitespace
 function! s:StripTrailingWhitespaces()
     let l = line(".")
@@ -97,10 +99,10 @@ function! s:AddEndLineAfterWrite()
     call cursor(s:l, s:c)
 endfunction
 
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePre <buffer> :call s:TrimEndLines()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufEnter <buffer> :call s:AddEndLine()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake autocmd BufWritePre <buffer> :call s:TrimEndLines()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake autocmd BufEnter <buffer> :call s:AddEndLine()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
 
 " backup to a single hidden directory with date-stamped backups.  Keep a
 " maximum of 2500 files in the backup directory
