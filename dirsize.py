@@ -24,10 +24,10 @@ def format_number(val):
     return frm.split(".")[0]+suffix
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # noqa
     bases = []
     help = False
-    depth = 0
+    depth = 1
     sort = "name"
     for pos in xrange(1, len(sys.argv)):
         arg = sys.argv[pos]
@@ -47,9 +47,10 @@ if __name__ == "__main__":
 Syntax: dirsize.py [(root directory) ...] --depth=(depth) --size -v
 
 If no directory is specified, the current directory is used.
---depth specifies which directories to fully enumerate.  0 shows all files and
-  directories in the root directoty, 1 shows all files the root, and all files
-  and directories in subdirectories of the root.
+--depth specifies which directories to fully enumerate.  0 shows just the root
+  directory, 1 shows all files and directories in the root directory, 2 shows
+  all files in the root, and all files and directories in subdirectories of the
+  root.  Default is 1.
 --size sorts the results by size, smallest to largest.
 -v increases verbosity."""
         sys.exit(0)
@@ -67,7 +68,7 @@ If no directory is specified, the current directory is used.
             for file in files:
                 path = os.path.abspath(os.path.join(base, root, file))
                 pos = len("/".join(path.replace("\\", "/").split(
-                    "/")[:rootlen + depth + 1]))
+                    "/")[:rootlen + depth]))
                 key = path[len(absroot) + 1:pos]
                 if key not in list:
                     list[key] = {
@@ -84,4 +85,4 @@ If no directory is specified, the current directory is used.
         keys = [skey for (sval, skey) in sorted(
             [(list[lkey][sort], lkey) for lkey in list])]
         for key in keys:
-            print format_number(list[key]["len"]), key
+            print format_number(list[key]["len"]), key if depth else absroot
