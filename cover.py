@@ -107,6 +107,8 @@ def get_coverage(build, collection=None, onlyLocal=False):
             os.path.join(os.path.expanduser(build), 'coverage', file),
             os.path.join(os.path.expanduser(build), '../coverage/cobertura',
                          file),
+            os.path.join(os.path.expanduser(build),
+                         '../build/test/coverage/web', file),
         ]
         root = os.path.join(os.path.expanduser(build), '../dist/cobertura')
         if os.path.isdir(root):
@@ -120,6 +122,7 @@ def get_coverage(build, collection=None, onlyLocal=False):
             if path is not None and os.path.exists(path):
                 try:
                     xml = open(path).read()
+                    # print 'XML:', path
                     anyPath = True
                 except IOError:
                     continue
@@ -128,6 +131,8 @@ def get_coverage(build, collection=None, onlyLocal=False):
                     'coverage xml -o -', cwd=os.path.expanduser(build),
                     shell=True,
                     stdout=subprocess.PIPE).stdout.read()
+                # if xml:
+                #     print 'XML: coverage'
             if xml:
                 add_xml_to_coverage(xml, cover, onlyLocal)
     return cover
@@ -140,7 +145,7 @@ def git_diff_coverage(cover, diffOptions, full=False):  # noqa
            diffOptions: command line to use with `git diff -U0 (diffOptions)`.
            full: if True, include all lines on the selected files.
     Exit:  cover: the new coverage dictionary."""
-    cmd = 'git diff -U0 '+diffOptions
+    cmd = 'git diff -U0 ' + diffOptions
     gitFiles = {}
     gitFile = None
     for line in os.popen(cmd).readlines():
@@ -314,7 +319,14 @@ if __name__ == '__main__':  # noqa
             elif arg.startswith('--build='):
                 build = arg.split('=', 1)[1]
             elif arg == '--diff':
-                gitdiff = 'master'
+                try:
+                    gitdiff = os.popen('git merge-base HEAD master').read().strip()
+                    if len(gitdiff) != 40:
+                        gitdiff = False
+                except Exception:
+                    pass
+                if not gitdiff:
+                    gitdiff = 'master'
             elif arg.startswith('--diff='):
                 gitdiff = arg.split('=', 1)[1]
             elif arg.startswith('--exclude='):
@@ -354,7 +366,8 @@ Syntax: cover.py [--report|--show] [--build=(build path)] [--js|--py] [--all]
 --build specifies where the coverage files are located.  This defaults to
  ~/girder-build.
 --diff only checks lines that were altered according to `git diff -U0 (diff
-  options)`.  If no options are specified, "master" is used.
+  options)`.  If no options are specified, "master" is used (technically
+  `git merge-base HEAD master`).
 --exclude excludes files based on a regex.
 --full, when used with --diff, does the full diff on the files selected by the
   --diff option, rather than on just lines that were altered.
