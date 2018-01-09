@@ -67,20 +67,33 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
         if ((onlyLocal and not isLocal) or 'manthey' in filename):
             continue
         lines = {}
+        partial = {}
         for line in part.split('<line ')[1:]:
             number = int(line.split('number="')[1].split('"')[0])
             hits = int(line.split('hits="')[1].split('"')[0])
+            branch = ([int(val) for val in
+                       line.split('condition-coverage="')[1].split()[1].split(
+                           '"')[0].strip('()').split('/')]
+                      if 'condition-coverage' in line else None)
             lines[number] = hits
+            if branch and branch[0] and branch[0] != branch[1]:
+                partial[number] = branch
         if len(lines):
             if filename in cover:
                 for number in cover[filename]['lines']:
                     lines[number] = max(
                         lines.get(number),
                         cover[filename]['lines'][number])
+                    if number in partial and number not in cover[filename]['partial']:
+                        del partial[number]
             cover[filename] = {
                 'lines': lines,
                 'total': len(lines),
-                'miss': len([line for line in lines if lines[line] <= 0])
+                'miss': len([line for line in lines if lines[line] <= 0]),
+                'partial': partial,
+                'npartial': (len(partial),
+                             sum([partial[p][0] for p in partial]),
+                             sum([partial[p][1] for p in partial])),
             }
 
 
@@ -173,6 +186,7 @@ def git_diff_coverage(cover, diffOptions, full=False):  # noqa
                 newCover[file] = cover[file]
                 continue
             lines = {}
+            partial = {}
             for line in cover[file]['lines']:
                 try:
                     nextline = min([linenum for linenum in
@@ -187,11 +201,17 @@ def git_diff_coverage(cover, diffOptions, full=False):  # noqa
                 if (gitline is not None and (nextline is None or
                                              nextline > gitline)):
                     lines[line] = cover[file]['lines'][line]
+                    if line in cover[file]['partial']:
+                        partial[line] = cover[file]['partial'][line]
             if len(lines):
                 newCover[file] = {
                     'lines': lines,
                     'total': len(lines),
-                    'miss': len([line for line in lines if lines[line] <= 0])
+                    'miss': len([line for line in lines if lines[line] <= 0]),
+                    'partial': partial,
+                    'npartial': (len(partial),
+                                 sum([partial[p][0] for p in partial]),
+                                 sum([partial[p][1] for p in partial])),
                 }
     return newCover
 
@@ -207,14 +227,15 @@ def match_file(file, match=[]):
     return False
 
 
-def show_file(cover, file, altpath=None):
+def show_file(cover, file, altpath=None, reportPartial=False):
     """Show a single file's source with the a leading character on each
      line to indicate which lines are covered.  > is covered, ! is
      uncovered, and ' ' is not considered.
     Enter: cover: the coverage dictionary returned from get_coverage.
            file: the path to the file.
            altpath: optional path where files may be found if not found
-                    directly."""
+                    directly.
+           reportPartial: True to include branch coverage."""
     if altpath and not os.path.exists(file):
         altfile = os.path.join(altpath, os.path.basename(file))
         data = open(altfile, 'rb').readlines()
@@ -226,6 +247,9 @@ def show_file(cover, file, altpath=None):
     for i in xrange(len(data)):
         if not (i+1) in cover[file]['lines']:
             mark = ' '
+        elif reportPartial and cover[file]['partial'].get(i+1):
+            mark = (('%d' % cover[file]['partial'][i+1][0])
+                    if cover[file]['partial'][i+1][0] < 10 else '+')
         elif cover[file]['lines'][i+1] > 0:
             mark = '>'
         else:
@@ -234,7 +258,7 @@ def show_file(cover, file, altpath=None):
 
 
 def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
-               altpath=None):
+               altpath=None, reportPartial=False):
     """Show each file's source with the a leading character on each line
      to indicate which lines are covered.
     Enter: cover: the coverage dictionary returned from get_coverage.
@@ -243,7 +267,8 @@ def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
                      with missed lines.
            include: a list of regex of files to include.
            exclude: a list of regex of files to exclude.
-           altpath: optional directory passed to show_file."""
+           altpath: optional directory passed to show_file.
+           reportPartial: True to include branch coverage."""
     filelist = cover.keys()
     filelist.sort()
     for file in filelist:
@@ -251,49 +276,77 @@ def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
                 match_file(file, include)):
             if match_file(file, exclude):
                 continue
-            if not allfiles and cover[file]['miss'] <= 0:
+            if (not allfiles and cover[file]['miss'] <= 0 and
+                    (not reportPartial or cover[file]['npartial'][0] <= 0)):
                 continue
             if len(files) != 1:
                 print "==== %s ====" % (file[:68])
-            show_file(cover, file, altpath)
+            show_file(cover, file, altpath, reportPartial)
             if len(files) != 1:
                 print "^^== %s ==^^\n" % (file[:68])
 
 
-def show_report(cover, files=[], include=[], exclude=[]):
+def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
     """Print a report of coverage.  If a set of files is specified, only
      include those.
     Enter: cover: the coverage dictionary returned from get_coverage.
            files: a list of files to restrict the report to.
            include: a list of regex of files to include.
-           exclude: a list of regex of files to exclude."""
+           exclude: a list of regex of files to exclude.
+           reportPartial: True to include branch coverage."""
     filelist = cover.keys()
     filelist.sort()
-    print "%-55s%6s%6s%7s\n%s" % ('Name', 'Stmts', 'Miss', 'Cover', '-'*74)
+    if reportPartial:
+        print "%-51s%6s%6s%6s%7s\n%s" % ('Name', 'Stmts', 'Part', 'Miss', 'Cover', '-'*76)
+    else:
+        print "%-55s%6s%6s%7s\n%s" % ('Name', 'Stmts', 'Miss', 'Cover', '-'*74)
     total = 0
     miss = 0
+    partial = [0, 0, 0]
     for file in filelist:
         if ((not len(files) and not len(include)) or file in files or
                 match_file(file, include)):
             if match_file(file, exclude):
                 continue
-            total += cover[file]['total']
-            miss += cover[file]['miss']
-            percent = int(100 * (cover[file]['total'] - cover[file]['miss']) /
-                          cover[file]['total'])
-            if cover[file]['miss'] and percent == 100:
+            ftotal = cover[file]['total']
+            fmiss = cover[file]['miss']
+            fpartial = cover[file]['npartial']
+            if not reportPartial:
+                fpartial = (0, 0, 0)
+            fhit = ftotal - fmiss - fpartial[0]
+            total += ftotal
+            miss += fmiss
+            partial[0] += fpartial[0]
+            partial[1] += fpartial[1]
+            partial[2] += fpartial[2]
+            if reportPartial and fpartial[0]:
+                percent = int(100 * (
+                    fhit + fpartial[0] * float(fpartial[1]) / fpartial[2]) / ftotal)
+            else:
+                percent = int(100 * fhit / ftotal)
+            if (fmiss or fpartial[0]) and percent == 100:
                 percent = 99
-            if cover[file]['miss'] != cover[file]['total'] and percent == 0:
+            if fmiss != ftotal and percent == 0:
                 percent = 1
-            print "%-55s%6d%6d%6d%%" % (
-                file[-55:], cover[file]['total'], cover[file]['miss'], percent)
-    print "%s" % ('-' * 74)
-    if total:
-        print "%-55s%6d%6d%9.2f%%" % ('TOTAL', total, miss,
-                                      100. * (total - miss) / total)
+            if reportPartial:
+                print "%-51s%6d%6d%6d%6d%%" % (
+                    file[-51:], ftotal, fpartial[0], fmiss, percent)
+            else:
+                print "%-55s%6d%6d%6d%%" % (
+                    file[-55:], ftotal, fmiss, percent)
+    if reportPartial:
+        print "%s\n%-51s%6d%6d%6d%9.2f%%" % (
+            '-'*76, 'TOTAL', total, partial[0], miss, 100.0 * (
+                total - miss - partial[0] * float(partial[2] - partial[1]) /
+                partial[2]) / total)
+    else:
+        print "%s\n%-55s%6d%6d%9.2f%%" % (
+            '-'*74, 'TOTAL', total, miss, 100.0 * (total - miss) / total)
 
 
 if __name__ == '__main__':  # noqa
+    if not os.path.isdir('.git') and os.path.isdir('../.git'):
+        os.chdir('..')
     help = False
     allfiles = None
     gitdiff = False
@@ -308,6 +361,7 @@ if __name__ == '__main__':  # noqa
     exclude = []
     include = []
     report = None
+    reportPartial = False
     collection = {}
     onlyLocal = True
     for arg in sys.argv[1:]:
@@ -316,6 +370,8 @@ if __name__ == '__main__':  # noqa
                 allfiles = True
             elif arg.startswith('--alt='):
                 altpath = arg.split('=', 1)[1]
+            elif arg in ('--branch', '--partial'):
+                reportPartial = True
             elif arg.startswith('--build='):
                 build = arg.split('=', 1)[1]
             elif arg == '--diff':
@@ -339,6 +395,8 @@ if __name__ == '__main__':  # noqa
                 include.append(arg.split('=', 1)[1])
             elif arg in ('--js', '--py'):
                 collection[arg[2:]] = True
+            elif arg == '--line':
+                reportPartial = False
             elif arg == '--local':
                 onlyLocal = True
             elif arg == '--report':
@@ -356,13 +414,14 @@ if __name__ == '__main__':  # noqa
 
 Syntax: cover.py [--report|--show] [--build=(build path)] [--js|--py] [--all]
                  [--local|--global] [--diff[=(diff options)] [--full]]
-                 [--include=(regex)] [--exclude=(regex)] [--alt=(path)]
-                 [(files ...)]
+                 [--branch|--line] [--include=(regex)] [--exclude=(regex)]
+                 [--alt=(path)] [(files ...)]
 
 --all annotates all files.  Otherwise, only files that have missed statements
   are annotated.  This doesn't have any effect on reports.
 --alt specifies a directory where files may exist if they aren't where they are
   listed in the coverage report.
+--branch reports partial (branch) coverage.
 --build specifies where the coverage files are located.  This defaults to
  ~/girder-build.
 --diff only checks lines that were altered according to `git diff -U0 (diff
@@ -374,6 +433,7 @@ Syntax: cover.py [--report|--show] [--build=(build path)] [--js|--py] [--all]
 --global shows all files regardless of their directory location.
 --include includes files based on a regex.
 --js and --py limit the files analyzed to that source.
+--line reports line coverage (partial coverage is considered coverage).
 --local only shows source files that are within the current working directory.
 --report summarizes results rather than show annotated files.
 --show displays annotated files rather than list a report.
@@ -386,6 +446,6 @@ given."""
     if gitdiff:
         cover = git_diff_coverage(cover, gitdiff, gitdifffull)
     if report or (not len(files) and report is not False):
-        show_report(cover, files, include, exclude)
+        show_report(cover, files, include, exclude, reportPartial)
     else:
-        show_files(cover, files, allfiles, include, exclude, altpath)
+        show_files(cover, files, allfiles, include, exclude, altpath, reportPartial)
