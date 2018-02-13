@@ -7,6 +7,9 @@ import subprocess
 import sys
 
 
+Verbose = 0
+
+
 def localizeFilename(filename):
     """
     Convert a filename to a path relative to the current working directory, if
@@ -58,7 +61,8 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
             return
         basepath = os.path.abspath(open(path).read().split(
             'CMAKE_SOURCE_DIR = ')[1].split('\n')[0])
-    # print '-->', basepath
+    if Verbose >= 1:
+        print('basepath: %s' % basepath)
     parts = xml.split('<class ')
     for part in parts[1:]:
         filename = part.split('filename="', 1)[1].split('"', 1)[0]
@@ -97,7 +101,7 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
             }
 
 
-def get_coverage(build, collection=None, onlyLocal=False):
+def get_coverage(build, collection=None, onlyLocal=False):  # noqa
     """Return a dictionary of all files that are tracked.  Each key is the
      path and each entry is a dictionary of 'total': number of tracked
      statements, 'miss': number of uncovered statements, and 'lines': a
@@ -108,20 +112,25 @@ def get_coverage(build, collection=None, onlyLocal=False):
            onlyLocal: if True, only show local files.
     Exit:  cover: coverage dictionary."""
     files = {'py': 'coverage.xml', 'js': 'js_coverage.xml'}
+    files = {'coverage.xml': 'py', 'py_coverage.xml': 'py',
+             'js_coverage.xml': 'js', 'cobertura-coverage.xml': 'js'}
     if collection:
-        for key in files.keys():
-            if not collection.get(key, None):
-                del files[key]
+        for file in files.keys():
+            if not collection.get(files[file], None):
+                del files[file]
     cover = {}
-    for key in files:
-        file = files[key]
+    for file in files:
         paths = [
             os.path.join(os.path.expanduser(build), file),
             os.path.join(os.path.expanduser(build), 'coverage', file),
             os.path.join(os.path.expanduser(build), '../coverage/cobertura',
                          file),
             os.path.join(os.path.expanduser(build),
+                         '../build/test/coverage', file),
+            os.path.join(os.path.expanduser(build),
                          '../build/test/coverage/web', file),
+            os.path.join(os.path.expanduser(build),
+                         '../build/test/artifacts/web_coverage', file),
         ]
         root = os.path.join(os.path.expanduser(build), '../dist/cobertura')
         if os.path.isdir(root):
@@ -135,7 +144,8 @@ def get_coverage(build, collection=None, onlyLocal=False):
             if path is not None and os.path.exists(path):
                 try:
                     xml = open(path).read()
-                    # print 'XML:', path
+                    if Verbose >= 1:
+                        print('XML: %s' % path)
                     anyPath = True
                 except IOError:
                     continue
@@ -144,8 +154,8 @@ def get_coverage(build, collection=None, onlyLocal=False):
                     'coverage xml -o -', cwd=os.path.expanduser(build),
                     shell=True,
                     stdout=subprocess.PIPE).stdout.read()
-                # if xml:
-                #     print 'XML: coverage'
+                if xml and Verbose >= 1:
+                    print('XML: coverage')
             if xml:
                 add_xml_to_coverage(xml, cover, onlyLocal)
     return cover
@@ -242,7 +252,7 @@ def show_file(cover, file, altpath=None, reportPartial=False):
     elif os.path.exists(file):
         data = open(file, 'rb').readlines()
     else:
-        print '   Cannot find file %s' % file
+        print('   Cannot find file %s' % file)
         return
     for i in xrange(len(data)):
         if not (i+1) in cover[file]['lines']:
@@ -254,7 +264,7 @@ def show_file(cover, file, altpath=None, reportPartial=False):
             mark = '>'
         else:
             mark = '!'
-        print '%c%s' % (mark, data[i].rstrip())
+        print('%c%s' % (mark, data[i].rstrip()))
 
 
 def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
@@ -280,10 +290,10 @@ def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
                     (not reportPartial or cover[file]['npartial'][0] <= 0)):
                 continue
             if len(files) != 1:
-                print "==== %s ====" % (file[:68])
+                print('==== %s ====' % (file[:68]))
             show_file(cover, file, altpath, reportPartial)
             if len(files) != 1:
-                print "^^== %s ==^^\n" % (file[:68])
+                print('^^== %s ==^^\n' % (file[:68]))
 
 
 def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
@@ -297,9 +307,9 @@ def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
     filelist = cover.keys()
     filelist.sort()
     if reportPartial:
-        print "%-51s%6s%6s%6s%7s\n%s" % ('Name', 'Stmts', 'Part', 'Miss', 'Cover', '-'*76)
+        print('%-51s%6s%6s%6s%7s\n%s' % ('Name', 'Stmts', 'Part', 'Miss', 'Cover', '-'*76))
     else:
-        print "%-55s%6s%6s%7s\n%s" % ('Name', 'Stmts', 'Miss', 'Cover', '-'*74)
+        print('%-55s%6s%6s%7s\n%s' % ('Name', 'Stmts', 'Miss', 'Cover', '-'*74))
     total = 0
     miss = 0
     partial = [0, 0, 0]
@@ -329,19 +339,21 @@ def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
             if fmiss != ftotal and percent == 0:
                 percent = 1
             if reportPartial:
-                print "%-51s%6d%6d%6d%6d%%" % (
-                    file[-51:], ftotal, fpartial[0], fmiss, percent)
+                print('%-51s%6d%6d%6d%6d%%' % (
+                    file[-51:], ftotal, fpartial[0], fmiss, percent))
             else:
-                print "%-55s%6d%6d%6d%%" % (
-                    file[-55:], ftotal, fmiss, percent)
-    if reportPartial:
-        print "%s\n%-51s%6d%6d%6d%9.2f%%" % (
+                print('%-55s%6d%6d%6d%%' % (
+                    file[-55:], ftotal, fmiss, percent))
+    if not total:
+        print('No lines to check')
+    elif reportPartial:
+        print('%s\n%-51s%6d%6d%6d%9.2f%%' % (
             '-'*76, 'TOTAL', total, partial[0], miss, 100.0 * (
                 total - miss - partial[0] * float(partial[2] - partial[1]) /
-                partial[2]) / total)
+                partial[2]) / total))
     else:
-        print "%s\n%-55s%6d%6d%9.2f%%" % (
-            '-'*74, 'TOTAL', total, miss, 100.0 * (total - miss) / total)
+        print('%s\n%-55s%6d%6d%9.2f%%' % (
+            '-'*74, 'TOTAL', total, miss, 100.0 * (total - miss) / total))
 
 
 if __name__ == '__main__':  # noqa
@@ -403,6 +415,8 @@ if __name__ == '__main__':  # noqa
                 report = True
             elif arg == '--show':
                 report = False
+            elif arg in ('--verbose', '-v'):
+                Verbose += 1
             else:
                 help = True
         elif arg == 'report':
@@ -410,7 +424,7 @@ if __name__ == '__main__':  # noqa
         else:
             files.append(arg)
     if help:
-        print """Combine python and javascript coverage reports.
+        print("""Combine python and javascript coverage reports.
 
 Syntax: cover.py [--report|--show] [--build=(build path)] [--js|--py] [--all]
                  [--local|--global] [--diff[=(diff options)] [--full]]
@@ -440,7 +454,7 @@ Syntax: cover.py [--report|--show] [--build=(build path)] [--js|--py] [--all]
 Default is to list a report of all files.
 If files are specified and report is not, an annotated line listing of those
 files is given.  With report specified, just the summary of those files is
-given."""
+given.""")
         sys.exit(0)
     cover = get_coverage(build, collection, onlyLocal)
     if gitdiff:
