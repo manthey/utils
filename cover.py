@@ -111,7 +111,6 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
                        collection are analyzed.
            onlyLocal: if True, only show local files.
     Exit:  cover: coverage dictionary."""
-    files = {'py': 'coverage.xml', 'js': 'js_coverage.xml'}
     files = {'coverage.xml': 'py', 'py_coverage.xml': 'py',
              'js_coverage.xml': 'js', 'cobertura-coverage.xml': 'js'}
     if collection:
@@ -227,10 +226,13 @@ def git_diff_coverage(cover, diffOptions, full=False):  # noqa
 
 
 def match_file(file, match=[]):
-    """Check if a file matches any of a list of regex.
+    """
+    Check if a file matches any of a list of regex.
+
     Enter: file: the path of the file.
            match: a list of regex to check against.
-    Exit:  match: True if the file matches."""
+    Exit:  match: True if the file matches.
+    """
     for exp in match:
         if re.search(exp, file):
             return True
@@ -238,14 +240,17 @@ def match_file(file, match=[]):
 
 
 def show_file(cover, file, altpath=None, reportPartial=False):
-    """Show a single file's source with the a leading character on each
-     line to indicate which lines are covered.  > is covered, ! is
-     uncovered, and ' ' is not considered.
+    """
+    Show a single file's source with the a leading character on each line to
+    indicate which lines are covered.  > is covered, ! is uncovered, and ' '
+    is not considered.
+
     Enter: cover: the coverage dictionary returned from get_coverage.
            file: the path to the file.
            altpath: optional path where files may be found if not found
                     directly.
-           reportPartial: True to include branch coverage."""
+           reportPartial: True to include branch coverage.
+    """
     if altpath and not os.path.exists(file):
         altfile = os.path.join(altpath, os.path.basename(file))
         data = open(altfile, 'rb').readlines()
@@ -269,8 +274,10 @@ def show_file(cover, file, altpath=None, reportPartial=False):
 
 def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
                altpath=None, reportPartial=False):
-    """Show each file's source with the a leading character on each line
-     to indicate which lines are covered.
+    """
+    Show each file's source with the a leading character on each line to
+    indicate which lines are covered.
+
     Enter: cover: the coverage dictionary returned from get_coverage.
            files: a list of files to show.
            allfiles: if True, show all files.  Otherwise, only show files
@@ -278,7 +285,8 @@ def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
            include: a list of regex of files to include.
            exclude: a list of regex of files to exclude.
            altpath: optional directory passed to show_file.
-           reportPartial: True to include branch coverage."""
+           reportPartial: True to include branch coverage.
+    """
     filelist = cover.keys()
     filelist.sort()
     for file in filelist:
@@ -297,13 +305,16 @@ def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
 
 
 def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
-    """Print a report of coverage.  If a set of files is specified, only
-     include those.
+    """
+    Print a report of coverage.  If a set of files is specified, only include
+    those.
+
     Enter: cover: the coverage dictionary returned from get_coverage.
            files: a list of files to restrict the report to.
            include: a list of regex of files to include.
            exclude: a list of regex of files to exclude.
-           reportPartial: True to include branch coverage."""
+           reportPartial: True to include branch coverage.
+    """
     filelist = cover.keys()
     filelist.sort()
     if reportPartial:
