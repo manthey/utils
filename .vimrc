@@ -31,7 +31,9 @@ autocmd BufNewFile,BufRead *.md setlocal spell spelllang=en_us
 autocmd FileType gitcommit setlocal spell spelllang=en_us
 " On git commits, reflow paragraphs and set the text width to 72.
 autocmd FileType gitcommit set tw=72
-autocmd FileType gitcommit set formatoptions+=a
+autocmd FileType gitcommit set formatoptions+=at
+" But this looks bad in github PRs, so stop doing it.
+" autocmd FileType gitcommit set formatoptions-=at
 
 " type zg when over a 'misspelled' word to add it to the spellfile dictionary
 "      z= to show spelling suggestions.
@@ -54,6 +56,7 @@ let g:syntastic_auto_loc_list = 1
 let g:syntastic_check_on_open = 0
 let g:syntastic_check_on_wq = 0
 let g:syntastic_javascript_checkers=['eslint']
+let g:syntastic_python_flake8_args = '--format=''%(path)s:%(row)d:%(col)d: %(code)s %(text)s'''
 
 let g:SuperTabNoCompleteAfter=['^', '\s', '\*', '//']
 
@@ -99,10 +102,10 @@ function! s:AddEndLineAfterWrite()
     call cursor(s:l, s:c)
 endfunction
 
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake autocmd BufWritePre <buffer> :call s:TrimEndLines()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake autocmd BufEnter <buffer> :call s:AddEndLine()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue autocmd BufWritePre <buffer> :call s:TrimEndLines()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue autocmd BufEnter <buffer> :call s:AddEndLine()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
 
 " backup to a single hidden directory with date-stamped backups.  Keep a
 " maximum of 2500 files in the backup directory
@@ -144,9 +147,18 @@ autocmd BufWritePre * let ismod=&mod
 autocmd BufWritePre,BufWritePost * call s:save_copy(expand('<afile>'), ismod)
 " end of backup settings
 
-
 " syntax highlighting is on
 syntax on
+set synmaxcol=1000
+" Sometime syntax doesn't search far enough to format properly.  'fromstart' is
+" slow, but will work.  'minlines=..' is less slow.  'clear' resets to the 
+" defaults.  This doesn't stick for many file types
+" syntax sync fromstart
+" syntax sync minlines=200
+autocmd FileType vue syntax sync fromstart
+" don't do syntax highlight on big files
+autocmd BufReadPre * if getfsize(expand("%")) > 10000000 | syntax clear | endif
+
 " save information for 100 files, with up to 50 lines for each register
 set viminfo='100,\"50
 if v:lang =~ "utf8$" || v:lang =~ "UTF-8$"
@@ -160,3 +172,4 @@ if has("autocmd")
     \ endif
 endif
 autocmd FileType c set nocindent
+
