@@ -21,6 +21,8 @@ set nolbr
 set hls
 " make Spell turn on spell checking
 command Spell set spell spelllang=en_us
+hi clear SpellBad
+hi SpellBad cterm=reverse 
 " Set some file types based on extension
 autocmd BufNewFile,BufRead *.json set filetype=json
 autocmd BufNewFile,BufRead *.pac set filetype=javascript
@@ -56,6 +58,7 @@ let g:syntastic_auto_loc_list = 1
 let g:syntastic_check_on_open = 0
 let g:syntastic_check_on_wq = 0
 let g:syntastic_javascript_checkers=['eslint']
+let g:syntastic_javascript_eslint_exe = '$(npm bin)/eslint'
 let g:syntastic_python_flake8_args = '--format=''%(path)s:%(row)d:%(col)d: %(code)s %(text)s'''
 
 let g:SuperTabNoCompleteAfter=['^', '\s', '\*', '//']
