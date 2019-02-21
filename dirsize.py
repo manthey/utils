@@ -65,8 +65,12 @@ If no directory is specified, the current directory is used.
         orig_absroot = absroot + ('\\' if absroot[-1:] == ':' else '')
         rootlen = len(absroot.replace("\\", "/").split("/"))
         for root, dirs, files in os.walk(orig_absroot, True):
+            if Verbose >= 1:
+                print root
             for file in files:
                 path = os.path.abspath(os.path.join(base, root, file))
+                if Verbose >= 2:
+                  print path
                 pos = len("/".join(path.replace("\\", "/").split(
                     "/")[:rootlen + depth]))
                 key = path[len(absroot) + 1:pos]
