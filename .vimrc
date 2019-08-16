@@ -22,7 +22,7 @@ set hls
 " make Spell turn on spell checking
 command Spell set spell spelllang=en_us
 hi clear SpellBad
-hi SpellBad cterm=reverse 
+hi SpellBad cterm=reverse
 " Set some file types based on extension
 autocmd BufNewFile,BufRead *.json set filetype=json
 autocmd BufNewFile,BufRead *.pac set filetype=javascript
@@ -58,7 +58,8 @@ let g:syntastic_auto_loc_list = 1
 let g:syntastic_check_on_open = 0
 let g:syntastic_check_on_wq = 0
 let g:syntastic_javascript_checkers=['eslint']
-let g:syntastic_javascript_eslint_exe = '$(npm bin)/eslint'
+let g:syntastic_stylus_checkers=['stylint']
+"let g:syntastic_javascript_eslint_exe = '$(npm bin)/eslint'
 let g:syntastic_python_flake8_args = '--format=''%(path)s:%(row)d:%(col)d: %(code)s %(text)s'''
 
 let g:SuperTabNoCompleteAfter=['^', '\s', '\*', '//']
@@ -105,10 +106,11 @@ function! s:AddEndLineAfterWrite()
     call cursor(s:l, s:c)
 endfunction
 
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue autocmd BufWritePre <buffer> :call s:TrimEndLines()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue autocmd BufEnter <buffer> :call s:AddEndLine()
-autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
+autocmd! BufNewFile,BufRead *.vs,*.fs set ft=glsl
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue,glsl,dosini autocmd BufWritePre <buffer> :call s:StripTrailingWhitespaces()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue,glsl,dosini autocmd BufWritePre <buffer> :call s:TrimEndLines()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue,glsl,dosini autocmd BufEnter <buffer> :call s:AddEndLine()
+autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue,glsl,dosini autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
 
 " backup to a single hidden directory with date-stamped backups.  Keep a
 " maximum of 2500 files in the backup directory
@@ -154,7 +156,7 @@ autocmd BufWritePre,BufWritePost * call s:save_copy(expand('<afile>'), ismod)
 syntax on
 set synmaxcol=1000
 " Sometime syntax doesn't search far enough to format properly.  'fromstart' is
-" slow, but will work.  'minlines=..' is less slow.  'clear' resets to the 
+" slow, but will work.  'minlines=..' is less slow.  'clear' resets to the
 " defaults.  This doesn't stick for many file types
 " syntax sync fromstart
 " syntax sync minlines=200

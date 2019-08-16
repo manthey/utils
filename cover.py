@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 
 import json
 import os
@@ -59,7 +59,7 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
         path = os.path.join(os.path.expanduser(build), 'Makefile')
         if not os.path.exists(path):
             return
-        basepath = os.path.abspath(open(path).read().split(
+        basepath = os.path.abspath(open(path, 'rt').read().split(
             'CMAKE_SOURCE_DIR = ')[1].split('\n')[0])
     if Verbose >= 1:
         print('basepath: %s' % basepath)
@@ -130,6 +130,7 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
                          '../build/test/coverage/web', file),
             os.path.join(os.path.expanduser(build),
                          '../build/test/artifacts/web_coverage', file),
+            os.path.join(os.path.expanduser(build), '../.tox/coverage', file),
         ]
         root = os.path.join(os.path.expanduser(build), '../dist/cobertura')
         if os.path.isdir(root):
@@ -142,7 +143,7 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
             xml = None
             if path is not None and os.path.exists(path):
                 try:
-                    xml = open(path).read()
+                    xml = open(path, 'rt').read()
                     if Verbose >= 1:
                         print('XML: %s' % path)
                     anyPath = True
@@ -153,6 +154,8 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
                     'coverage xml -o -', cwd=os.path.expanduser(build),
                     shell=True,
                     stdout=subprocess.PIPE).stdout.read()
+                if xml and not isinstance(xml, str):
+                    xml = xml.decode()
                 if xml and Verbose >= 1:
                     print('XML: coverage')
             if xml:
@@ -253,13 +256,13 @@ def show_file(cover, file, altpath=None, reportPartial=False):
     """
     if altpath and not os.path.exists(file):
         altfile = os.path.join(altpath, os.path.basename(file))
-        data = open(altfile, 'rb').readlines()
+        data = open(altfile, 'rt').readlines()
     elif os.path.exists(file):
-        data = open(file, 'rb').readlines()
+        data = open(file, 'rt').readlines()
     else:
         print('   Cannot find file %s' % file)
         return
-    for i in xrange(len(data)):
+    for i in range(len(data)):
         if not (i+1) in cover[file]['lines']:
             mark = ' '
         elif reportPartial and cover[file]['partial'].get(i+1):
@@ -287,7 +290,7 @@ def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
            altpath: optional directory passed to show_file.
            reportPartial: True to include branch coverage.
     """
-    filelist = cover.keys()
+    filelist = list(cover.keys())
     filelist.sort()
     for file in filelist:
         if ((not len(files) and not len(include)) or file in files or
@@ -315,7 +318,7 @@ def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
            exclude: a list of regex of files to exclude.
            reportPartial: True to include branch coverage.
     """
-    filelist = cover.keys()
+    filelist = list(cover.keys())
     filelist.sort()
     if reportPartial:
         print('%-51s%6s%6s%6s%7s\n%s' % ('Name', 'Stmts', 'Part', 'Miss', 'Cover', '-'*76))
@@ -375,7 +378,7 @@ if __name__ == '__main__':  # noqa
     gitdiff = False
     gitdifffull = False
     build = '~/girder-build'
-    for buildpath in ('_build', 'build', '~/girder/_build'):
+    for buildpath in ('_build', 'build', '~/girder/_build', '.tox'):
         if os.path.exists(buildpath):
             build = buildpath
             break
