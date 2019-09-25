@@ -208,7 +208,7 @@ if __name__ == '__main__':  # noqa
         else:
             help = True
     if (help and not windowsService) or help == 'help':
-        print """Run a cron service on windows.
+        print("""Run a cron service on windows.
 
 Syntax: cron.py install|remove|start|stop
   -q -v
@@ -228,7 +228,7 @@ service action):
   Options for 'start' and 'stop' commands only:
     --wait (seconds): wait for the service to actually start or stop.
 -q or --quiet decreases the verbosity.
--v or --verbose increases the verbosity."""
+-v or --verbose increases the verbosity.""")
         sys.exit(0)
     if windowsService:
         win32serviceutil.HandleCommandLine(
