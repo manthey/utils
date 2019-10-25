@@ -23,6 +23,8 @@ def localizeFilename(filename):
     filename = os.path.realpath(filename)
     if (os.path.abspath(filename) == filename and filename.startswith(cwd)):
         filename = filename[len(cwd):]
+    if '/site-packages/' in filename and os.path.exists(filename.split('/site-packages/')[1]):
+        filename = filename.split('/site-packages/')[1]
     isLocal = filename != os.path.abspath(filename)
     if not isLocal:
         try:
@@ -68,6 +70,9 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
         filename = part.split('filename="', 1)[1].split('"', 1)[0]
         filename = os.path.join(basepath, filename)
         filename, isLocal = localizeFilename(filename)
+        if (filename.startswith('build/') or filename.startswith('_build/') or
+                filename.startswith('.tox/')):
+            isLocal = False
         if ((onlyLocal and not isLocal) or 'manthey' in filename):
             continue
         lines = {}
@@ -114,7 +119,7 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
     files = {'coverage.xml': 'py', 'py_coverage.xml': 'py',
              'js_coverage.xml': 'js', 'cobertura-coverage.xml': 'js'}
     if collection:
-        for file in files.keys():
+        for file in list(files.keys()):
             if not collection.get(files[file], None):
                 del files[file]
     cover = {}
