@@ -230,9 +230,14 @@ service action):
 -q or --quiet decreases the verbosity.
 -v or --verbose increases the verbosity.""")
         sys.exit(0)
-    if windowsService:
-        win32serviceutil.HandleCommandLine(
-            CronSvc, argv=sys.argv, serviceClassString=CronSvc.svcPath)
+    if windowsService or len(sys.argv) == 1:
+        if len(sys.argv) == 1:
+            servicemanager.Initialize()
+            servicemanager.PrepareToHostSingle(CronSvc)
+            servicemanager.StartServiceCtrlDispatcher()
+        else:
+            win32serviceutil.HandleCommandLine(
+                CronSvc, argv=sys.argv, serviceClassString=CronSvc.svcPath)
         sys.exit(0)
     status = {}
     while True:
