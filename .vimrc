@@ -37,13 +37,6 @@ autocmd BufNewFile,BufRead *.pac set filetype=javascript
 autocmd BufNewFile,BufRead *.styl set filetype=stylus
 " turn on spell checking for some file extensions
 autocmd BufNewFile,BufRead *.md setlocal spell spelllang=en_us
-" and for some file types
-autocmd FileType gitcommit setlocal spell spelllang=en_us
-" On git commits, reflow paragraphs and set the text width to 72.
-autocmd FileType gitcommit set tw=72
-autocmd FileType gitcommit set formatoptions+=at
-" But this looks bad in github PRs, so stop doing it.
-" autocmd FileType gitcommit set formatoptions-=at
 
 " type zg when over a 'misspelled' word to add it to the spellfile dictionary
 "      z= to show spelling suggestions.
@@ -77,7 +70,8 @@ hi QuickFixLine term=reverse ctermfg=0 ctermbg=3 guibg=Yellow
 hi MatchParen term=reverse ctermfg=0 ctermbg=3 guibg=Yellow
 hi ToolbarLine term=underline ctermfg=0 ctermbg=3 guibg=Yellow
 
-
+" syntastic block start
+if 1
 "syntastic requires pathogen (see https://github.com/scrooloose/syntastic)
 silent! call pathogen#infect()
 
@@ -94,6 +88,9 @@ let g:syntastic_python_flake8_exe = 'python3.7 -m flake8'
 let g:syntastic_python_flake8_args = '--format=''%(path)s:%(row)d:%(col)d: %(code)s %(text)s'''
 
 let g:SuperTabNoCompleteAfter=['^', '\s', '\*', '//']
+endif
+" syntastic block end
+
 
 " remove trailing whitespace
 function! s:StripTrailingWhitespaces()
@@ -208,4 +205,40 @@ if has("autocmd")
     \ endif
 endif
 autocmd FileType c set nocindent
+
+" vim-plug block start
+if 0
+" Install vim-plug
+" curl -fLo "${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/autoload/plug.vim" --create-dirs https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
+call plug#begin('~/.vim/plugged')
+" completion plugins
+Plug 'https://github.com/Valloric/YouCompleteMe'
+" linting plugins
+Plug 'dense-analysis/ale'
+call plug#end()
+" run :PlugInstall once to install plugins
+
+" Autoclose completion window
+" autocmd InsertLeave,CompleteDone * if pumvisible() == 0 | pclose | endif
+autocmd CompleteDone * if pumvisible() == 0 | pclose | endif
+
+" linting options
+let g:ale_sign_column_always = 0
+" Insert Mode -> normal cursor (line)
+let &t_SI .= "\e[5 q"
+" " Normal Mode -> block cursor
+let &t_EI .= "\e[1 q"
+endif
+" vim-plug block end
+
+
+" fix gitcommit 
+autocmd FileType gitcommit setlocal spell spelllang=en_us
+" On git commits, reflow paragraphs and set the text width to 72.
+autocmd FileType gitcommit set tw=72
+" autocmd FileType gitcommit set formatoptions+=at
+autocmd FileType gitcommit set formatoptions=cqat
+" But this looks bad in github PRs, so stop doing it.
+" autocmd FileType gitcommit set formatoptions-=at
+
 
