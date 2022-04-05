@@ -140,6 +140,24 @@ autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmp
 autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue,glsl,dosini,typescript autocmd BufEnter <buffer> :call s:AddEndLine()
 autocmd FileType c,cpp,javascript,jade,php,ruby,python,stylus,pug,cmake,yaml,tmpl,dockerfile,vue,glsl,dosini,typescript autocmd BufWritePost <buffer> :call s:AddEndLineAfterWrite()
 
+function LargeFile()
+ " no syntax highlighting etc
+ set eventignore+=FileType
+ " save memory when other file is viewed
+ setlocal bufhidden=unload
+ " no undo possible
+ " setlocal undolevels=-1
+ " disable syntastic
+ let g:syntastic_mode_map = { 'mode': 'passive', 'active_filetypes': [],'passive_filetypes': [] }
+ " display message
+ " autocmd VimEnter *  echo "The file is larger than " . (g:LargeFile / 1024 / 1024) . " MB, so some options are changed (see .vimrc for details)."
+endfunction
+
+let g:LargeFile = 1024 * 1024 * 2
+augroup  LargeFile
+    autocmd BufReadPre * let f=getfsize(expand("<afile>")) | if f > g:LargeFile || f == -2 | call LargeFile() | endif
+augroup END
+
 " backup to a single hidden directory with date-stamped backups.  Keep a
 " maximum of 2500 files in the backup directory
 set backupdir=$HOME/.vim_backup
@@ -209,30 +227,35 @@ autocmd FileType c set nocindent
 " vim-plug block start
 if 0
 " Install vim-plug
-" curl -fLo "${XDG_DATA_HOME:-$HOME/.local/share}/nvim/site/autoload/plug.vim" --create-dirs https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
+" curl -fLo ~/.vim/autoload/plug.vim --create-dirs https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
 call plug#begin('~/.vim/plugged')
 " completion plugins
-Plug 'https://github.com/Valloric/YouCompleteMe'
+" Plug 'https://github.com/ycm-core/YouCompleteMe'
 " linting plugins
 Plug 'dense-analysis/ale'
 call plug#end()
 " run :PlugInstall once to install plugins
+" from a prompt, go to ~/.vim/plugged/YouCompleteMe and run
+"   python3 install.py --all
 
 " Autoclose completion window
 " autocmd InsertLeave,CompleteDone * if pumvisible() == 0 | pclose | endif
 autocmd CompleteDone * if pumvisible() == 0 | pclose | endif
+let g:ycm_key_list_select_completion = ['<TAB>']
+let g:ycm_key_list_previous_completion = ['<S-TAB>']
 
-" linting options
+" linting options.  Toggle linting via :ALEToggle
 let g:ale_sign_column_always = 0
+let g:ale_lint_on_enter = 0
+endif
+" vim-plug block end
+
 " Insert Mode -> normal cursor (line)
 let &t_SI .= "\e[5 q"
 " " Normal Mode -> block cursor
 let &t_EI .= "\e[1 q"
-endif
-" vim-plug block end
 
-
-" fix gitcommit 
+" fix gitcommit
 autocmd FileType gitcommit setlocal spell spelllang=en_us
 " On git commits, reflow paragraphs and set the text width to 72.
 autocmd FileType gitcommit set tw=72
