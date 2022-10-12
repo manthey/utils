@@ -91,7 +91,7 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
             if filename in cover:
                 for number in cover[filename]['lines']:
                     lines[number] = max(
-                        lines.get(number),
+                        lines.get(number) or 0,
                         cover[filename]['lines'][number])
                     if number in partial and number not in cover[filename]['partial']:
                         del partial[number]
@@ -145,6 +145,8 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
         paths.append(None)
         anyPath = False
         for path in paths:
+            if Verbose >= 3:
+                print('Check: %s' % path)
             xml = None
             if path is not None and os.path.exists(path):
                 try:
@@ -369,7 +371,7 @@ def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
         print('%s\n%-51s%6d%6d%6d%9.2f%%' % (
             '-'*76, 'TOTAL', total, partial[0], miss, 100.0 * (
                 total - miss - partial[0] * float(partial[2] - partial[1]) /
-                partial[2]) / total))
+                (partial[2] or 1)) / total))
     else:
         print('%s\n%-55s%6d%6d%9.2f%%' % (
             '-'*74, 'TOTAL', total, miss, 100.0 * (total - miss) / total))
@@ -383,7 +385,7 @@ if __name__ == '__main__':  # noqa
     gitdiff = False
     gitdifffull = False
     build = '~/girder-build'
-    for buildpath in ('_build', 'build', '~/girder/_build', '.tox'):
+    for buildpath in ('_build', 'build', '~/girder/_build', '.tox', 'coverage'):
         if os.path.exists(buildpath):
             build = buildpath
             break
