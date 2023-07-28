@@ -21,6 +21,8 @@ set wrap
 set nolbr
 " highlight all search matches
 set hls
+" The autodetect doesn't work very well. 
+set background=dark
 " make Spell turn on spell checking
 command Spell set spell spelllang=en_us
 hi clear SpellBad
@@ -69,6 +71,7 @@ hi ColorColumn term=reverse ctermbg=1 guibg=LightRed
 hi QuickFixLine term=reverse ctermfg=0 ctermbg=3 guibg=Yellow
 hi MatchParen term=reverse ctermfg=0 ctermbg=3 guibg=Yellow
 hi ToolbarLine term=underline ctermfg=0 ctermbg=3 guibg=Yellow
+hi SignColumn term=standout ctermfg=4 ctermbg=7 guifg=DarkBlue guibg=Grey
 
 " syntastic block start
 if 1
@@ -83,8 +86,8 @@ let g:syntastic_javascript_checkers=['eslint']
 let g:syntastic_pug_checkers=['pug_list']
 "let g:syntastic_javascript_eslint_exe = '$(npm bin)/eslint'
 let g:syntastic_stylus_checkers=['stylint']
-let g:syntastic_python_python_exec = 'python3.7'
-let g:syntastic_python_flake8_exe = 'python3.7 -m flake8'
+" let g:syntastic_python_python_exec = 'python3.7'
+" let g:syntastic_python_flake8_exe = 'python3.7 -m flake8'
 let g:syntastic_python_flake8_args = '--format=''%(path)s:%(row)d:%(col)d: %(code)s %(text)s'''
 
 let g:SuperTabNoCompleteAfter=['^', '\s', '\*', '//']
@@ -264,4 +267,6 @@ autocmd FileType gitcommit set formatoptions=cqat
 " But this looks bad in github PRs, so stop doing it.
 " autocmd FileType gitcommit set formatoptions-=at
 
-
+" Don't enable mouse editing.  It does surprising things in windows
+set mouse=
+set ttymouse=

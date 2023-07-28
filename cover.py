@@ -164,7 +164,7 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
                 if xml and not isinstance(xml, str):
                     xml = xml.decode()
                 if xml and Verbose >= 1:
-                    print('XML: coverage')
+                    print('XML: coverage %s' % build)
             if xml:
                 add_xml_to_coverage(xml, cover, onlyLocal)
     return cover

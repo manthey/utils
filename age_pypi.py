@@ -15,8 +15,8 @@ def age_pypi(liststr, ageInDays=0):  # noqa
     age = float(ageInDays)
 
     packages = {entry.split('==')[0].strip(): entry.split('==')[1].strip() for entry in list1}
-    namelen = max([len(key) for key in packages])
-    verlen = max([len(val) for val in packages.values()])
+    namelen = max([len(key) for key in packages] + [7])
+    verlen = max([len(val) for val in packages.values()] + [5])
     now = time.time()
     then = now - age * 86400
 
@@ -37,8 +37,14 @@ def age_pypi(liststr, ageInDays=0):  # noqa
         latest = (1e10, 0, None)
         once = (1e100, 0, None)
         instdate = None
+        if 'releases' not in info:
+            print('%s - failed (no releases)' % package)
+            continue
         for rkey, release in info['releases'].items():
-            ver = packaging.version.parse(rkey)
+            try:
+                ver = packaging.version.parse(rkey)
+            except Exception:
+                continue
             if (ver.is_prerelease or ver.is_devrelease) and rkey != val:
                 continue
             try:
@@ -52,7 +58,7 @@ def age_pypi(liststr, ageInDays=0):  # noqa
             if delta < latest[0]:
                 latest = (delta, stamp, rkey)
             delta = abs(stamp - then)
-            if delta < once[0] and ver <= pver:
+            if delta < once[0] and ver < pver:
                 once = (delta, stamp, rkey)
         for dstamp in (latest[2], once[2]):
             verlen = max(verlen, len(dstamp) if dstamp is not None else verlen)
@@ -83,7 +89,7 @@ if __name__ == '__main__':
         'the question of what changed since a previous install if you do '
         'not have a record of the first install.')
     parser.add_argument(
-        'list', help='A of pip packages with versions as reported by pip '
+        'list', help='A list of pip packages with versions as reported by pip '
         'install or pip freeze.')
     parser.add_argument(
         '-a', '--age', help='An age in days for checking previous versions.')
