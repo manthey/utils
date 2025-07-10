@@ -6,7 +6,6 @@ import re
 import subprocess
 import sys
 
-
 Verbose = 0
 
 
@@ -71,7 +70,7 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
         filename = os.path.join(basepath, filename)
         filename, isLocal = localizeFilename(filename)
         if (filename.startswith('build/') or filename.startswith('_build/') or
-                filename.startswith('.tox/')):
+                filename.startswith('.tox/') or filename.startswith('node_modules/')):
             isLocal = False
         if ((onlyLocal and not isLocal) or 'manthey' in filename):
             continue
@@ -107,15 +106,19 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
 
 
 def get_coverage(build, collection=None, onlyLocal=False):  # noqa
-    """Return a dictionary of all files that are tracked.  Each key is the
-     path and each entry is a dictionary of 'total': number of tracked
-     statements, 'miss': number of uncovered statements, and 'lines': a
-     dictionary of tracked lines with a hit number (0 for missed).
+    """
+    Return a dictionary of all files that are tracked.
+
+    Each key is the path and each entry is a dictionary of 'total': number of
+    tracked statements, 'miss': number of uncovered statements, and 'lines':
+    a dictionary of tracked lines with a hit number (0 for missed).
+
     Enter: build: build directory.
            collection: if present, only files listed in the keyed
                        collection are analyzed.
            onlyLocal: if True, only show local files.
-    Exit:  cover: coverage dictionary."""
+    Exit:  cover: coverage dictionary.
+    """
     files = {'coverage.xml': 'py', 'py_coverage.xml': 'py',
              'js_coverage.xml': 'js', 'cobertura-coverage.xml': 'js'}
     if collection:
@@ -171,12 +174,15 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
 
 
 def git_diff_coverage(cover, diffOptions, full=False):  # noqa
-    """Reduce a coverage dictionary to only those lines that are altered
-     or added according to git.
+    """
+    Reduce a coverage dictionary to only those lines that are altered or
+    added according to git.
+
     Enter: cover: the original coverage dictionary.
            diffOptions: command line to use with `git diff -U0 (diffOptions)`.
            full: if True, include all lines on the selected files.
-    Exit:  cover: the new coverage dictionary."""
+    Exit:  cover: the new coverage dictionary.
+    """
     cmd = 'git diff -U0 ' + diffOptions
     gitFiles = {}
     gitFile = None
@@ -197,7 +203,7 @@ def git_diff_coverage(cover, diffOptions, full=False):  # noqa
                 if len(lines) == 1:
                     diffList.append(lines[0])
                 else:
-                    diffList.extend(range(lines[0], lines[0]+lines[1]))
+                    diffList.extend(range(lines[0], lines[0] + lines[1]))
     newCover = {}
     for file in cover:
         if file in gitFiles:
@@ -235,7 +241,7 @@ def git_diff_coverage(cover, diffOptions, full=False):  # noqa
     return newCover
 
 
-def match_file(file, match=[]):
+def match_file(file, match=None):
     """
     Check if a file matches any of a list of regex.
 
@@ -243,6 +249,8 @@ def match_file(file, match=[]):
            match: a list of regex to check against.
     Exit:  match: True if the file matches.
     """
+    if match is None:
+        return False
     for exp in match:
         if re.search(exp, file):
             return True
@@ -270,19 +278,19 @@ def show_file(cover, file, altpath=None, reportPartial=False):
         print('   Cannot find file %s' % file)
         return
     for i in range(len(data)):
-        if not (i+1) in cover[file]['lines']:
+        if not (i + 1) in cover[file]['lines']:
             mark = ' '
-        elif reportPartial and cover[file]['partial'].get(i+1):
-            mark = (('%d' % cover[file]['partial'][i+1][0])
-                    if cover[file]['partial'][i+1][0] < 10 else '+')
-        elif cover[file]['lines'][i+1] > 0:
+        elif reportPartial and cover[file]['partial'].get(i + 1):
+            mark = (('%d' % cover[file]['partial'][i + 1][0])
+                    if cover[file]['partial'][i + 1][0] < 10 else '+')
+        elif cover[file]['lines'][i + 1] > 0:
             mark = '>'
         else:
             mark = '!'
         print('%c%s' % (mark, data[i].rstrip()))
 
 
-def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
+def show_files(cover, files=None, allfiles=False, include=None, exclude=None,
                altpath=None, reportPartial=False):
     """
     Show each file's source with the a leading character on each line to
@@ -297,6 +305,9 @@ def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
            altpath: optional directory passed to show_file.
            reportPartial: True to include branch coverage.
     """
+    files = files or []
+    include = include or []
+    exclude = exclude or []
     filelist = list(cover.keys())
     filelist.sort()
     for file in filelist:
@@ -314,7 +325,7 @@ def show_files(cover, files=[], allfiles=False, include=[], exclude=[],
                 print('^^== %s ==^^\n' % (file[:68]))
 
 
-def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
+def show_report(cover, files=None, include=None, exclude=None, reportPartial=False):
     """
     Print a report of coverage.  If a set of files is specified, only include
     those.
@@ -325,12 +336,15 @@ def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
            exclude: a list of regex of files to exclude.
            reportPartial: True to include branch coverage.
     """
+    files = files or []
+    include = include or []
+    exclude = exclude or []
     filelist = list(cover.keys())
     filelist.sort()
     if reportPartial:
-        print('%-51s%6s%6s%6s%7s\n%s' % ('Name', 'Stmts', 'Part', 'Miss', 'Cover', '-'*76))
+        print('%-51s%6s%6s%6s%7s\n%s' % ('Name', 'Stmts', 'Part', 'Miss', 'Cover', '-' * 76))
     else:
-        print('%-55s%6s%6s%7s\n%s' % ('Name', 'Stmts', 'Miss', 'Cover', '-'*74))
+        print('%-55s%6s%6s%7s\n%s' % ('Name', 'Stmts', 'Miss', 'Cover', '-' * 74))
     total = 0
     miss = 0
     partial = [0, 0, 0]
@@ -369,12 +383,12 @@ def show_report(cover, files=[], include=[], exclude=[], reportPartial=False):
         print('No lines to check')
     elif reportPartial:
         print('%s\n%-51s%6d%6d%6d%9.2f%%' % (
-            '-'*76, 'TOTAL', total, partial[0], miss, 100.0 * (
+            '-' * 76, 'TOTAL', total, partial[0], miss, 100.0 * (
                 total - miss - partial[0] * float(partial[2] - partial[1]) /
                 (partial[2] or 1)) / total))
     else:
         print('%s\n%-55s%6d%6d%9.2f%%' % (
-            '-'*74, 'TOTAL', total, miss, 100.0 * (total - miss) / total))
+            '-' * 74, 'TOTAL', total, miss, 100.0 * (total - miss) / total))
 
 
 if __name__ == '__main__':  # noqa
@@ -410,6 +424,7 @@ if __name__ == '__main__':  # noqa
             elif arg == '--diff':
                 try:
                     gitdiff = os.popen('git merge-base HEAD master').read().strip()
+                    print(repr(gitdiff))
                     if len(gitdiff) != 40:
                         gitdiff = False
                 except Exception:
