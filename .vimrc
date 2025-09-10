@@ -40,6 +40,9 @@ autocmd BufNewFile,BufRead *.styl set filetype=stylus
 " turn on spell checking for some file extensions
 autocmd BufNewFile,BufRead *.md setlocal spell spelllang=en_us
 
+" disable trying to connect to an X server
+set clipboard=exclude:.*
+
 " type zg when over a 'misspelled' word to add it to the spellfile dictionary
 "      z= to show spelling suggestions.
 " default to utf-8
@@ -72,6 +75,19 @@ hi QuickFixLine term=reverse ctermfg=0 ctermbg=3 guibg=Yellow
 hi MatchParen term=reverse ctermfg=0 ctermbg=3 guibg=Yellow
 hi ToolbarLine term=underline ctermfg=0 ctermbg=3 guibg=Yellow
 hi SignColumn term=standout ctermfg=4 ctermbg=7 guifg=DarkBlue guibg=Grey
+
+" We use to need pathogen, but modern vim doesn't.  In modern vim, git clone
+" plugins in ~/.vim/pack/vendor/start (%USERPROFILE%\vimfiles\pack\plugins\start
+" on Windows).  Git clone these (and more below) in that directory:
+"  https://github.com/scrooloose/syntastic
+"  https://github.com/Stormherz/tablify
+"  https://github.com/leafgarland/typescript-vim
+"  https://github.com/tikhomirov/vim-glsl
+"  https://github.com/pangloss/vim-javascript
+"  https://github.com/gabrielelana/vim-markdown
+"  https://github.com/digitaltoad/vim-pug
+"  https://github.com/posva/vim-vue
+"  https://github.com/Quramy/vison
 
 " syntastic block start
 if 1
@@ -227,32 +243,6 @@ if has("autocmd")
 endif
 autocmd FileType c set nocindent
 
-" vim-plug block start
-if 0
-" Install vim-plug
-" curl -fLo ~/.vim/autoload/plug.vim --create-dirs https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim
-call plug#begin('~/.vim/plugged')
-" completion plugins
-" Plug 'https://github.com/ycm-core/YouCompleteMe'
-" linting plugins
-Plug 'dense-analysis/ale'
-call plug#end()
-" run :PlugInstall once to install plugins
-" from a prompt, go to ~/.vim/plugged/YouCompleteMe and run
-"   python3 install.py --all
-
-" Autoclose completion window
-" autocmd InsertLeave,CompleteDone * if pumvisible() == 0 | pclose | endif
-autocmd CompleteDone * if pumvisible() == 0 | pclose | endif
-let g:ycm_key_list_select_completion = ['<TAB>']
-let g:ycm_key_list_previous_completion = ['<S-TAB>']
-
-" linting options.  Toggle linting via :ALEToggle
-let g:ale_sign_column_always = 0
-let g:ale_lint_on_enter = 0
-endif
-" vim-plug block end
-
 " Insert Mode -> normal cursor (line)
 let &t_SI .= "\e[5 q"
 " " Normal Mode -> block cursor
@@ -270,3 +260,71 @@ autocmd FileType gitcommit set formatoptions=cqat
 " Don't enable mouse editing.  It does surprising things in windows
 set mouse=
 set ttymouse=
+
+" vim packages:
+"  https://github.com/prabirshrestha/vim-lsp
+"  https://github.com/prabirshrestha/asyncomplete-lsp.vim
+"  https://github.com/prabirshrestha/asyncomplete.vim
+" pip install python-lsp-server[all]
+" npm install -g bash-language-server
+" npm install -g typescript typescript-language-server
+if executable('pylsp')
+  au User lsp_setup call lsp#register_server({
+        \ 'name': 'pylsp',
+        \ 'cmd': {server_info->['pylsp']},
+        \ 'whitelist': ['python'],
+        \ })
+endif
+if executable('/home/manthey/.nvm/versions/node/v22.13.1/bin/typescript-language-server')
+  au User lsp_setup call lsp#register_server({
+        \ 'name': 'tsserver',
+        \ 'cmd': {server_info->[
+        \   '/home/manthey/.nvm/versions/node/v22.13.1/bin/node',
+        \   '/home/manthey/.nvm/versions/node/v22.13.1/bin/typescript-language-server',
+        \   '--stdio'
+        \ ]},
+        \ 'whitelist': ['javascript', 'typescript'],
+        \ })
+endif
+
+if executable('/home/manthey/.nvm/versions/node/v22.13.1/bin/bash-language-server')
+  au User lsp_setup call lsp#register_server({
+        \ 'name': 'bashls',
+        \ 'cmd': {server_info->[
+        \   '/home/manthey/.nvm/versions/node/v22.13.1/bin/node',
+        \   '/home/manthey/.nvm/versions/node/v22.13.1/bin/bash-language-server',
+        \   'start'
+        \ ]},
+        \ 'whitelist': ['sh', 'bash'],
+        \ })
+endif
+let g:lsp_diagnostics_enabled = 0
+let g:lsp_diagnostics_virtual_text_enabled = 0
+let g:lsp_diagnostics_signs_enabled = 0
+let g:lsp_diagnostics_echo_cursor = 0
+let g:lsp_document_code_action_signs_enabled = 0
+
+" Enable asyncomplete integration with vim-lsp
+let g:asyncomplete_auto_popup = 1
+let g:asyncomplete_auto_completeopt = 0
+
+" Ensure Tab cycles the popup
+inoremap <expr> <Tab> pumvisible() ? "\<C-n>" : "\<Tab>"
+inoremap <expr> <S-Tab> pumvisible() ? "\<C-p>" : "\<S-Tab>"
+inoremap <expr> <CR> pumvisible() ? (complete_info().selected != -1 ? "\<C-y>" : "\<C-e>\<CR>") : "\<CR>"
+inoremap <expr> <Down>  pumvisible() && complete_info().selected != -1 ? "\<C-n>" : "\<Down>"
+inoremap <expr> <Up>    pumvisible() && complete_info().selected != -1 ? "\<C-p>" : "\<Up>"
+inoremap <expr> <Left>  pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Left>" : "\<Left>"
+inoremap <expr> <Right> pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Right>" : "\<Right>"
+highlight Pmenu      ctermfg=LightGray ctermbg=DarkBlue 
+highlight PmenuSel   ctermfg=Black ctermbg=Yellow
+highlight PmenuSbar  ctermfg=NONE  ctermbg=DarkBlue
+highlight PmenuThumb ctermfg=NONE  ctermbg=White
+highlight link markdownCodeDelimiter Normal
+highlight link markdownBoldDelimiter Normal
+highlight link markdownItalicDelimiter Normal
+highlight link markdownHeadingDelimiter Normal
+
+set completeopt=menuone,noinsert,noselect
+set shortmess+=c
+
