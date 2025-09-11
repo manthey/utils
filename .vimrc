@@ -268,6 +268,19 @@ set ttymouse=
 " pip install python-lsp-server[all]
 " npm install -g bash-language-server
 " npm install -g typescript typescript-language-server
+" Linux:
+"  sudo apt-get install openjdk-17-jdk
+"  mkdir -p ~/.local/share/langservers
+"  cd ~/.local/share/langservers
+" Windows:
+"  Install https://adoptium.net/temurin/releases/?version=17 setting JAVA_HOME
+"   and adding to PATH
+"  mkdir -p C:\Users\<you>\AppData\Local\langservers
+"  cd C:\Users\<you>\AppData\Local\langservers
+" Common:
+"  curl -L https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz -o jdtls.tar.gz
+"  tar -xvzf jdtls.tar.gz -C jdtls --strip-components=1
+"  rm jdtls.tar.gz
 if executable('pylsp')
   au User lsp_setup call lsp#register_server({
         \ 'name': 'pylsp',
@@ -286,7 +299,6 @@ if executable('/home/manthey/.nvm/versions/node/v22.13.1/bin/typescript-language
         \ 'whitelist': ['javascript', 'typescript'],
         \ })
 endif
-
 if executable('/home/manthey/.nvm/versions/node/v22.13.1/bin/bash-language-server')
   au User lsp_setup call lsp#register_server({
         \ 'name': 'bashls',
@@ -297,6 +309,34 @@ if executable('/home/manthey/.nvm/versions/node/v22.13.1/bin/bash-language-serve
         \ ]},
         \ 'whitelist': ['sh', 'bash'],
         \ })
+endif
+if executable('java')
+    let s:jdtls_path = has('win32') || has('win64')
+        \ ? 'C:\Users\<you>\AppData\Local\langservers\jdtls'
+        \ : expand('~/.local/share/langservers/jdtls')
+    let s:launcher = globpath(s:jdtls_path . '/plugins', 'org.eclipse.equinox.launcher_*.jar')
+    if filereadable(s:launcher) 
+        if has('win32') || has('win64')
+            let s:config = s:jdtls_path . '\config_win'
+        else
+            let s:config = s:jdtls_path . '/config_linux'
+        endif
+        au User lsp_setup call lsp#register_server({
+            \ 'name': 'jdtls',
+            \ 'cmd': {server_info->[
+            \   'java',
+            \   '-Declipse.application=org.eclipse.jdt.ls.core.id1',
+            \   '-Dosgi.bundles.defaultStartLevel=4',
+            \   '-Declipse.product=org.eclipse.jdt.ls.core.product',
+            \   '-Dlog.level=ALL',
+            \   '-Xmx1G',
+            \   '-jar', s:launcher,
+            \   '-configuration', s:config,
+            \   '-data', expand('~/.cache/jdtls-workspace-' . getcwd())
+            \ ]},
+            \ 'whitelist': ['java'],
+            \ })
+    endif        
 endif
 let g:lsp_diagnostics_enabled = 0
 let g:lsp_diagnostics_virtual_text_enabled = 0
