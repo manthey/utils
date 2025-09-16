@@ -88,12 +88,9 @@ hi SignColumn term=standout ctermfg=4 ctermbg=7 guifg=DarkBlue guibg=Grey
 "  https://github.com/digitaltoad/vim-pug
 "  https://github.com/posva/vim-vue
 "  https://github.com/Quramy/vison
+" pip install flake8
 
 " syntastic block start
-if 1
-"syntastic requires pathogen (see https://github.com/scrooloose/syntastic)
-silent! call pathogen#infect()
-
 let g:syntastic_always_populate_loc_list = 1
 let g:syntastic_auto_loc_list = 1
 let g:syntastic_check_on_open = 0
@@ -102,14 +99,11 @@ let g:syntastic_javascript_checkers=['eslint']
 let g:syntastic_pug_checkers=['pug_list']
 "let g:syntastic_javascript_eslint_exe = '$(npm bin)/eslint'
 let g:syntastic_stylus_checkers=['stylint']
-" let g:syntastic_python_python_exec = 'python3.7'
-" let g:syntastic_python_flake8_exe = 'python3.7 -m flake8'
+let g:syntastic_python_checkers = ['python', 'flake8']
 let g:syntastic_python_flake8_args = '--format=''%(path)s:%(row)d:%(col)d: %(code)s %(text)s'''
 
 let g:SuperTabNoCompleteAfter=['^', '\s', '\*', '//']
-endif
 " syntastic block end
-
 
 " remove trailing whitespace
 function! s:StripTrailingWhitespaces()
@@ -343,6 +337,7 @@ let g:lsp_diagnostics_virtual_text_enabled = 0
 let g:lsp_diagnostics_signs_enabled = 0
 let g:lsp_diagnostics_echo_cursor = 0
 let g:lsp_document_code_action_signs_enabled = 0
+let g:lsp_document_highlight_enabled = 0
 
 " Enable asyncomplete integration with vim-lsp
 let g:asyncomplete_auto_popup = 1
@@ -352,10 +347,15 @@ let g:asyncomplete_auto_completeopt = 0
 inoremap <expr> <Tab> pumvisible() ? "\<C-n>" : "\<Tab>"
 inoremap <expr> <S-Tab> pumvisible() ? "\<C-p>" : "\<S-Tab>"
 inoremap <expr> <CR> pumvisible() ? (complete_info().selected != -1 ? "\<C-y>" : "\<C-e>\<CR>") : "\<CR>"
-inoremap <expr> <Down>  pumvisible() && complete_info().selected != -1 ? "\<C-n>" : "\<Down>"
-inoremap <expr> <Up>    pumvisible() && complete_info().selected != -1 ? "\<C-p>" : "\<Up>"
-inoremap <expr> <Left>  pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Left>" : "\<Left>"
-inoremap <expr> <Right> pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Right>" : "\<Right>"
+inoremap <expr> <Down> pumvisible() ? (complete_info().selected != -1 ? "\<C-n>" : "\<C-e>\<Down>") : "\<Down>"
+inoremap <expr> <Up> pumvisible() ? (complete_info().selected != -1 ? "\<C-p>" : "\<C-e>\<Up>") : "\<Up>"
+inoremap <expr> <Left> pumvisible() ? "\<C-e>\<Left>" : "\<Left>"
+inoremap <expr> <Right> pumvisible() ? "\<C-e>\<Right>" : "\<Right>"
+
+" noremap <expr> <Down>   pumvisible() && complete_info().selected != -1 ? "\<C-n>" : "\<Down>"
+" inoremap <expr> <Up>    pumvisible() && complete_info().selected != -1 ? "\<C-p>" : "\<Up>"
+" inoremap <expr> <Left>  pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Left>" : "\<Left>"
+" inoremap <expr> <Right> pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Right>" : "\<Right>"
 highlight Pmenu      ctermfg=LightGray ctermbg=DarkBlue 
 highlight PmenuSel   ctermfg=Black ctermbg=Yellow
 highlight PmenuSbar  ctermfg=NONE  ctermbg=DarkBlue
@@ -364,6 +364,7 @@ highlight link markdownCodeDelimiter Normal
 highlight link markdownBoldDelimiter Normal
 highlight link markdownItalicDelimiter Normal
 highlight link markdownHeadingDelimiter Normal
+
 
 set completeopt=menuone,noinsert,noselect
 set shortmess+=c
