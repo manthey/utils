@@ -13,11 +13,12 @@ import sys
 
 def detect_pytorch_index():
     try:
-        out = subprocess.check_output(['nvidia-smi'], text=True, stderr=subprocess.DEVNULL)
+        out = subprocess.check_output(
+            ['nvidia-smi'], text=True, stderr=subprocess.DEVNULL)
         m = re.search(r'CUDA Version:\s+(\d+)\.(\d+)', out)
         if m:
             major, minor = int(m.group(1)), int(m.group(2))
-            supported = ['118', '121', '124', '126', '127']
+            supported = ['118', '121', '124', '126', '128', '129']
             for tag in reversed(supported):
                 t_major = int(tag[:2])
                 t_minor = int(tag[2:])
