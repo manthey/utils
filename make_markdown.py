@@ -3,6 +3,7 @@
 import argparse
 import glob
 import os
+import subprocess
 
 LANGUAGE_MAP = {
     '.css': 'css',
@@ -25,9 +26,9 @@ LANGUAGE_MAP = {
 def is_git_tracked(path):
     if not os.path.exists('.git'):
         return True
-    result = os.system(
-        f'git ls-files --error-unmatch "{path}" > /dev/null 2>&1')
-    return result == 0
+    result = subprocess.run(["git", "ls-files", "--error-unmatch", path],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return result.returncode == 0
 
 
 def is_binary(file_path):
