@@ -26,7 +26,9 @@ LANGUAGE_MAP = {
 def is_git_tracked(path):
     if not os.path.exists('.git'):
         return True
-    result = subprocess.run(["git", "ls-files", "--error-unmatch", path],
+    if 'node_modules' in path:
+        return False
+    result = subprocess.run(['git', 'ls-files', '--error-unmatch', path],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return result.returncode == 0
 
@@ -75,7 +77,7 @@ def main():
         ext = os.path.splitext(path)[1]
         lang = LANGUAGE_MAP.get(ext, ext[1:])
 
-        print(f'File: {path}')
+        print(f'##### File: {path}')
         print(f'```{lang}')
         with open(path) as f:
             content = f.read()
