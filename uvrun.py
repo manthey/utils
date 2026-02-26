@@ -31,7 +31,7 @@ def detect_pytorch_index():
 
 subprocess.check_call([
     'uv', 'run',
-    '--extra-index-url', 'https://girder.github.io/large_image_wheels',
-    '--extra-index-url', detect_pytorch_index(),
+    '--index', 'https://girder.github.io/large_image_wheels',
+    '--index', detect_pytorch_index(),
     '--index-strategy', 'unsafe-best-match',
 ] + sys.argv[1:])

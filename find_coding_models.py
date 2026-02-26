@@ -1,16 +1,22 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
+#     "diskcache",
 #     "huggingface-hub>=0.20.0",
 # ]
 # ///
 
 import argparse
+import os
 import re
 import time
 from dataclasses import dataclass
 
+import diskcache
 import huggingface_hub
+
+cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+cache = diskcache.Cache(cache_path)
 
 
 @dataclass
@@ -133,6 +139,7 @@ def has_gguf_files(siblings: list) -> bool:
     return False
 
 
+@cache.memoize(expire=86400)
 def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tuple[str, int, bool]]:
     def fetch():
         return list(api.list_repo_tree(repo_id, recursive=False))
@@ -148,6 +155,8 @@ def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tupl
     for f in files:
         filename = getattr(f, 'path', None)
         if not filename or not filename.endswith('.gguf'):
+            continue
+        if 'mmproj' in filename:
             continue
 
         size = getattr(f, 'size', None)
@@ -254,9 +263,22 @@ def discover_models(
             continue
 
         candidates = []
+        quants = {}
         for filename, size_bytes, is_chunked in gguf_files:
+            if is_chunked:
+                continue
             quant = extract_quantization(filename)
+            if quant == 'UNKNOWN':
+                continue
             mem_gb = estimate_memory_gb(size_bytes)
+            quants.setdefault(quant, {'file': filename, 'size': mem_gb})
+            if mem_gb > quants[quant]['size']:
+                quants[quant]['file'] = filename
+                quants[quant]['size'] = mem_gb
+        for quant in quants:
+            filename = quants[quant]['file']
+            mem_gb = quants[quant]['size']
+            is_chunked = False
             candidates.append(ModelInfo(
                 repo_id=model.id,
                 filename=filename,
