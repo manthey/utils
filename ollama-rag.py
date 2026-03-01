@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.11,<3.13"
 # dependencies = [
 #   "chromadb>=0.5",
 #   "fastapi>=0.111",
@@ -9,6 +9,9 @@
 #   "llama-index-readers-file>=0.1",
 #   "pypdf>=4.0",
 #   "python-docx>=1.1",
+#   "tree-sitter-languages>=1.10",
+#   "tree-sitter>=0.21",
+#   "tree_sitter_language_pack",
 #   "uvicorn[standard]>=0.29",
 # ]
 # ///
@@ -28,6 +31,7 @@ import fastapi
 import fastapi.middleware.cors
 import httpx
 import uvicorn
+from llama_index.core.node_parser import CodeSplitter
 from llama_index.core.schema import Document
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.readers.file import DocxReader, MarkdownReader, PDFReader
@@ -37,6 +41,24 @@ os.environ['CHROMA_TELEMETRY'] = 'False'
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+EXTENSION_TO_LANGUAGE = {
+    '.py': 'python',
+    '.java': 'java',
+    '.ts': 'typescript',
+    '.tsx': 'typescript',
+    '.js': 'javascript',
+    '.jsx': 'javascript',
+    '.go': 'go',
+    '.rs': 'rust',
+    '.cs': 'c_sharp',
+    '.cpp': 'cpp',
+    '.c': 'c',
+    '.rb': 'ruby',
+    '.kt': 'kotlin',
+    '.swift': 'swift',
+}
 
 
 app = fastapi.FastAPI()
@@ -176,7 +198,17 @@ def get_chunk_size_for_model(model_name: str) -> int:
     return max(256, (context_length * 3) // 4)
 
 
-def chunk_text(text: str, chunk_size: int = 512, overlap: int = 64) -> list[str]:
+def chunk_text(
+    text: str, chunk_size: int = 512, overlap: int = 64, filename: str = '',
+) -> list[str]:
+    ext = '.' + filename.rsplit('.', 1)[-1] if '.' in filename else ''
+    language = EXTENSION_TO_LANGUAGE.get(ext)
+
+    if language:
+        return CodeSplitter(
+            language=language, chunk_lines=chunk_size // 16, chunk_lines_overlap=overlap // 16,
+            max_chars=chunk_size).split_text(text)
+
     chunks = []
     start = 0
     while start < len(text):
@@ -223,14 +255,15 @@ def build_collection(model_name: str) -> chromadb.Collection:
         chunk_size = config.chunk_size
 
     for doc in documents:
-        for chunk in chunk_text(doc.text, chunk_size, config.chunk_overlap):
+        for chunk in chunk_text(doc.text, chunk_size, config.chunk_overlap,
+                                doc.metadata.get('file_path', '')):
             all_texts.append(chunk)
             all_metadatas.append(doc.metadata)
 
     logger.debug('embedding %d chunks from %d documents', len(all_texts), len(documents))
 
-    all_ids = [hashlib.sha256(f"{m.get('file_path','')}{t}".encode()).hexdigest()[:32]
-               for t, m in zip(all_texts, all_metadatas, strict=False)]
+    all_ids = [hashlib.sha256(f"{m.get('file_path','')}:{i}:{t}".encode()).hexdigest()[:32]
+               for i, (t, m) in enumerate(zip(all_texts, all_metadatas, strict=False))]
     all_embeddings = []
     for i, t in enumerate(all_texts):
         logger.info('embedding chunk %d of %d', i + 1, len(all_texts))
@@ -280,6 +313,15 @@ def retrieve_context(model_name: str, query: str) -> str:
         model_name=config.embed_model,
         base_url=config.ollama_base_url,
     )
+    if config.chunk_size == 0:
+        max_query_len = get_chunk_size_for_model(config.embed_model)
+    else:
+        max_query_len = config.chunk_size
+    if len(query) > max_query_len:
+        logger.info('query too long (%d chars), truncating to %d', len(query), max_query_len)
+        # Keep start and end; the center is probably the least interesting
+        half = (max_query_len - 5) // 2
+        query = query[:half] + '\n...\n' + query[-half:]
     query_embedding = embed_model.get_text_embedding(query)
     results = collection.query(
         query_embeddings=[query_embedding],
