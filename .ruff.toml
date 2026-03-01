@@ -36,6 +36,7 @@ lint.ignore = [
     "RET504",  # unncessary-assign before return
     "SIM102",
     "SIM103",
+    "SIM105",
     "SIM108",
     "SIM110",
     "SIM113",
