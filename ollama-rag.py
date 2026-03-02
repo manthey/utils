@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11,<3.13"
 # dependencies = [
@@ -7,8 +8,10 @@
 #   "httpx>=0.27",
 #   "llama-index-embeddings-ollama>=0.1",
 #   "llama-index-readers-file>=0.1",
+#   "pathspec",
 #   "pypdf>=4.0",
 #   "python-docx>=1.1",
+#   "tqdm>=4.0",
 #   "tree-sitter-languages>=1.10",
 #   "tree-sitter>=0.21",
 #   "tree_sitter_language_pack",
@@ -24,13 +27,17 @@ import logging
 import os
 import shutil
 import time
+from collections.abc import Generator
 from pathlib import Path
 
 import chromadb
 import fastapi
 import fastapi.middleware.cors
 import httpx
+import pathspec
+import tqdm
 import uvicorn
+from git.objects.blob import Blob
 from llama_index.core.node_parser import CodeSplitter
 from llama_index.core.schema import Document
 from llama_index.embeddings.ollama import OllamaEmbedding
@@ -85,30 +92,36 @@ def save_state(data_dir: Path, state: dict) -> None:
     state_file.write_text(json.dumps(state))
 
 
-def source_fingerprint_directory(source_path: str, suffixes: list[str]) -> str:
-    hasher = hashlib.sha256()
+def list_paths(
+    source_path: str, suffixes: list[str], exclude: [str],
+) -> Generator[Path, None, None]:
     source = Path(source_path)
+    exclude_patterns = [p.strip() for p in (exclude or '').split(',') if p.strip()]
+    spec = pathspec.PathSpec.from_lines('gitwildmatch', exclude_patterns)
     for p in sorted(source.rglob('*')):
-        if p.is_file() and p.suffix.lower() in suffixes:
-            hasher.update(str(p).encode())
-            hasher.update(str(p.stat().st_mtime).encode())
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in suffixes:
+            continue
+        relative = p.relative_to(source).as_posix()
+        if spec.match_file(relative):
+            continue
+        yield p
+
+
+def source_fingerprint_directory(source_path: str, suffixes: list[str], exclude: str) -> str:
+    hasher = hashlib.sha256()
+    for p in list_paths(source_path, suffixes, exclude):
+        hasher.update(str(p).encode())
+        hasher.update(str(p.stat().st_mtime).encode())
     return hasher.hexdigest()
 
 
-def source_fingerprint_git(source_path: str, extensions: list[str], sub_path: str) -> str:
-    from git import Repo
-
+def source_fingerprint_git(
+    source_path: str, extensions: list[str], sub_path: str, exclude: str,
+) -> str:
     hasher = hashlib.sha256()
-    sub_path = sub_path.replace('\\', '/')
-    prefix = sub_path.strip('/') + '/' if sub_path.strip('/') else ''
-    repo = Repo(source_path)
-    for item in sorted(repo.tree().traverse(), key=lambda i: i.path):
-        if item.type != 'blob':
-            continue
-        if prefix and not item.path.startswith(prefix):
-            continue
-        if not any(item.path.endswith(ext) for ext in extensions):
-            continue
+    for item in repo_item(source_path, extensions, sub_path, exclude):
         hasher.update(item.path.encode())
         hasher.update(item.hexsha.encode())
     return hasher.hexdigest()
@@ -122,47 +135,55 @@ def collection_name(model_name: str, source_path: str, embed_model: str) -> str:
     return name
 
 
-def load_documents_from_directory(source_path: str, suffixes: list[str]) -> list[Document]:
-    source = Path(source_path)
+def load_documents_from_directory(
+    source_path: str, suffixes: list[str], exclude: [str],
+) -> list[Document]:
     documents = []
-    for path in source.rglob('*'):
-        if not path.is_file():
-            continue
-        suffix = path.suffix.lower()
-        if suffix not in suffixes:
-            continue
+    for p in list_paths(source_path, suffixes, exclude):
+        suffix = p.suffix.lower()
         try:
             if suffix == '.pdf':
-                docs = PDFReader().load_data(path)
+                docs = PDFReader().load_data(p)
             elif suffix == '.docx':
-                docs = DocxReader().load_data(path)
+                docs = DocxReader().load_data(p)
             elif suffix == '.md':
-                docs = MarkdownReader().load_data(path)
+                docs = MarkdownReader().load_data(p)
             else:
-                text = path.read_text(errors='replace')
-                docs = [Document(text=text, metadata={'file_path': str(path)})]
+                text = p.read_text(errors='replace')
+                docs = [Document(text=text, metadata={'file_p': str(p)})]
             documents.extend(docs)
         except Exception:
             pass
     return documents
 
 
-def load_documents_from_git(
-    source_path: str, extensions: list[str], sub_path: str,
-) -> list[Document]:
+def repo_item(
+    source_path: str, extensions: list[str], sub_path: str, exclude: [str],
+) -> Generator[Blob, None, None]:
     from git import Repo
 
-    documents = []
-    repo = Repo(source_path)
     sub_path = sub_path.replace('\\', '/')
     prefix = sub_path.strip('/') + '/' if sub_path.strip('/') else ''
-    for item in repo.tree().traverse():
+    exclude_patterns = [p.strip() for p in (exclude or '').split(',') if p.strip()]
+    spec = pathspec.PathSpec.from_lines('gitwildmatch', exclude_patterns)
+    repo = Repo(source_path)
+    for item in sorted(repo.tree().traverse(), key=lambda i: i.path):
         if item.type != 'blob':
             continue
         if prefix and not item.path.startswith(prefix):
             continue
         if not any(item.path.endswith(ext) for ext in extensions):
             continue
+        if spec.match_file(item.path):
+            continue
+        yield item
+
+
+def load_documents_from_git(
+    source_path: str, extensions: list[str], sub_path: str, exclude: str,
+) -> list[Document]:
+    documents = []
+    for item in repo_item(source_path, extensions, sub_path, exclude):
         try:
             text = item.data_stream.read().decode(errors='replace')
             documents.append(Document(text=text, metadata={'file_path': item.path}))
@@ -234,10 +255,11 @@ def build_collection(model_name: str) -> chromadb.Collection:
     if ((config.source_type == 'auto' and os.path.exists(os.path.join(
             config.source_path, '.git'))) or config.source_type == 'git'):
         extensions = [e.strip() for e in config.git_extensions.split(',')]
-        documents = load_documents_from_git(config.source_path, extensions, config.source_sub_path)
+        documents = load_documents_from_git(
+            config.source_path, extensions, config.source_sub_path, config.exclude)
     else:
         suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
-        documents = load_documents_from_directory(config.source_path, suffixes)
+        documents = load_documents_from_directory(config.source_path, suffixes, config.exclude)
     logger.info('loaded %d documents', len(documents))
 
     embed_model = OllamaEmbedding(
@@ -264,18 +286,68 @@ def build_collection(model_name: str) -> chromadb.Collection:
 
     all_ids = [hashlib.sha256(f"{m.get('file_path','')}:{i}:{t}".encode()).hexdigest()[:32]
                for i, (t, m) in enumerate(zip(all_texts, all_metadatas, strict=False))]
-    all_embeddings = []
-    for i, t in enumerate(all_texts):
-        logger.info('embedding chunk %d of %d', i + 1, len(all_texts))
-        all_embeddings.append(embed_model.get_text_embedding(t))
+    max_batch_size = chroma_client.get_max_batch_size()
+    logger.debug('chromadb max batch size: %d', max_batch_size)
+    # Suppress the per-request HTTP logs from httpx during the tight embedding
+    # loop; they drown out everything useful.  Restore the level afterwards.
+    httpx_logger = logging.getLogger('httpx')
+    httpx_logger_level = httpx_logger.level
+    httpx_logger.setLevel(logging.WARNING)
 
-    collection.add(
-        documents=all_texts,
-        embeddings=all_embeddings,
-        metadatas=all_metadatas,
-        ids=all_ids,
+    kept_texts = []
+    kept_embeddings = []
+    kept_metadatas = []
+    kept_ids = []
+    total = len(all_texts)
+    with tqdm.tqdm(
+        total=total,
+        desc='Embedding',
+        unit='chunk',
+        dynamic_ncols=True,
+    ) as progress:
+        for i, (t, m, doc_id) in enumerate(zip(all_texts, all_metadatas, all_ids, strict=False)):
+            try:
+                embedding = embed_model.get_text_embedding(t)
+            except Exception:
+                logger.warning(
+                    'embedding chunk %d of %d failed with exception, skipping',
+                    i + 1, total, exc_info=True,
+                )
+                progress.update(1)
+                continue
+            if not embedding:
+                logger.warning(
+                    'embedding chunk %d of %d returned empty result, skipping',
+                    i + 1, total,
+                )
+                progress.update(1)
+                continue
+            kept_texts.append(t)
+            kept_embeddings.append(embedding)
+            kept_metadatas.append(m)
+            kept_ids.append(doc_id)
+            progress.update(1)
+
+    httpx_logger.setLevel(httpx_logger_level)
+
+    logger.info('adding %d of %d chunks to collection', len(kept_texts), total)
+    kept_total = len(kept_texts)
+    for batch_start in range(0, kept_total, max_batch_size):
+        batch_end = min(batch_start + max_batch_size, kept_total)
+        logger.info(
+            'adding batch %d-%d of %d to collection',
+            batch_start + 1, batch_end, kept_total,
+        )
+        collection.add(
+            documents=kept_texts[batch_start:batch_end],
+            embeddings=kept_embeddings[batch_start:batch_end],
+            metadatas=kept_metadatas[batch_start:batch_end],
+            ids=kept_ids[batch_start:batch_end],
+        )
+    logger.info(
+        'collection built with %d chunks (%d skipped)',
+        kept_total, total - kept_total,
     )
-    logger.debug('collection built with %d chunks', len(all_texts))
     return collection
 
 
@@ -288,10 +360,11 @@ def get_collection(model_name: str) -> chromadb.Collection:
     if ((config.source_type == 'auto' and os.path.exists(os.path.join(
             config.source_path, '.git'))) or config.source_type == 'git'):
         extensions = [e.strip() for e in config.git_extensions.split(',')]
-        fingerprint = source_fingerprint_git(config.source_path, extensions, config.source_sub_path)
+        fingerprint = source_fingerprint_git(
+            config.source_path, extensions, config.source_sub_path, config.exclude)
     else:
         suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
-        fingerprint = source_fingerprint_directory(config.source_path, suffixes)
+        fingerprint = source_fingerprint_directory(config.source_path, suffixes, config.exclude)
     state_key = f'{model_name}:{config.source_path}:{config.embed_model}'
     cached = state.get(state_key, {})
 
@@ -328,6 +401,7 @@ def retrieve_context(model_name: str, query: str) -> str:
         n_results=config.top_k,
     )
     documents = results.get('documents', [[]])[0]
+    logger.info('Adding context result documents: %d', len(documents))
     return '\n\n---\n\n'.join(documents)
 
 
@@ -504,7 +578,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     shared.add_argument(
         '--source-type',
         choices=['directory', 'git', 'auto'],
-        default=os.environ.get('RAG_SOURCE_TYPE', 'directory'),
+        default=os.environ.get('RAG_SOURCE_TYPE', 'auto'),
         help='Auto checks for a .git folder.  If git, only tracked files are used.',
     )
     shared.add_argument(
@@ -518,21 +592,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='For git repos, only embed files within this subpath',
     )
     shared.add_argument(
+        '--exclude',
+        default=os.environ.get('RAG_EXCLUDE', ''),
+        help='A comma-separated list of paths and file signatures to exclude',
+    )
+    shared.add_argument(
         '--git-extensions',
-        default=os.environ.get('RAG_GIT_EXTENSIONS', '.py,.js,.java,.ts,.md'),
-        help="Only process specific file types in a git repo; default is '.py,.js,.java,.ts,.md'.",
+        default=os.environ.get('RAG_GIT_EXTENSIONS', '.py,.js,.java,.ts,.md,.rst'),
+        help='Only process specific file types in a git repo; default is '
+        "'.py,.js,.java,.ts,.md,.rst'.",
     )
     shared.add_argument(
         '--dir-suffixes',
-        default=os.environ.get('RAG_DIR_SUFFIXES', '.txt,.md,.pdf,.docx'),
+        default=os.environ.get('RAG_DIR_SUFFIXES', '.txt,.md,.pdf,.docx,.rst'),
         help='Only process specific file types in a non-git source folder; '
-        "default is '.txt,.md,.pdf,.docx'",
+        "default is '.txt,.md,.pdf,.docx,.rst'",
     )
     shared.add_argument(
         '--top-k',
         type=int,
         default=int(os.environ.get('RAG_TOP_K', '5')),
-        help='How much to embed; default is 5',
+        help='How much to context to fetch; default is 5.  Use larger values '
+        'for general queries, smaller values for targeted queries.',
     )
     shared.add_argument(
         '--port',
