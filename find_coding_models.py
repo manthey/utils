@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import diskcache
 import huggingface_hub
 
-cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.cache')
 cache = diskcache.Cache(cache_path)
 
 
@@ -80,7 +80,7 @@ QUANT_PRIORITY = {
 }
 
 CODING_TAGS = ['code', 'conversational']
-VISION_TAGS = ['image-text-to-text']
+VISION_TAGS = ['image-text-to-text', 'conversational']
 
 CODING_PATTERNS = [
     r'code', r'coder', r'codestral', r'starcoder', r'codellama',
@@ -92,7 +92,7 @@ CODING_PATTERNS = [
 VISION_PATTERNS = [
     r'vision', r'llava', r'bakllava', r'moondream', r'cogvlm', r'minicpm-v',
     r'internvl', r'paligemma', r'qwen.*vl', r'yi-vl', r'bunny',
-    r'nanollava', r'obsidian', r'pixtral', r'llama.*vision',
+    r'nanollava', r'obsidian', r'pixtral', r'llama.*vision', '-vl',
 ]
 
 
@@ -211,7 +211,7 @@ def fetch_models_for_type(model_type: str, limit: int, downloads: int) -> list:
     return unique
 
 
-def discover_models(
+def discover_models(  # noqa
     api: huggingface_hub.HfApi, gpu_memory_gb: float, model_filter: str, limit: int,
     downloads: int,
 ) -> list[ModelInfo]:
