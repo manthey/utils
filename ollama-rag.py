@@ -48,8 +48,9 @@ from llama_index.readers.file import DocxReader, MarkdownReader, PDFReader
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
 os.environ['CHROMA_TELEMETRY'] = 'False'
 
-logging.basicConfig(level=logging.INFO)
+
 logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 EXTENSION_TO_LANGUAGE = {
@@ -115,7 +116,9 @@ def list_paths(
 
 def source_fingerprint_directory(source_path: str, suffixes: list[str], exclude: str) -> str:
     hasher = hashlib.sha256()
+    logging.getLogger('uvicorn').setLevel(logging.CRITICAL)
     for p in list_paths(source_path, suffixes, exclude):
+        logger.debug('%s (%d)', p, os.path.getsize(p))
         hasher.update(str(p).encode())
         hasher.update(str(p.stat().st_mtime).encode())
     return hasher.hexdigest()
@@ -126,6 +129,7 @@ def source_fingerprint_git(
 ) -> str:
     hasher = hashlib.sha256()
     for item in repo_item(source_path, extensions, sub_path, exclude):
+        logger.debug('%s (%d)', item.path, item.size)
         hasher.update(item.path.encode())
         hasher.update(item.hexsha.encode())
     return hasher.hexdigest()
@@ -631,7 +635,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='Ollama URL; default is http://localhost:11434',
     )
     shared.add_argument(
-        '--embed-model',
+        '--embed-model', '-e',
         default=os.environ.get('RAG_EMBED_MODEL', 'nomic-embed-text'),
         help='Embedding model; default is nomic-embed-text.  Others are '
         'mxbai-embed-large (good for code), all-minilm (small), '
@@ -645,7 +649,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='Auto checks for a .git folder.  If git, only tracked files are used.',
     )
     shared.add_argument(
-        '--source-path',
+        '--source-path', '-s',
         default=os.environ.get('RAG_SOURCE_PATH', ''),
         help='The root of the git repo or documents to embed',
     )
@@ -655,7 +659,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='For git repos, only embed files within this subpath',
     )
     shared.add_argument(
-        '--exclude',
+        '--exclude', '-x',
         default=os.environ.get('RAG_EXCLUDE', ''),
         help='A comma-separated list of paths and file signatures to exclude',
     )
@@ -696,6 +700,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=int(os.environ.get('RAG_CHUNK_OVERLAP', '64')),
         help='Embedding chunk overlap; default is 64',
     )
+    shared.add_argument(
+        '--verbose', '-v', action='count', default=0, help='Increase verbosity')
 
     parser = argparse.ArgumentParser(description='Local RAG proxy for Ollama')
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -708,6 +714,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_arg_parser()
     args = parser.parse_args()
+    logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
 
     if args.command == 'serve':
         cmd_serve(args)
