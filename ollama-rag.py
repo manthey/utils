@@ -26,6 +26,8 @@ import json
 import logging
 import os
 import shutil
+import signal
+import threading
 import time
 from collections.abc import Generator
 from pathlib import Path
@@ -77,6 +79,8 @@ app.add_middleware(
     allow_headers=['*'],
 )
 config: argparse.Namespace
+
+_shutdown_event = threading.Event()
 
 
 def load_state(data_dir: Path) -> dict:
@@ -344,6 +348,9 @@ def build_collection(model_name: str) -> chromadb.Collection:
         dynamic_ncols=True,
     ) as progress:
         for i, (t, m, doc_id) in enumerate(zip(all_texts, all_metadatas, all_ids, strict=False)):
+            if _shutdown_event.is_set():
+                msg = 'Shutdown'
+                raise RuntimeError(msg)
             try:
                 embedding = embed_model.get_text_embedding(t)
             except Exception:
@@ -424,6 +431,9 @@ def retrieve_context(model_name: str, query: str) -> str:
         model_name=config.embed_model,
         base_url=config.ollama_base_url,
     )
+    if _shutdown_event.is_set():
+        msg = 'Shutdown'
+        raise RuntimeError(msg)
     if config.chunk_size == 0:
         max_query_len = get_chunk_size_for_model(config.embed_model)
     else:
@@ -580,7 +590,19 @@ def cmd_serve(args):
     uv_config = uvicorn.Config(app, host='0.0.0.0', port=args.port)
     server = uvicorn.Server(uv_config)
     server.install_signal_handlers = lambda: None
-    server.run()
+
+    def _handle_signal(signum, frame):
+        _shutdown_event.set()
+        server.should_exit = True
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    thread.join()
+    logging.getLogger('uvicorn.error').setLevel(logging.INFO)
+    logging.getLogger('uvicorn.access').setLevel(logging.INFO)
 
 
 def cmd_clear(args):
