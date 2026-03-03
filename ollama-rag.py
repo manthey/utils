@@ -192,6 +192,39 @@ def load_documents_from_git(
     return documents
 
 
+def build_file_manifest_document(documents: list[Document]) -> Document:
+    """Return a single Document listing all file paths in the corpus."""
+    paths = []
+    for doc in documents:
+        path = doc.metadata.get('file_path') or doc.metadata.get('file_p', '')
+        if path and path not in paths:
+            paths.append(path)
+    text = 'Repository file listing:\n' + '\n'.join(paths)
+    return Document(text=text, metadata={'file_path': '__manifest__'})
+
+
+def check_embed_model_available(base_url: str, model_name: str) -> None:
+    """
+    Raise RuntimeError if the embedding model cannot be reached or is not
+    listed.
+    """
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.post(
+                f'{base_url}/api/show',
+                json={'name': model_name},
+            )
+            if response.status_code != 200:
+                msg = (f'Embedding model {model_name!r} is not available '
+                       f'(HTTP {response.status_code}).  Run: ollama pull '
+                       f'{model_name}'
+                       )
+                raise RuntimeError(msg)
+    except httpx.ConnectError as exc:
+        msg = f'Could not connect to Ollama at {base_url}: {exc}'
+        raise RuntimeError(msg)
+
+
 def get_model_context_length(model_name: str) -> int:
     try:
         with httpx.Client(timeout=10) as client:
@@ -261,6 +294,11 @@ def build_collection(model_name: str) -> chromadb.Collection:
         suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
         documents = load_documents_from_directory(config.source_path, suffixes, config.exclude)
     logger.info('loaded %d documents', len(documents))
+    check_embed_model_available(config.ollama_base_url, config.embed_model)
+    logger.info('embedding model %s is available', config.embed_model)
+
+    manifest = build_file_manifest_document(documents)
+    documents = [manifest] + documents
 
     embed_model = OllamaEmbedding(
         model_name=config.embed_model,
@@ -539,7 +577,10 @@ async def proxy_passthrough(request: fastapi.Request, path: str):
 def cmd_serve(args):
     global config
     config = args
-    uvicorn.run(app, host='0.0.0.0', port=args.port)
+    uv_config = uvicorn.Config(app, host='0.0.0.0', port=args.port)
+    server = uvicorn.Server(uv_config)
+    server.install_signal_handlers = lambda: None
+    server.run()
 
 
 def cmd_clear(args):
