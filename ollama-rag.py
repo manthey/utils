@@ -82,6 +82,8 @@ app.add_middleware(
 config: argparse.Namespace
 
 _shutdown_event = threading.Event()
+_build_locks_mutex = threading.Lock()
+_build_locks: dict[str, threading.Lock] = {}
 
 
 def load_state(data_dir: Path) -> dict:
@@ -303,7 +305,7 @@ def build_collection(model_name: str) -> chromadb.Collection:
         documents = load_documents_from_directory(config.source_path, suffixes, config.exclude)
     logger.info('loaded %d documents', len(documents))
     check_embed_model_available(config.ollama_base_url, config.embed_model)
-    logger.info('embedding model %s is available', config.embed_model)
+    logger.info('embedding model %s', config.embed_model)
 
     manifest = build_file_manifest_document(documents)
     documents = [manifest] + documents
@@ -358,15 +360,10 @@ def build_collection(model_name: str) -> chromadb.Collection:
             try:
                 embedding = embed_model.get_text_embedding(t)
             except Exception:
-                logger.warning(
-                    'embedding chunk %d of %d failed with exception, skipping',
-                    i + 1, total, exc_info=True,
-                )
-                progress.update(1)
-                continue
+                embedding = None
             if not embedding:
                 logger.warning(
-                    'embedding chunk %d of %d returned empty result, skipping',
+                    'embedding chunk %d of %d failed or empty, skipping',
                     i + 1, total,
                 )
                 progress.update(1)
@@ -405,7 +402,6 @@ def get_collection(model_name: str) -> chromadb.Collection:
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
-    state = load_state(data_dir)
     if ((config.source_type == 'auto' and os.path.exists(os.path.join(
             config.source_path, '.git'))) or config.source_type == 'git'):
         extensions = [e.strip() for e in config.git_extensions.split(',')]
@@ -414,19 +410,26 @@ def get_collection(model_name: str) -> chromadb.Collection:
     else:
         suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
         fingerprint = source_fingerprint_directory(config.source_path, suffixes, config.exclude)
-    state_key = f'{model_name}:{config.source_path}:{config.embed_model}'
-    cached = state.get(state_key, {})
+    with _build_locks_mutex:
+        if fingerprint not in _build_locks:
+            _build_locks[fingerprint] = threading.Lock()
+        lock = _build_locks[fingerprint]
+    with lock:
+        data_dir = Path(config.data_dir)
+        chroma_dir = data_dir / 'chroma'
+        chroma_dir.mkdir(parents=True, exist_ok=True)
 
-    chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
-
-    if cached.get('fingerprint') != fingerprint:
-        collection = build_collection(model_name)
-        state[state_key] = {'fingerprint': fingerprint, 'built_at': time.time()}
-        save_state(data_dir, state)
-        return collection
-
-    cname = collection_name(model_name, config.source_path, config.embed_model)
-    return chroma_client.get_or_create_collection(cname)
+        state = load_state(data_dir)
+        state_key = f'{model_name}:{config.source_path}:{config.embed_model}'
+        cached = state.get(state_key, {})
+        chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
+        if cached.get('fingerprint') != fingerprint:
+            collection = build_collection(model_name)
+            state[state_key] = {'fingerprint': fingerprint, 'built_at': time.time()}
+            save_state(data_dir, state)
+            return collection
+        cname = collection_name(model_name, config.source_path, config.embed_model)
+        return chroma_client.get_or_create_collection(cname)
 
 
 def retrieve_context(model_name: str, query: str) -> str:
@@ -443,7 +446,8 @@ def retrieve_context(model_name: str, query: str) -> str:
     else:
         max_query_len = config.chunk_size
     if len(query) > max_query_len:
-        logger.info('query too long (%d chars), truncating to %d', len(query), max_query_len)
+        logger.info('query too long for embedding (%d chars), truncating to %d',
+                    len(query), max_query_len)
         # Keep start and end; the center is probably the least interesting
         half = (max_query_len - 5) // 2
         query = query[:half] + '\n...\n' + query[-half:]
@@ -540,7 +544,8 @@ async def chat_completions(request: fastapi.Request):
             )
             logger.debug('upstream status: %d', response.status_code)
             logger.debug('upstream body: %s', response.text[:500])
-            logger.debug('upstream body end: ...%s', response.text[-500:])
+            if len(response.text) > 500:
+                logger.debug('upstream body end: ...%s', response.text[500:][-500:])
             logger.debug('upstream content length: %d', len(response.content))
             return response.content, response.status_code, dict(response.headers)
 
