@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # /// script
-# requires-python = ">=3.11,<3.13"
+# requires-python = ">=3.12,<3.13"
 # dependencies = [
 #   "chromadb>=0.5",
 #   "fastapi>=0.111",
 #   "gitpython>=3.1",
 #   "httpx>=0.27",
-#   "llama-index-embeddings-ollama>=0.1",
-#   "llama-index-readers-file>=0.1",
+#   "llama-index-embeddings-ollama>=0.8",
+#   "llama-index-readers-file>=0.5",
 #   "pathspec",
 #   "pypdf>=4.0",
 #   "python-docx>=1.1",
@@ -35,12 +35,11 @@ from pathlib import Path
 import chromadb
 import fastapi
 import fastapi.middleware.cors
+import git
 import httpx
 import pathspec
 import tqdm
 import uvicorn
-from git import Repo
-from git.objects.blob import Blob
 from llama_index.core.node_parser import CodeSplitter
 from llama_index.core.schema import Document
 from llama_index.embeddings.ollama import OllamaEmbedding
@@ -138,9 +137,10 @@ def source_fingerprint_git(
     return hasher.hexdigest()
 
 
-def collection_name(model_name: str, source_path: str, embed_model: str) -> str:
+def collection_name(model_name: str, source_path: str, embed_model: str,
+                    chunk_size: int, chunk_overlap: int) -> str:
     name = 'rag_' + hashlib.sha256(
-        f'{model_name}:{source_path}:{embed_model}'.encode(),
+        f'{model_name}:{source_path}:{embed_model}:{chunk_size}:{chunk_overlap}'.encode(),
     ).hexdigest()[:16]
     logger.info('collection name %s', name)
     return name
@@ -188,13 +188,13 @@ def load_documents_from_directory(
 
 def repo_item(
     source_path: str, extensions: list[str], sub_path: str, exclude: [str],
-) -> Generator[Blob, None, None]:
+) -> Generator[git.objects.blob.Blob, None, None]:
 
     sub_path = sub_path.replace('\\', '/')
     prefix = sub_path.strip('/') + '/' if sub_path.strip('/') else ''
     exclude_patterns = [p.strip() for p in (exclude or '').split(',') if p.strip()]
     spec = pathspec.PathSpec.from_lines('gitwildmatch', exclude_patterns)
-    repo = Repo(source_path)
+    repo = git.Repo(source_path)
     for item in sorted(repo.tree().traverse(), key=lambda i: i.path):
         if item.type != 'blob':
             continue
@@ -305,7 +305,9 @@ def build_collection(model_name: str) -> chromadb.Collection:
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
-    cname = collection_name(model_name, config.source_path, config.embed_model)
+    cname = collection_name(
+        model_name, config.source_path, config.embed_model, config.chunk_size,
+        config.chunk_overlap)
     chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
     try:
         chroma_client.delete_collection(cname)
@@ -420,7 +422,7 @@ def get_collection(model_name: str) -> chromadb.Collection:
     source_path = Path(config.source_path)
     if is_git_source():
         try:
-            Repo(config.source_path)
+            git.Repo(config.source_path)
         except Exception:
             source_unavailable = True
     else:
@@ -442,7 +444,9 @@ def get_collection(model_name: str) -> chromadb.Collection:
         state = load_state(data_dir)
         cached = state.get(state_key, {})
         chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
-        cname = collection_name(model_name, config.source_path, config.embed_model)
+        cname = collection_name(
+            model_name, config.source_path, config.embed_model,
+            config.chunk_size, config.chunk_overlap)
         if source_unavailable and cached.get('fingerprint'):
             try:
                 collection = chroma_client.get_collection(cname)
