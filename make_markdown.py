@@ -79,7 +79,7 @@ def main():
 
         print(f'##### File: {path}')
         print(f'```{lang}')
-        with open(path) as f:
+        with open(path, encoding='utf8') as f:
             content = f.read()
             print(escape_backticks(content).rstrip())
         print('```')
