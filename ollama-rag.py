@@ -146,6 +146,24 @@ def collection_name(model_name: str, source_path: str, embed_model: str) -> str:
     return name
 
 
+def is_git_source() -> bool:
+    return config.source_type == 'git' or (
+        config.source_type == 'auto' and os.path.exists(os.path.join(config.source_path, '.git')))
+
+
+def resolve_chunk_size() -> int:
+    if config.chunk_size == 0:
+        chunk_size = get_chunk_size_for_model(config.embed_model)
+        logger.info('auto chunk size: %d', chunk_size)
+        return chunk_size
+    return config.chunk_size
+
+
+def strip_hop_by_hop_headers(headers: dict) -> dict:
+    drop = {'content-length', 'transfer-encoding', 'content-encoding'}
+    return {k: v for k, v in headers.items() if k.lower() not in drop}
+
+
 def load_documents_from_directory(
     source_path: str, suffixes: list[str], exclude: [str],
 ) -> list[Document]:
@@ -295,8 +313,7 @@ def build_collection(model_name: str) -> chromadb.Collection:
         pass
     collection = chroma_client.create_collection(cname)
 
-    if ((config.source_type == 'auto' and os.path.exists(os.path.join(
-            config.source_path, '.git'))) or config.source_type == 'git'):
+    if is_git_source():
         extensions = [e.strip() for e in config.git_extensions.split(',')]
         documents = load_documents_from_git(
             config.source_path, extensions, config.source_sub_path, config.exclude)
@@ -318,12 +335,7 @@ def build_collection(model_name: str) -> chromadb.Collection:
     all_texts = []
     all_metadatas = []
 
-    if config.chunk_size == 0:
-        chunk_size = get_chunk_size_for_model(config.embed_model)
-        logger.info('auto chunk size: %d', chunk_size)
-    else:
-        chunk_size = config.chunk_size
-
+    chunk_size = resolve_chunk_size()
     for doc in documents:
         for chunk in chunk_text(doc.text, chunk_size, config.chunk_overlap,
                                 doc.metadata.get('file_path', '')):
@@ -406,9 +418,7 @@ def get_collection(model_name: str) -> chromadb.Collection:
 
     source_unavailable = False
     source_path = Path(config.source_path)
-    if config.source_type == 'git' or (
-        config.source_type == 'auto' and (source_path / '.git').exists()
-    ):
+    if is_git_source():
         try:
             Repo(config.source_path)
         except Exception:
@@ -417,8 +427,7 @@ def get_collection(model_name: str) -> chromadb.Collection:
         if not source_path.exists() or not any(source_path.iterdir()):
             source_unavailable = True
 
-    if ((config.source_type == 'auto' and os.path.exists(os.path.join(
-            config.source_path, '.git'))) or config.source_type == 'git'):
+    if is_git_source():
         extensions = [e.strip() for e in config.git_extensions.split(',')]
         fingerprint = source_fingerprint_git(
             config.source_path, extensions, config.source_sub_path, config.exclude)
@@ -463,10 +472,7 @@ def retrieve_context(model_name: str, query: str) -> str:
     if _shutdown_event.is_set():
         msg = 'Shutdown'
         raise RuntimeError(msg)
-    if config.chunk_size == 0:
-        max_query_len = get_chunk_size_for_model(config.embed_model)
-    else:
-        max_query_len = config.chunk_size
+    max_query_len = resolve_chunk_size()
     if len(query) > max_query_len:
         logger.info('query too long for embedding (%d chars), truncating to %d',
                     len(query), max_query_len)
@@ -572,12 +578,7 @@ async def chat_completions(request: fastapi.Request):
             return response.content, response.status_code, dict(response.headers)
 
     content, status_code, headers = await asyncio.to_thread(fetch)
-    headers.pop('content-length', None)
-    headers.pop('Content-Length', None)
-    headers.pop('transfer-encoding', None)
-    headers.pop('Transfer-Encoding', None)
-    headers.pop('content-encoding', None)
-    headers.pop('Content-Encoding', None)
+    headers = strip_hop_by_hop_headers(headers)
     return fastapi.responses.Response(
         content=content,
         status_code=status_code,
@@ -599,14 +600,8 @@ async def proxy_passthrough(request: fastapi.Request, path: str):
             content=await request.body(),
             params=request.query_params,
         )
-    headers = dict(response.headers)
-    headers.pop('content-length', None)
-    headers.pop('Content-Length', None)
-    headers.pop('transfer-encoding', None)
-    headers.pop('Transfer-Encoding', None)
-    headers.pop('content-encoding', None)
-    headers.pop('Content-Encoding', None)
     logger.debug('response headers: %s', dict(response.headers))
+    headers = strip_hop_by_hop_headers(dict(response.headers))
     logger.debug('response content length: %d', len(response.content))
     return fastapi.responses.Response(
         content=response.content,
