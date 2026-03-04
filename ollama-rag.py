@@ -641,7 +641,7 @@ async def proxy_passthrough(request: fastapi.Request, path: str):
 def cmd_serve(args):
     global config
     config = args
-    uv_config = uvicorn.Config(app, host='0.0.0.0', port=args.port)
+    uv_config = uvicorn.Config(app, host=args.host, port=args.port)
     server = uvicorn.Server(uv_config)
     server.install_signal_handlers = lambda: None
 
@@ -734,6 +734,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         'for general queries, smaller values for targeted queries.  A value '
         'between half and twice this will be chosen based on recall '
         'similarity.',
+    )
+    shared.add_argument(
+        '--host',
+        type=str,
+        default='0.0.0.0',
+        help='Proxy host; default is 0.0.0.0.  Using localhost is more secure.',
     )
     shared.add_argument(
         '--port',
