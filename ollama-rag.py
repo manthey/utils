@@ -151,9 +151,14 @@ def is_git_source() -> bool:
         config.source_type == 'auto' and os.path.exists(os.path.join(config.source_path, '.git')))
 
 
-def resolve_chunk_size() -> int:
-    if config.chunk_size == 0:
-        chunk_size = get_chunk_size_for_model(config.embed_model)
+def resolve_chunk_size(forQuery: bool = False) -> int:
+    if config.chunk_size == 0 or forQuery:
+        context_length = get_model_context_length(config.embed_model)
+        logger.info('model %s context length: %d', config.embed_model, context_length)
+        chunk_size = max(256, (context_length * 3) // 4)
+        if not forQuery:
+            # This is a poor heuristic, but better than giant chunks.
+            chunk_size = min(chunk_size, 8192)
         logger.info('auto chunk size: %d', chunk_size)
         return chunk_size
     return config.chunk_size
@@ -166,8 +171,9 @@ def strip_hop_by_hop_headers(headers: dict) -> dict:
 
 def load_documents_from_directory(
     source_path: str, suffixes: list[str], exclude: [str],
-) -> list[Document]:
+) -> tuple[list[Document], int]:
     documents = []
+    count = 0
     for p in list_paths(source_path, suffixes, exclude):
         suffix = p.suffix.lower()
         try:
@@ -181,9 +187,10 @@ def load_documents_from_directory(
                 text = p.read_text(errors='replace')
                 docs = [Document(text=text, metadata={'file_p': str(p)})]
             documents.extend(docs)
+            count += 1
         except Exception:
             pass
-    return documents
+    return documents, count
 
 
 def repo_item(
@@ -209,15 +216,17 @@ def repo_item(
 
 def load_documents_from_git(
     source_path: str, extensions: list[str], sub_path: str, exclude: str,
-) -> list[Document]:
+) -> tuple[list[Document], int]:
     documents = []
+    count = 0
     for item in repo_item(source_path, extensions, sub_path, exclude):
         try:
             text = item.data_stream.read().decode(errors='replace')
             documents.append(Document(text=text, metadata={'file_path': item.path}))
+            count += 1
         except Exception:
             pass
-    return documents
+    return documents, count
 
 
 def build_file_manifest_document(documents: list[Document]) -> Document:
@@ -274,12 +283,6 @@ def get_model_context_length(model_name: str) -> int:
     return 2048
 
 
-def get_chunk_size_for_model(model_name: str) -> int:
-    context_length = get_model_context_length(model_name)
-    logger.info('model %s context length: %d', model_name, context_length)
-    return max(256, (context_length * 3) // 4)
-
-
 def chunk_text(
     text: str, chunk_size: int = 512, overlap: int = 64, filename: str = '',
 ) -> list[str]:
@@ -317,37 +320,37 @@ def build_collection(model_name: str) -> chromadb.Collection:
 
     if is_git_source():
         extensions = [e.strip() for e in config.git_extensions.split(',')]
-        documents = load_documents_from_git(
+        documents, doc_count = load_documents_from_git(
             config.source_path, extensions, config.source_sub_path, config.exclude)
     else:
         suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
-        documents = load_documents_from_directory(config.source_path, suffixes, config.exclude)
-    logger.info('loaded %d documents', len(documents))
+        documents, doc_count = load_documents_from_directory(
+            config.source_path, suffixes, config.exclude)
+    manifest = build_file_manifest_document(documents)
+    logger.info('loaded %d files', doc_count)
+    documents = [manifest] + documents
     check_embed_model_available(config.ollama_base_url, config.embed_model)
     logger.info('embedding model %s', config.embed_model)
-
-    manifest = build_file_manifest_document(documents)
-    documents = [manifest] + documents
-
     embed_model = OllamaEmbedding(
         model_name=config.embed_model,
         base_url=config.ollama_base_url,
     )
 
     all_texts = []
-    all_metadatas = []
+    all_metadata = []
 
     chunk_size = resolve_chunk_size()
     for doc in documents:
         for chunk in chunk_text(doc.text, chunk_size, config.chunk_overlap,
                                 doc.metadata.get('file_path', '')):
             all_texts.append(chunk)
-            all_metadatas.append(doc.metadata)
+            metadata = doc.metadata if doc.metadata else {'file_path': ''}
+            all_metadata.append(metadata)
 
     logger.debug('embedding %d chunks from %d documents', len(all_texts), len(documents))
 
     all_ids = [hashlib.sha256(f"{m.get('file_path','')}:{i}:{t}".encode()).hexdigest()[:32]
-               for i, (t, m) in enumerate(zip(all_texts, all_metadatas, strict=False))]
+               for i, (t, m) in enumerate(zip(all_texts, all_metadata, strict=False))]
     max_batch_size = chroma_client.get_max_batch_size()
     logger.debug('chromadb max batch size: %d', max_batch_size)
     # Suppress the per-request HTTP logs from httpx during the tight embedding
@@ -358,7 +361,7 @@ def build_collection(model_name: str) -> chromadb.Collection:
 
     kept_texts = []
     kept_embeddings = []
-    kept_metadatas = []
+    kept_metadata = []
     kept_ids = []
     total = len(all_texts)
     with tqdm.tqdm(
@@ -367,7 +370,7 @@ def build_collection(model_name: str) -> chromadb.Collection:
         unit='chunk',
         dynamic_ncols=True,
     ) as progress:
-        for i, (t, m, doc_id) in enumerate(zip(all_texts, all_metadatas, all_ids, strict=False)):
+        for i, (t, m, doc_id) in enumerate(zip(all_texts, all_metadata, all_ids, strict=False)):
             if _shutdown_event.is_set():
                 msg = 'Shutdown'
                 raise RuntimeError(msg)
@@ -384,7 +387,7 @@ def build_collection(model_name: str) -> chromadb.Collection:
                 continue
             kept_texts.append(t)
             kept_embeddings.append(embedding)
-            kept_metadatas.append(m)
+            kept_metadata.append(m)
             kept_ids.append(doc_id)
             progress.update(1)
 
@@ -401,7 +404,7 @@ def build_collection(model_name: str) -> chromadb.Collection:
         collection.add(
             documents=kept_texts[batch_start:batch_end],
             embeddings=kept_embeddings[batch_start:batch_end],
-            metadatas=kept_metadatas[batch_start:batch_end],
+            metadatas=kept_metadata[batch_start:batch_end],
             ids=kept_ids[batch_start:batch_end],
         )
     logger.info(
@@ -467,6 +470,22 @@ def get_collection(model_name: str) -> chromadb.Collection:
         return chroma_client.get_or_create_collection(cname)
 
 
+def select_top_k(distances: list[float], min_k: int, max_k: int) -> int:
+    if len(distances) < 2:
+        return len(distances)
+    best = distances[0]
+    worst = distances[-1]
+    spread = worst - best
+    if spread < 1e-6:
+        return max_k
+    drop_after_first = distances[1] - best
+    sharpness = drop_after_first / spread
+    if sharpness > 0.5:
+        return min_k
+    ratio = 1.0 - sharpness
+    return round(min_k + ratio * (max_k - min_k))
+
+
 def retrieve_context(model_name: str, query: str) -> str:
     collection = get_collection(model_name)
     embed_model = OllamaEmbedding(
@@ -476,7 +495,7 @@ def retrieve_context(model_name: str, query: str) -> str:
     if _shutdown_event.is_set():
         msg = 'Shutdown'
         raise RuntimeError(msg)
-    max_query_len = resolve_chunk_size()
+    max_query_len = resolve_chunk_size(forQuery=True)
     if len(query) > max_query_len:
         logger.info('query too long for embedding (%d chars), truncating to %d',
                     len(query), max_query_len)
@@ -484,13 +503,18 @@ def retrieve_context(model_name: str, query: str) -> str:
         half = (max_query_len - 5) // 2
         query = query[:half] + '\n...\n' + query[-half:]
     query_embedding = embed_model.get_text_embedding(query)
+    min_top_k = min(max(1, config.top_k // 2), collection.count())
+    max_top_k = min(config.top_k * 2, collection.count())
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=config.top_k,
+        n_results=max_top_k,
+        include=['documents', 'distances'],
     )
     documents = results.get('documents', [[]])[0]
-    logger.info('Adding context result documents: %d', len(documents))
-    return '\n\n---\n\n'.join(documents)
+    distances = results.get('distances', [[]])[0]
+    chosen_k = select_top_k(distances, min_top_k, max_top_k)
+    logger.info('Adding context result documents: %d', chosen_k)
+    return '\n\n---\n\n'.join(documents[:chosen_k])
 
 
 def extract_query_text(messages: list[dict]) -> str:
@@ -707,7 +731,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.environ.get('RAG_TOP_K', '5')),
         help='How much to context to fetch; default is 5.  Use larger values '
-        'for general queries, smaller values for targeted queries.',
+        'for general queries, smaller values for targeted queries.  A value '
+        'between half and twice this will be chosen based on recall '
+        'similarity.',
     )
     shared.add_argument(
         '--port',
