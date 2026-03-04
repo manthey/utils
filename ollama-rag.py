@@ -609,7 +609,8 @@ def cmd_serve(args):
 
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    thread.join()
+    while thread.is_alive():
+        thread.join(timeout=0.5)
     logging.getLogger('uvicorn.error').setLevel(logging.INFO)
     logging.getLogger('uvicorn.access').setLevel(logging.INFO)
 
