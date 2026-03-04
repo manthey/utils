@@ -39,6 +39,7 @@ import httpx
 import pathspec
 import tqdm
 import uvicorn
+from git import Repo
 from git.objects.blob import Blob
 from llama_index.core.node_parser import CodeSplitter
 from llama_index.core.schema import Document
@@ -170,7 +171,6 @@ def load_documents_from_directory(
 def repo_item(
     source_path: str, extensions: list[str], sub_path: str, exclude: [str],
 ) -> Generator[Blob, None, None]:
-    from git import Repo
 
     sub_path = sub_path.replace('\\', '/')
     prefix = sub_path.strip('/') + '/' if sub_path.strip('/') else ''
@@ -402,6 +402,21 @@ def get_collection(model_name: str) -> chromadb.Collection:
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
+    state_key = f'{model_name}:{config.source_path}:{config.embed_model}'
+
+    source_unavailable = False
+    source_path = Path(config.source_path)
+    if config.source_type == 'git' or (
+        config.source_type == 'auto' and (source_path / '.git').exists()
+    ):
+        try:
+            Repo(config.source_path)
+        except Exception:
+            source_unavailable = True
+    else:
+        if not source_path.exists() or not any(source_path.iterdir()):
+            source_unavailable = True
+
     if ((config.source_type == 'auto' and os.path.exists(os.path.join(
             config.source_path, '.git'))) or config.source_type == 'git'):
         extensions = [e.strip() for e in config.git_extensions.split(',')]
@@ -415,20 +430,27 @@ def get_collection(model_name: str) -> chromadb.Collection:
             _build_locks[fingerprint] = threading.Lock()
         lock = _build_locks[fingerprint]
     with lock:
-        data_dir = Path(config.data_dir)
-        chroma_dir = data_dir / 'chroma'
-        chroma_dir.mkdir(parents=True, exist_ok=True)
-
         state = load_state(data_dir)
-        state_key = f'{model_name}:{config.source_path}:{config.embed_model}'
         cached = state.get(state_key, {})
         chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
+        cname = collection_name(model_name, config.source_path, config.embed_model)
+        if source_unavailable and cached.get('fingerprint'):
+            try:
+                collection = chroma_client.get_collection(cname)
+                if collection.count() > 0:
+                    logger.info(
+                        'source path %r is unavailable; reusing existing embeddings',
+                        config.source_path,
+                    )
+                    return collection
+            except Exception:
+                pass
+            return None
         if cached.get('fingerprint') != fingerprint:
             collection = build_collection(model_name)
             state[state_key] = {'fingerprint': fingerprint, 'built_at': time.time()}
             save_state(data_dir, state)
             return collection
-        cname = collection_name(model_name, config.source_path, config.embed_model)
         return chroma_client.get_or_create_collection(cname)
 
 
