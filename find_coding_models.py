@@ -139,7 +139,7 @@ def has_gguf_files(siblings: list) -> bool:
     return False
 
 
-@cache.memoize(expire=86400)
+@cache.memoize(expire=86400 * 10)
 def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tuple[str, int, bool]]:
     def fetch():
         return list(api.list_repo_tree(repo_id, recursive=False))
@@ -185,6 +185,7 @@ def select_best_quantization(candidates: list[ModelInfo], gpu_memory_gb: float) 
     return fitting[0]
 
 
+@cache.memoize(expire=3600)
 def fetch_models_for_type(model_type: str, limit: int, downloads: int) -> list:
     tags = CODING_TAGS if model_type == 'coding' else VISION_TAGS
     all_models = []
@@ -213,7 +214,7 @@ def fetch_models_for_type(model_type: str, limit: int, downloads: int) -> list:
 
 def discover_models(  # noqa
     api: huggingface_hub.HfApi, gpu_memory_gb: float, model_filter: str, limit: int,
-    downloads: int,
+                    downloads: int, name_filter: str|None = None,
 ) -> list[ModelInfo]:
     print(f'Fetching {model_filter} models from HuggingFace...')
 
@@ -228,6 +229,8 @@ def discover_models(  # noqa
 
     with_gguf = []
     for model in all_models:
+        if name_filter and not re.search(name_filter, model.id, re.IGNORECASE):
+            continue
         siblings = getattr(model, 'siblings', None)
         if has_gguf_files(siblings):
             with_gguf.append(model)
@@ -247,10 +250,6 @@ def discover_models(  # noqa
             'coding' if matches_type(model.id, 'coding') else
             'vision' if matches_type(model.id, 'vision') else None
         )
-
-        if model_filter == 'all' and model_type is None:
-            skipped_name_mismatch += 1
-            continue
 
         if model_filter != 'all' and not matches_type(model.id, model_filter):
             skipped_name_mismatch += 1
@@ -333,12 +332,13 @@ def main():
     parser.add_argument(
         '-o', '--output-format', choices=['table', 'commands'], default='table',
         help='Output format (default: table)',
-    )
+        )
+    parser.add_argument('-r', '--regex', help='Filter model names via a case-insensitive regex.')
     args = parser.parse_args()
     api = huggingface_hub.HfApi()
     models = discover_models(
         api=api, gpu_memory_gb=args.gpu_memory_gb, model_filter=args.filter,
-        limit=args.limit, downloads=args.downloads,
+        limit=args.limit, downloads=args.downloads, name_filter=args.regex,
     )
     models.sort(key=lambda m: (-m.size_gb, m.repo_id))
     if args.output_format == 'table':
@@ -349,7 +349,7 @@ def main():
             repo_short = m.repo_id[:47] + '...' if len(m.repo_id) > 50 else m.repo_id
             print(
                 f'{repo_short:<50} {m.quantization:<7} {m.size_gb:<5.1f} '
-                f'{m.model_type[:4]:<4} {m.downloads:6} {chunked_str:<3}')
+                f'{str(m.model_type)[:4]:<4} {m.downloads:6} {chunked_str:<3}')
     else:
         print('# Ollama pull commands:')
         for m in models:
