@@ -10,7 +10,8 @@ def format_number(val):
     """Format a number of bytes using no more than five digits, a space,
      and a two letter suffix.
     Enter: val: a number to express as bytes.
-    Exit:  formatted_val: the formatted value."""
+    Exit:  formatted_val: the formatted value.
+    """
     factors = ' kMGTP'
     if val < 100000:
         return '%5d ' % val
@@ -20,8 +21,8 @@ def format_number(val):
         d = frm.find('.')
         if d < 0 or d > 3:
             continue
-        return frm[:5]+suffix
-    return frm.split('.')[0]+suffix
+        return frm[:5] + suffix
+    return frm.split('.')[0] + suffix
 
 
 if __name__ == '__main__':  # noqa
@@ -79,7 +80,7 @@ If no directory is specified, the current directory is used.
                         'base': base,
                         'name': key,
                         'root': path[len(absroot) + 1:pos],
-                        'len': 0
+                        'len': 0,
                     }
                 try:
                     flen = os.path.getsize(path)

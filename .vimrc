@@ -21,7 +21,7 @@ set wrap
 set nolbr
 " highlight all search matches
 set hls
-" The autodetect doesn't work very well. 
+" The autodetect doesn't work very well.
 set background=dark
 " make Spell turn on spell checking
 command Spell set spell spelllang=en_us
@@ -309,7 +309,7 @@ if executable('java')
         \ ? 'C:\Users\<you>\AppData\Local\langservers\jdtls'
         \ : expand('~/.local/share/langservers/jdtls')
     let s:launcher = globpath(s:jdtls_path . '/plugins', 'org.eclipse.equinox.launcher_*.jar')
-    if filereadable(s:launcher) 
+    if filereadable(s:launcher)
         if has('win32') || has('win64')
             let s:config = s:jdtls_path . '\config_win'
         else
@@ -330,7 +330,7 @@ if executable('java')
             \ ]},
             \ 'whitelist': ['java'],
             \ })
-    endif        
+    endif
 endif
 let g:lsp_diagnostics_enabled = 0
 let g:lsp_diagnostics_virtual_text_enabled = 0
@@ -356,7 +356,7 @@ inoremap <expr> <Right> pumvisible() ? "\<C-e>\<Right>" : "\<Right>"
 " inoremap <expr> <Up>    pumvisible() && complete_info().selected != -1 ? "\<C-p>" : "\<Up>"
 " inoremap <expr> <Left>  pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Left>" : "\<Left>"
 " inoremap <expr> <Right> pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Right>" : "\<Right>"
-highlight Pmenu      ctermfg=LightGray ctermbg=DarkBlue 
+highlight Pmenu      ctermfg=LightGray ctermbg=DarkBlue
 highlight PmenuSel   ctermfg=Black ctermbg=Yellow
 highlight PmenuSbar  ctermfg=NONE  ctermbg=DarkBlue
 highlight PmenuThumb ctermfg=NONE  ctermbg=White
@@ -368,4 +368,3 @@ highlight link markdownHeadingDelimiter Normal
 
 set completeopt=menuone,noinsert,noselect
 set shortmess+=c
-

@@ -45,6 +45,7 @@ lint.ignore = [
     "SIM401",
     # "SIM105",
     "T201",
+    "T203",
 ]
 line-length = 100
 lint.select = [

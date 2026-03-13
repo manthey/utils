@@ -213,8 +213,8 @@ def fetch_models_for_type(model_type: str, limit: int, downloads: int) -> list:
 
 
 def discover_models(  # noqa
-    api: huggingface_hub.HfApi, gpu_memory_gb: float, model_filter: str, limit: int,
-                    downloads: int, name_filter: str|None = None,
+    api: huggingface_hub.HfApi, gpu_memory_gb: float, model_filter: str,
+    limit: int, downloads: int, name_filter: str | None = None,
 ) -> list[ModelInfo]:
     print(f'Fetching {model_filter} models from HuggingFace...')
 
@@ -332,7 +332,7 @@ def main():
     parser.add_argument(
         '-o', '--output-format', choices=['table', 'commands'], default='table',
         help='Output format (default: table)',
-        )
+    )
     parser.add_argument('-r', '--regex', help='Filter model names via a case-insensitive regex.')
     args = parser.parse_args()
     api = huggingface_hub.HfApi()

@@ -10,7 +10,7 @@ Verbose = 0
 
 def sha512sum(filename):
     h = hashlib.sha512()
-    b = bytearray(128*1024)
+    b = bytearray(128 * 1024)
     mv = memoryview(b)
     with open(filename, 'rb', buffering=0) as f:
         for n in iter(lambda: f.readinto(mv), 0):
@@ -46,7 +46,7 @@ Syntax: dedup_via_hardlink.py [(root directory) ...] -s -v --exclude=(regex)
 
 If no directory is specified, the current directory is used.
 --excludes paths based on a regular expression.  For instance, "\\.py$"
- excludes python files, and "/\.git/" excludes .git directories on linux.
+ excludes python files, and "/\\.git/" excludes .git directories on linux.
 -s simulates the action, printing what would occur but not doing it.
 -v increases verbosity.""")
         sys.exit(0)
@@ -56,7 +56,7 @@ If no directory is specified, the current directory is used.
         bases.append('.')
     for root in bases:
         absroot = os.path.abspath(os.path.expanduser(root))
-        for base, dirs, filenames in os.walk(absroot):
+        for base, _dirs, filenames in os.walk(absroot):
             if os.sep + '$RECYCLE.BIN' + os.sep in base:
                 continue
             for filename in filenames:
@@ -77,7 +77,7 @@ If no directory is specified, the current directory is used.
             continue
         matched_ino = set()
         skipped_ino = set()
-        for other in filelist[idx+1:]:
+        for other in filelist[idx + 1:]:
             if files[src]['st_size'] != files[other]['st_size']:
                 continue
             if files[src]['st_dev'] != files[other]['st_dev']:
@@ -89,15 +89,15 @@ If no directory is specified, the current directory is used.
             if 'sha' not in files[src]:
                 try:
                     files[src]['sha'] = sha512sum(src)
-                except PermissionError:  # noqa
+                except PermissionError:
                     break
             if files[other]['st_ino'] in skipped_ino:
                 continue
-            if not files[other]['st_ino'] in matched_ino:
+            if files[other]['st_ino'] not in matched_ino:
                 if 'sha' not in files[other]:
                     try:
                         files[other]['sha'] = sha512sum(other)
-                    except PermissionError:  # noqa
+                    except PermissionError:
                         continue
                 if files[src]['sha'] != files[other]['sha']:
                     skipped_ino.add(files[other]['st_ino'])

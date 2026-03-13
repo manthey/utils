@@ -4,8 +4,8 @@ import argparse
 
 
 def diffpip(list1str, list2str):
-    list1 = set(entry for entry in list1str.strip().replace('\n', ',').split(',') if '==' in entry)
-    list2 = set(entry for entry in list2str.strip().replace('\n', ',').split(',') if '==' in entry)
+    list1 = {entry for entry in list1str.strip().replace('\n', ',').split(',') if '==' in entry}
+    list2 = {entry for entry in list2str.strip().replace('\n', ',').split(',') if '==' in entry}
     diff1 = list1 - list2
     diff2 = list2 - list1
     prefix1 = {entry.split('==')[0]: entry.split('==', 1)[-1] for entry in diff1}

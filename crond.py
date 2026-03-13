@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 
-import crontab
 import os
-import servicemanager
 import subprocess
 import sys
 import threading
 import time
+
+import crontab
+import servicemanager
 import win32event
 import win32service
 import win32serviceutil
-
 
 LogLock = threading.Lock()
 LogPath = '~'
@@ -154,7 +154,7 @@ def log(msg, verbose=0):
     data = '%s - %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg.strip())
     path = os.path.join(LogPath, 'cron.log')
     with LogLock:
-        open(path, 'at').write(data + '\n')
+        open(path, 'a').write(data + '\n')
         if verbose >= 1:
             print(data)
 
@@ -192,7 +192,7 @@ def start_command(entry, verbose=0):
     entry['thread'].start()
 
 
-if __name__ == '__main__':  # noqa
+if __name__ == '__main__':
     help = False
     verbose = 1
     windowsService = False

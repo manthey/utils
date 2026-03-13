@@ -60,7 +60,7 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
         path = os.path.join(os.path.expanduser(build), 'Makefile')
         if not os.path.exists(path):
             return
-        basepath = os.path.abspath(open(path, 'rt').read().split(
+        basepath = os.path.abspath(open(path).read().split(
             'CMAKE_SOURCE_DIR = ')[1].split('\n')[0])
     if Verbose >= 1:
         print('basepath: %s' % basepath)
@@ -69,8 +69,7 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
         filename = part.split('filename="', 1)[1].split('"', 1)[0]
         filename = os.path.join(basepath, filename)
         filename, isLocal = localizeFilename(filename)
-        if (filename.startswith('build/') or filename.startswith('_build/') or
-                filename.startswith('.tox/') or filename.startswith('node_modules/')):
+        if filename.startswith(('build/', '_build/', '.tox/', 'node_modules/')):
             isLocal = False
         if ((onlyLocal and not isLocal) or 'manthey' in filename):
             continue
@@ -153,11 +152,11 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
             xml = None
             if path is not None and os.path.exists(path):
                 try:
-                    xml = open(path, 'rt').read()
+                    xml = open(path).read()
                     if Verbose >= 1:
                         print('XML: %s' % path)
                     anyPath = True
-                except IOError:
+                except OSError:
                     continue
             if path is None and not anyPath:
                 xml = subprocess.Popen(
@@ -271,14 +270,14 @@ def show_file(cover, file, altpath=None, reportPartial=False):
     """
     if altpath and not os.path.exists(file):
         altfile = os.path.join(altpath, os.path.basename(file))
-        data = open(altfile, 'rt').readlines()
+        data = open(altfile).readlines()
     elif os.path.exists(file):
-        data = open(file, 'rt').readlines()
+        data = open(file).readlines()
     else:
         print('   Cannot find file %s' % file)
         return
     for i in range(len(data)):
-        if not (i + 1) in cover[file]['lines']:
+        if (i + 1) not in cover[file]['lines']:
             mark = ' '
         elif reportPartial and cover[file]['partial'].get(i + 1):
             mark = (('%d' % cover[file]['partial'][i + 1][0])

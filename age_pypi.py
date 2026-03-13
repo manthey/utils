@@ -36,7 +36,7 @@ def age_pypi(liststr, ageInDays=0, onlyDifferent=False, pyversion=None, onlyBina
         pyversion = packaging.version.Version(pyversion)
 
     header = False
-    for package, val in sorted(packages.items()):  # noqa
+    for package, val in sorted(packages.items()):
         req = requests.get('https://pypi.org/pypi/%s/json' % package)
         pver = packaging.version.parse(val)
         try:

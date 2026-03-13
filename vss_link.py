@@ -1,8 +1,9 @@
 import argparse
 import os
 import pprint
-import pywintypes
 import sys
+
+import pywintypes
 import win32com.client
 
 
@@ -24,14 +25,14 @@ def vss_create(drive):
 
 def vss_delete(id):
     wcd = win32com.client.Dispatch('WbemScripting.SWbemLocator')
-    wmi = wcd.ConnectServer('.', 'root\cimv2')
+    wmi = wcd.ConnectServer('.', r'root\cimv2')
     obj = wmi.ExecQuery('SELECT * FROM Win32_ShadowCopy WHERE ID="%s"' % id)
     obj[0].Delete_()
 
 
 def vss_list():
     wcd = win32com.client.Dispatch('WbemScripting.SWbemLocator')
-    wmi = wcd.ConnectServer('.', 'root\cimv2')
+    wmi = wcd.ConnectServer('.', r'root\cimv2')
     obj = wmi.ExecQuery('SELECT * FROM Win32_ShadowCopy')
     results = []
     try:

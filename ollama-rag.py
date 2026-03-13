@@ -137,10 +137,10 @@ def source_fingerprint_git(
     return hasher.hexdigest()
 
 
-def collection_name(model_name: str, source_path: str, embed_model: str,
+def collection_name(source_path: str, embed_model: str,
                     chunk_size: int, chunk_overlap: int) -> str:
     name = 'rag_' + hashlib.sha256(
-        f'{model_name}:{source_path}:{embed_model}:{chunk_size}:{chunk_overlap}'.encode(),
+        f'{source_path}:{embed_model}:{chunk_size}:{chunk_overlap}'.encode(),
     ).hexdigest()[:16]
     logger.info('collection name %s', name)
     return name
@@ -303,13 +303,13 @@ def chunk_text(
     return chunks
 
 
-def build_collection(model_name: str) -> chromadb.Collection:
+def build_collection() -> chromadb.Collection:
     data_dir = Path(config.data_dir)
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
     cname = collection_name(
-        model_name, config.source_path, config.embed_model, config.chunk_size,
+        config.source_path, config.embed_model, config.chunk_size,
         config.chunk_overlap)
     chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
     try:
@@ -349,7 +349,7 @@ def build_collection(model_name: str) -> chromadb.Collection:
 
     logger.debug('embedding %d chunks from %d documents', len(all_texts), len(documents))
 
-    all_ids = [hashlib.sha256(f"{m.get('file_path','')}:{i}:{t}".encode()).hexdigest()[:32]
+    all_ids = [hashlib.sha256(f"{m.get('file_path', '')}:{i}:{t}".encode()).hexdigest()[:32]
                for i, (t, m) in enumerate(zip(all_texts, all_metadata, strict=False))]
     max_batch_size = chroma_client.get_max_batch_size()
     logger.debug('chromadb max batch size: %d', max_batch_size)
@@ -414,12 +414,12 @@ def build_collection(model_name: str) -> chromadb.Collection:
     return collection
 
 
-def get_collection(model_name: str) -> chromadb.Collection:
+def get_collection() -> chromadb.Collection:
     data_dir = Path(config.data_dir)
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
-    state_key = f'{model_name}:{config.source_path}:{config.embed_model}'
+    state_key = f'{config.source_path}:{config.embed_model}'
 
     source_unavailable = False
     source_path = Path(config.source_path)
@@ -448,7 +448,7 @@ def get_collection(model_name: str) -> chromadb.Collection:
         cached = state.get(state_key, {})
         chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
         cname = collection_name(
-            model_name, config.source_path, config.embed_model,
+            config.source_path, config.embed_model,
             config.chunk_size, config.chunk_overlap)
         if source_unavailable and cached.get('fingerprint'):
             try:
@@ -463,7 +463,7 @@ def get_collection(model_name: str) -> chromadb.Collection:
                 pass
             return None
         if cached.get('fingerprint') != fingerprint:
-            collection = build_collection(model_name)
+            collection = build_collection()
             state[state_key] = {'fingerprint': fingerprint, 'built_at': time.time()}
             save_state(data_dir, state)
             return collection
@@ -486,8 +486,8 @@ def select_top_k(distances: list[float], min_k: int, max_k: int) -> int:
     return round(min_k + ratio * (max_k - min_k))
 
 
-def retrieve_context(model_name: str, query: str) -> str:
-    collection = get_collection(model_name)
+def retrieve_context(query: str) -> str:
+    collection = get_collection()
     embed_model = OllamaEmbedding(
         model_name=config.embed_model,
         base_url=config.ollama_base_url,
@@ -559,7 +559,6 @@ def inject_context(body: dict, context: str) -> dict:
 async def chat_completions(request: fastapi.Request):
     body = await request.json()
     client_wants_stream = body.get('stream', False)
-    model_name = body.get('model', '')
     messages = body.get('messages', [])
     query = extract_query_text(messages)
     logger.debug('query: %s, stream: %s', query, client_wants_stream)
@@ -567,7 +566,7 @@ async def chat_completions(request: fastapi.Request):
 
     if query and config.source_path:
         try:
-            context = await asyncio.to_thread(retrieve_context, model_name, query)
+            context = await asyncio.to_thread(retrieve_context, query)
             logger.debug('context length: %d', len(context))
             body = inject_context(body, context)
         except Exception:
