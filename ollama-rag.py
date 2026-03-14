@@ -918,15 +918,51 @@ def cmd_serve(args):
     logging.getLogger('uvicorn.access').setLevel(logging.INFO)
 
 
+def purge_inactive(data_dir: Path) -> None:
+    chroma_dir = data_dir / 'chroma'
+    if not chroma_dir.exists():
+        return
+    index = load_file_index(data_dir)
+    if not index:
+        return
+    chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
+    total_deleted = 0
+    for cname, coll_entry in index.items():
+        try:
+            collection = chroma_client.get_collection(cname)
+        except Exception:
+            continue
+        files_entry = coll_entry.get('files', {})
+        ids_to_delete = []
+        files_to_remove = []
+        for fp, file_entry in files_entry.items():
+            if fp == '__manifest__':
+                continue
+            active_sha = file_entry.get('active_sha', '')
+            versions = file_entry.get('versions', {})
+            inactive_shas = [sha for sha in versions if sha != active_sha]
+            for sha in inactive_shas:
+                ids_to_delete.extend(versions.pop(sha))
+            if not active_sha:
+                files_to_remove.append(fp)
+        delete_chunks(collection, ids_to_delete)
+        for fp in files_to_remove:
+            del files_entry[fp]
+        total_deleted += len(ids_to_delete)
+        print(f'Collection {cname}: deleted {len(ids_to_delete)} inactive chunks, '
+              f'removed {len(files_to_remove)} deleted-file entries.')
+    save_file_index(data_dir, index)
+    print(f'Total chunks deleted: {total_deleted}.')
+
+
 def cmd_clear(args):
     data_dir = Path(args.data_dir)
-    chroma_dir = data_dir / 'chroma'
-    file_index = data_dir / 'file_index.json'
-    if chroma_dir.exists():
-        shutil.rmtree(chroma_dir)
-    if file_index.exists():
-        file_index.unlink()
-    print('Cleared.')
+    if data_dir.exists():
+        if args.purge:
+            purge_inactive(data_dir)
+        else:
+            shutil.rmtree(data_dir)
+            print('Cleared.')
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -938,11 +974,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f'Cache directory; default is {default_data_dir}',
     )
     shared.add_argument(
+        '--verbose', '-v', action='count', default=0, help='Increase verbosity')
+    parser = argparse.ArgumentParser(description='Local RAG proxy for Ollama')
+    subparsers = parser.add_subparsers(dest='command', required=True)
+    serve = subparsers.add_parser('serve', parents=[shared])
+    clear = subparsers.add_parser('clear', parents=[shared])
+    serve.add_argument(
         '--ollama-base-url',
         default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
         help='Ollama URL; default is http://localhost:11434',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--embed-model', '-e',
         default=os.environ.get('RAG_EMBED_MODEL', 'nomic-embed-text'),
         help='Embedding model; default is nomic-embed-text.  Others are '
@@ -950,40 +992,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
         'snowflake-arctic-embed, bge-m3 (multilingual), bge-large (English). '
         'Do ollama pull on the model before using it.',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--source-type',
         choices=['directory', 'git', 'auto'],
         default=os.environ.get('RAG_SOURCE_TYPE', 'auto'),
         help='Auto checks for a .git folder.  If git, only tracked files are used.',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--source-path', '-s',
         default=os.environ.get('RAG_SOURCE_PATH', ''),
         help='The root of the git repo or documents to embed',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--source-sub-path',
         default=os.environ.get('RAG_SOURCE_SUB_PATH', ''),
         help='For git repos, only embed files within this subpath',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--exclude', '-x',
         default=os.environ.get('RAG_EXCLUDE', ''),
         help='A comma-separated list of paths and file signatures to exclude',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--git-extensions',
         default=os.environ.get('RAG_GIT_EXTENSIONS', '.py,.js,.java,.ts,.md,.rst'),
         help='Only process specific file types in a git repo; default is '
         "'.py,.js,.java,.ts,.md,.rst'.",
     )
-    shared.add_argument(
+    serve.add_argument(
         '--dir-suffixes',
         default=os.environ.get('RAG_DIR_SUFFIXES', '.txt,.md,.pdf,.docx,.rst'),
         help='Only process specific file types in a non-git source folder; '
         "default is '.txt,.md,.pdf,.docx,.rst'",
     )
-    shared.add_argument(
+    serve.add_argument(
         '--top-k',
         type=int,
         default=int(os.environ.get('RAG_TOP_K', '5')),
@@ -992,36 +1034,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
         'between half and twice this will be chosen based on recall '
         'similarity.',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--host',
         type=str,
         default='0.0.0.0',
         help='Proxy host; default is 0.0.0.0.  Using localhost is more secure.',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--port',
         type=int,
         default=int(os.environ.get('RAG_PROXY_PORT', '11435')),
         help='Proxy port; default is 11435',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--chunk-size',
         type=int,
         default=int(os.environ.get('RAG_CHUNK_SIZE', '0')),
         help='Embedding chunk size; default or 0 is determined by model.  Too big will fail',
     )
-    shared.add_argument(
+    serve.add_argument(
         '--chunk-overlap',
         type=int,
         default=int(os.environ.get('RAG_CHUNK_OVERLAP', '64')),
         help='Embedding chunk overlap; default is 64',
     )
-    shared.add_argument(
-        '--verbose', '-v', action='count', default=0, help='Increase verbosity')
-    parser = argparse.ArgumentParser(description='Local RAG proxy for Ollama')
-    subparsers = parser.add_subparsers(dest='command', required=True)
-    subparsers.add_parser('serve', parents=[shared])
-    subparsers.add_parser('clear', parents=[shared])
+    clear.add_argument(
+        '--purge', action='store_true',
+        help='Remove inactive chunks and deleted-file entries without destroying active data',
+    )
     return parser
 
 
