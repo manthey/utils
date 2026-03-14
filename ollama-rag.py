@@ -117,6 +117,7 @@ def list_paths(
 
 
 def source_fingerprint_directory(source_path: str, suffixes: list[str], exclude: str) -> str:
+    """Compute a fingerprint over all matching files in a directory by path and mtime."""
     hasher = hashlib.sha256()
     logging.getLogger('uvicorn').setLevel(logging.CRITICAL)
     for p in list_paths(source_path, suffixes, exclude):
@@ -129,6 +130,7 @@ def source_fingerprint_directory(source_path: str, suffixes: list[str], exclude:
 def source_fingerprint_git(
     source_path: str, extensions: list[str], sub_path: str, exclude: str,
 ) -> str:
+    """Compute a fingerprint over all matching git blobs by path and hexsha."""
     hasher = hashlib.sha256()
     for item in repo_item(source_path, extensions, sub_path, exclude):
         logger.debug('%s (%d)', item.path, item.size)
@@ -172,6 +174,7 @@ def strip_hop_by_hop_headers(headers: dict) -> dict:
 def load_documents_from_directory(
     source_path: str, suffixes: list[str], exclude: [str],
 ) -> tuple[list[Document], int]:
+    """Load documents from a directory, computing file_sha, file_size, and file_mtime metadata."""
     documents = []
     count = 0
     for p in list_paths(source_path, suffixes, exclude):
@@ -179,13 +182,27 @@ def load_documents_from_directory(
         try:
             if suffix == '.pdf':
                 docs = PDFReader().load_data(p)
+                raw_bytes = p.read_bytes()
             elif suffix == '.docx':
                 docs = DocxReader().load_data(p)
+                raw_bytes = p.read_bytes()
             elif suffix == '.md':
                 docs = MarkdownReader().load_data(p)
+                raw_bytes = p.read_bytes()
             else:
-                text = p.read_text(errors='replace')
-                docs = [Document(text=text, metadata={'file_p': str(p)})]
+                raw_bytes = p.read_bytes()
+                text = raw_bytes.decode(errors='replace')
+                docs = [Document(text=text, metadata={'file_path': str(p)})]
+            file_sha = hashlib.sha256(raw_bytes).hexdigest()
+            file_size = len(raw_bytes)
+            file_mtime = p.stat().st_mtime
+            for doc in docs:
+                if not doc.metadata:
+                    doc.metadata = {}
+                doc.metadata['file_path'] = doc.metadata.get('file_path') or str(p)
+                doc.metadata['file_sha'] = file_sha
+                doc.metadata['file_size'] = file_size
+                doc.metadata['file_mtime'] = file_mtime
             documents.extend(docs)
             count += 1
         except Exception:
@@ -217,12 +234,18 @@ def repo_item(
 def load_documents_from_git(
     source_path: str, extensions: list[str], sub_path: str, exclude: str,
 ) -> tuple[list[Document], int]:
+    """Load documents from a git repo, using blob hexsha as file_sha."""
     documents = []
     count = 0
     for item in repo_item(source_path, extensions, sub_path, exclude):
         try:
             text = item.data_stream.read().decode(errors='replace')
-            documents.append(Document(text=text, metadata={'file_path': item.path}))
+            documents.append(Document(text=text, metadata={
+                'file_path': item.path,
+                'file_sha': item.hexsha,
+                'file_size': item.size,
+                'file_mtime': 0,
+            }))
             count += 1
         except Exception:
             pass
@@ -285,22 +308,61 @@ def get_model_context_length(model_name: str) -> int:
 
 def chunk_text(
     text: str, chunk_size: int = 512, overlap: int = 64, filename: str = '',
-) -> list[str]:
+) -> list[dict]:
+    """Split text into chunks with positional metadata.
+
+    Returns a list of dicts, each with keys:
+        text: the chunk text
+        byte_offset: byte offset of the chunk within the original text (using UTF-8 encoding)
+        line_start: 1-based starting line number
+        line_end: 1-based ending line number
+    """
     ext = '.' + filename.rsplit('.', 1)[-1] if '.' in filename else ''
     language = EXTENSION_TO_LANGUAGE.get(ext)
 
+    text_bytes = text.encode('utf-8')
+
     if language:
-        return CodeSplitter(
+        raw_chunks = CodeSplitter(
             language=language, chunk_lines=chunk_size // 16, chunk_lines_overlap=overlap // 16,
             max_chars=chunk_size).split_text(text)
+        results = []
+        search_start = 0
+        for chunk in raw_chunks:
+            chunk_bytes = chunk.encode('utf-8')
+            idx = text_bytes.find(chunk_bytes, search_start)
+            if idx == -1:
+                # Fallback: if exact match fails, use current search_start
+                idx = search_start
+            byte_offset = idx
+            line_start = text_bytes[:byte_offset].count(b'\n') + 1
+            line_end = line_start + chunk.count('\n')
+            results.append({
+                'text': chunk,
+                'byte_offset': byte_offset,
+                'line_start': line_start,
+                'line_end': line_end,
+            })
+            search_start = idx + len(chunk_bytes)
+        return results
 
-    chunks = []
+    results = []
     start = 0
     while start < len(text):
         end = min(start + chunk_size, len(text))
-        chunks.append(text[start:end])
+        chunk = text[start:end]
+        # Compute byte offset: encode everything before `start` to find byte position
+        byte_offset = len(text[:start].encode('utf-8'))
+        line_start = text[:start].count('\n') + 1
+        line_end = line_start + chunk.count('\n')
+        results.append({
+            'text': chunk,
+            'byte_offset': byte_offset,
+            'line_start': line_start,
+            'line_end': line_end,
+        })
         start += chunk_size - overlap
-    return chunks
+    return results
 
 
 def build_collection() -> chromadb.Collection:
@@ -341,16 +403,29 @@ def build_collection() -> chromadb.Collection:
 
     chunk_size = resolve_chunk_size()
     for doc in documents:
-        for chunk in chunk_text(doc.text, chunk_size, config.chunk_overlap,
-                                doc.metadata.get('file_path', '')):
-            all_texts.append(chunk)
-            metadata = doc.metadata if doc.metadata else {'file_path': ''}
-            all_metadata.append(metadata)
+        file_path = (doc.metadata or {}).get('file_path', '')
+        file_sha = (doc.metadata or {}).get('file_sha', '')
+        file_size = (doc.metadata or {}).get('file_size', 0)
+        file_mtime = (doc.metadata or {}).get('file_mtime', 0)
+        for chunk_info in chunk_text(doc.text, chunk_size, config.chunk_overlap, file_path):
+            all_texts.append(chunk_info['text'])
+            all_metadata.append({
+                'file_path': file_path,
+                'file_sha': file_sha,
+                'file_size': file_size,
+                'file_mtime': file_mtime,
+                'byte_offset': chunk_info['byte_offset'],
+                'line_start': chunk_info['line_start'],
+                'line_end': chunk_info['line_end'],
+                'active': True,
+            })
 
     logger.debug('embedding %d chunks from %d documents', len(all_texts), len(documents))
 
-    all_ids = [hashlib.sha256(f"{m.get('file_path', '')}:{i}:{t}".encode()).hexdigest()[:32]
-               for i, (t, m) in enumerate(zip(all_texts, all_metadata, strict=False))]
+    all_ids = [
+        hashlib.sha256(f"{m['file_sha']}:{m['byte_offset']}:{t}".encode()).hexdigest()[:32]
+        for t, m in zip(all_texts, all_metadata, strict=False)
+    ]
     max_batch_size = chroma_client.get_max_batch_size()
     logger.debug('chromadb max batch size: %d', max_batch_size)
     # Suppress the per-request HTTP logs from httpx during the tight embedding
@@ -419,7 +494,8 @@ def get_collection() -> chromadb.Collection:
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
-    state_key = f'{config.source_path}:{config.embed_model}'
+    state_key = (f'{config.source_path}:{config.embed_model}:'
+                 f'{config.chunk_size}:{config.chunk_overlap}')
 
     source_unavailable = False
     source_path = Path(config.source_path)
@@ -495,6 +571,10 @@ def retrieve_context(query: str) -> str:
     if _shutdown_event.is_set():
         msg = 'Shutdown'
         raise RuntimeError(msg)
+    count = collection.count()
+    if not count:
+        logger.info('collection is empty, no context to retrieve')
+        return ''
     max_query_len = resolve_chunk_size(forQuery=True)
     if len(query) > max_query_len:
         logger.info('query too long for embedding (%d chars), truncating to %d',
@@ -503,8 +583,8 @@ def retrieve_context(query: str) -> str:
         half = (max_query_len - 5) // 2
         query = query[:half] + '\n...\n' + query[-half:]
     query_embedding = embed_model.get_text_embedding(query)
-    min_top_k = min(max(1, config.top_k // 2), collection.count())
-    max_top_k = min(config.top_k * 2, collection.count())
+    min_top_k = min(max(1, config.top_k // 2), count)
+    max_top_k = min(config.top_k * 2, count)
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=max_top_k,
