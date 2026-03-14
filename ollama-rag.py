@@ -28,7 +28,6 @@ import os
 import shutil
 import signal
 import threading
-import time
 from collections.abc import Generator
 from pathlib import Path
 
@@ -86,21 +85,21 @@ _build_locks_mutex = threading.Lock()
 _build_locks: dict[str, threading.Lock] = {}
 
 
-def load_state(data_dir: Path) -> dict:
-    state_file = data_dir / 'state.json'
-    if state_file.exists():
-        return json.loads(state_file.read_text())
+def load_file_index(data_dir: Path) -> dict:
+    path = data_dir / 'file_index.json'
+    if path.exists():
+        return json.loads(path.read_text())
     return {}
 
 
-def save_state(data_dir: Path, state: dict) -> None:
-    state_file = data_dir / 'state.json'
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(state))
+def save_file_index(data_dir: Path, index: dict) -> None:
+    path = data_dir / 'file_index.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(index))
 
 
 def list_paths(
-    source_path: str, suffixes: list[str], exclude: [str],
+    source_path: str, suffixes: list[str], exclude: list[str],
 ) -> Generator[Path, None, None]:
     source = Path(source_path)
     exclude_patterns = [p.strip() for p in (exclude or '').split(',') if p.strip()]
@@ -116,33 +115,29 @@ def list_paths(
         yield p
 
 
-def source_fingerprint_directory(source_path: str, suffixes: list[str], exclude: str) -> str:
-    """Compute a fingerprint over all matching files in a directory by path and mtime."""
-    hasher = hashlib.sha256()
-    logging.getLogger('uvicorn').setLevel(logging.CRITICAL)
+def current_file_hashes_directory(
+    source_path: str, suffixes: list[str], exclude: str,
+) -> dict[str, str]:
+    """Return {relative_path: sha256_of_content} for all matching files."""
+    result = {}
     for p in list_paths(source_path, suffixes, exclude):
+        rel = p.relative_to(source_path).as_posix()
         logger.debug('%s (%d)', p, os.path.getsize(p))
-        hasher.update(str(p).encode())
-        hasher.update(str(p.stat().st_mtime).encode())
-    return hasher.hexdigest()
+        result[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return result
 
 
-def source_fingerprint_git(
+def current_file_hashes_git(
     source_path: str, extensions: list[str], sub_path: str, exclude: str,
-) -> str:
-    """Compute a fingerprint over all matching git blobs by path and hexsha."""
-    hasher = hashlib.sha256()
-    for item in repo_item(source_path, extensions, sub_path, exclude):
-        logger.debug('%s (%d)', item.path, item.size)
-        hasher.update(item.path.encode())
-        hasher.update(item.hexsha.encode())
-    return hasher.hexdigest()
+) -> dict[str, str]:
+    """Return {path: hexsha} for all matching blobs in the git repo."""
+    return {item.path: item.hexsha
+            for item in repo_item(source_path, extensions, sub_path, exclude)}
 
 
-def collection_name(source_path: str, embed_model: str,
-                    chunk_size: int, chunk_overlap: int) -> str:
+def collection_name(embed_model: str, chunk_size: int, chunk_overlap: int) -> str:
     name = 'rag_' + hashlib.sha256(
-        f'{source_path}:{embed_model}:{chunk_size}:{chunk_overlap}'.encode(),
+        f'{embed_model}:{chunk_size}:{chunk_overlap}'.encode(),
     ).hexdigest()[:16]
     logger.info('collection name %s', name)
     return name
@@ -159,7 +154,6 @@ def resolve_chunk_size(forQuery: bool = False) -> int:
         logger.info('model %s context length: %d', config.embed_model, context_length)
         chunk_size = max(256, (context_length * 3) // 4)
         if not forQuery:
-            # This is a poor heuristic, but better than giant chunks.
             chunk_size = min(chunk_size, 8192)
         logger.info('auto chunk size: %d', chunk_size)
         return chunk_size
@@ -172,7 +166,7 @@ def strip_hop_by_hop_headers(headers: dict) -> dict:
 
 
 def load_documents_from_directory(
-    source_path: str, suffixes: list[str], exclude: [str],
+    source_path: str, suffixes: list[str], exclude: list[str],
 ) -> tuple[list[Document], int]:
     """Load documents from a directory, computing file_sha, file_size, and file_mtime metadata."""
     documents = []
@@ -211,9 +205,8 @@ def load_documents_from_directory(
 
 
 def repo_item(
-    source_path: str, extensions: list[str], sub_path: str, exclude: [str],
+    source_path: str, extensions: list[str], sub_path: str, exclude: list[str],
 ) -> Generator[git.objects.blob.Blob, None, None]:
-
     sub_path = sub_path.replace('\\', '/')
     prefix = sub_path.strip('/') + '/' if sub_path.strip('/') else ''
     exclude_patterns = [p.strip() for p in (exclude or '').split(',') if p.strip()]
@@ -264,10 +257,6 @@ def build_file_manifest_document(documents: list[Document]) -> Document:
 
 
 def check_embed_model_available(base_url: str, model_name: str) -> None:
-    """
-    Raise RuntimeError if the embedding model cannot be reached or is not
-    listed.
-    """
     try:
         with httpx.Client(timeout=10) as client:
             response = client.post(
@@ -313,7 +302,7 @@ def chunk_text(
 
     Returns a list of dicts, each with keys:
         text: the chunk text
-        byte_offset: byte offset of the chunk within the original text (using UTF-8 encoding)
+        byte_offset: byte offset of the chunk within the original UTF8 text
         line_start: 1-based starting line number
         line_end: 1-based ending line number
     """
@@ -332,7 +321,6 @@ def chunk_text(
             chunk_bytes = chunk.encode('utf-8')
             idx = text_bytes.find(chunk_bytes, search_start)
             if idx == -1:
-                # Fallback: if exact match fails, use current search_start
                 idx = search_start
             byte_offset = idx
             line_start = text_bytes[:byte_offset].count(b'\n') + 1
@@ -351,7 +339,6 @@ def chunk_text(
     while start < len(text):
         end = min(start + chunk_size, len(text))
         chunk = text[start:end]
-        # Compute byte offset: encode everything before `start` to find byte position
         byte_offset = len(text[:start].encode('utf-8'))
         line_start = text[:start].count('\n') + 1
         line_end = line_start + chunk.count('\n')
@@ -369,17 +356,13 @@ def build_collection() -> chromadb.Collection:
     data_dir = Path(config.data_dir)
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
-
-    cname = collection_name(
-        config.source_path, config.embed_model, config.chunk_size,
-        config.chunk_overlap)
+    cname = collection_name(config.embed_model, config.chunk_size, config.chunk_overlap)
     chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
     try:
         chroma_client.delete_collection(cname)
     except Exception:
         pass
     collection = chroma_client.create_collection(cname)
-
     if is_git_source():
         extensions = [e.strip() for e in config.git_extensions.split(',')]
         documents, doc_count = load_documents_from_git(
@@ -397,10 +380,8 @@ def build_collection() -> chromadb.Collection:
         model_name=config.embed_model,
         base_url=config.ollama_base_url,
     )
-
     all_texts = []
     all_metadata = []
-
     chunk_size = resolve_chunk_size()
     for doc in documents:
         file_path = (doc.metadata or {}).get('file_path', '')
@@ -419,21 +400,16 @@ def build_collection() -> chromadb.Collection:
                 'line_end': chunk_info['line_end'],
                 'active': True,
             })
-
     logger.debug('embedding %d chunks from %d documents', len(all_texts), len(documents))
-
     all_ids = [
         hashlib.sha256(f"{m['file_sha']}:{m['byte_offset']}:{t}".encode()).hexdigest()[:32]
         for t, m in zip(all_texts, all_metadata, strict=False)
     ]
     max_batch_size = chroma_client.get_max_batch_size()
     logger.debug('chromadb max batch size: %d', max_batch_size)
-    # Suppress the per-request HTTP logs from httpx during the tight embedding
-    # loop; they drown out everything useful.  Restore the level afterwards.
     httpx_logger = logging.getLogger('httpx')
     httpx_logger_level = httpx_logger.level
     httpx_logger.setLevel(logging.WARNING)
-
     kept_texts = []
     kept_embeddings = []
     kept_metadata = []
@@ -465,9 +441,7 @@ def build_collection() -> chromadb.Collection:
             kept_metadata.append(m)
             kept_ids.append(doc_id)
             progress.update(1)
-
     httpx_logger.setLevel(httpx_logger_level)
-
     logger.info('adding %d of %d chunks to collection', len(kept_texts), total)
     kept_total = len(kept_texts)
     for batch_start in range(0, kept_total, max_batch_size):
@@ -486,6 +460,19 @@ def build_collection() -> chromadb.Collection:
         'collection built with %d chunks (%d skipped)',
         kept_total, total - kept_total,
     )
+    index = load_file_index(data_dir)
+    coll_entry = index.setdefault(cname, {'files': {}})
+    files_entry = coll_entry['files']
+    files_entry.clear()
+    for chunk_id, meta in zip(kept_ids, kept_metadata, strict=False):
+        fp = meta['file_path']
+        sha = meta['file_sha']
+        if fp not in files_entry:
+            files_entry[fp] = {'active_sha': sha, 'versions': {}}
+        file_entry = files_entry[fp]
+        file_entry['active_sha'] = sha
+        file_entry['versions'].setdefault(sha, []).append(chunk_id)
+    save_file_index(data_dir, index)
     return collection
 
 
@@ -494,11 +481,8 @@ def get_collection() -> chromadb.Collection:
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
 
-    state_key = (f'{config.source_path}:{config.embed_model}:'
-                 f'{config.chunk_size}:{config.chunk_overlap}')
-
-    source_unavailable = False
     source_path = Path(config.source_path)
+    source_unavailable = False
     if is_git_source():
         try:
             git.Repo(config.source_path)
@@ -508,25 +492,15 @@ def get_collection() -> chromadb.Collection:
         if not source_path.exists() or not any(source_path.iterdir()):
             source_unavailable = True
 
-    if is_git_source():
-        extensions = [e.strip() for e in config.git_extensions.split(',')]
-        fingerprint = source_fingerprint_git(
-            config.source_path, extensions, config.source_sub_path, config.exclude)
-    else:
-        suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
-        fingerprint = source_fingerprint_directory(config.source_path, suffixes, config.exclude)
+    cname = collection_name(config.embed_model, config.chunk_size, config.chunk_overlap)
+    chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
     with _build_locks_mutex:
-        if fingerprint not in _build_locks:
-            _build_locks[fingerprint] = threading.Lock()
-        lock = _build_locks[fingerprint]
+        if cname not in _build_locks:
+            _build_locks[cname] = threading.Lock()
+        lock = _build_locks[cname]
+
     with lock:
-        state = load_state(data_dir)
-        cached = state.get(state_key, {})
-        chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
-        cname = collection_name(
-            config.source_path, config.embed_model,
-            config.chunk_size, config.chunk_overlap)
-        if source_unavailable and cached.get('fingerprint'):
+        if source_unavailable:
             try:
                 collection = chroma_client.get_collection(cname)
                 if collection.count() > 0:
@@ -538,11 +512,20 @@ def get_collection() -> chromadb.Collection:
             except Exception:
                 pass
             return None
-        if cached.get('fingerprint') != fingerprint:
-            collection = build_collection()
-            state[state_key] = {'fingerprint': fingerprint, 'built_at': time.time()}
-            save_state(data_dir, state)
-            return collection
+        if is_git_source():
+            extensions = [e.strip() for e in config.git_extensions.split(',')]
+            current_hashes = current_file_hashes_git(
+                config.source_path, extensions, config.source_sub_path, config.exclude)
+        else:
+            suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
+            current_hashes = current_file_hashes_directory(
+                config.source_path, suffixes, config.exclude)
+        index = load_file_index(data_dir)
+        indexed_files = index.get(cname, {}).get('files', {})
+        indexed_hashes = {fp: data['active_sha'] for fp, data in indexed_files.items()
+                          if fp != '__manifest__'}
+        if current_hashes != indexed_hashes:
+            return build_collection()
         return chroma_client.get_or_create_collection(cname)
 
 
@@ -579,7 +562,6 @@ def retrieve_context(query: str) -> str:
     if len(query) > max_query_len:
         logger.info('query too long for embedding (%d chars), truncating to %d',
                     len(query), max_query_len)
-        # Keep start and end; the center is probably the least interesting
         half = (max_query_len - 5) // 2
         query = query[:half] + '\n...\n' + query[-half:]
     query_embedding = embed_model.get_text_embedding(query)
@@ -643,7 +625,6 @@ async def chat_completions(request: fastapi.Request):
     query = extract_query_text(messages)
     logger.debug('query: %s, stream: %s', query, client_wants_stream)
     ollama_base_url = config.ollama_base_url
-
     if query and config.source_path:
         try:
             context = await asyncio.to_thread(retrieve_context, query)
@@ -651,7 +632,6 @@ async def chat_completions(request: fastapi.Request):
             body = inject_context(body, context)
         except Exception:
             logger.exception('retrieval failed, proceeding without context')
-
     if client_wants_stream:
         body['stream'] = True
 
@@ -667,7 +647,6 @@ async def chat_completions(request: fastapi.Request):
                     yield chunk
 
         return fastapi.responses.StreamingResponse(generate(), media_type='text/event-stream')
-
     body['stream'] = False
 
     def fetch():
@@ -742,17 +721,16 @@ def cmd_serve(args):
 def cmd_clear(args):
     data_dir = Path(args.data_dir)
     chroma_dir = data_dir / 'chroma'
-    state_file = data_dir / 'state.json'
+    file_index = data_dir / 'file_index.json'
     if chroma_dir.exists():
         shutil.rmtree(chroma_dir)
-    if state_file.exists():
-        state_file.unlink()
+    if file_index.exists():
+        file_index.unlink()
     print('Cleared.')
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     default_data_dir = str(Path.home() / '.local' / 'share' / 'rag_proxy')
-
     shared = argparse.ArgumentParser(add_help=False)
     shared.add_argument(
         '--data-dir',
@@ -840,12 +818,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     shared.add_argument(
         '--verbose', '-v', action='count', default=0, help='Increase verbosity')
-
     parser = argparse.ArgumentParser(description='Local RAG proxy for Ollama')
     subparsers = parser.add_subparsers(dest='command', required=True)
     subparsers.add_parser('serve', parents=[shared])
     subparsers.add_parser('clear', parents=[shared])
-
     return parser
 
 
@@ -853,7 +829,6 @@ def main():
     parser = build_arg_parser()
     args = parser.parse_args()
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
-
     if args.command == 'serve':
         cmd_serve(args)
     elif args.command == 'clear':
