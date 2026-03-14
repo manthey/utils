@@ -118,7 +118,6 @@ def list_paths(
 def current_file_hashes_directory(
     source_path: str, suffixes: list[str], exclude: str,
 ) -> dict[str, str]:
-    """Return {relative_path: sha256_of_content} for all matching files."""
     result = {}
     for p in list_paths(source_path, suffixes, exclude):
         rel = p.relative_to(source_path).as_posix()
@@ -130,7 +129,6 @@ def current_file_hashes_directory(
 def current_file_hashes_git(
     source_path: str, extensions: list[str], sub_path: str, exclude: str,
 ) -> dict[str, str]:
-    """Return {path: hexsha} for all matching blobs in the git repo."""
     return {item.path: item.hexsha
             for item in repo_item(source_path, extensions, sub_path, exclude)}
 
@@ -168,7 +166,6 @@ def strip_hop_by_hop_headers(headers: dict) -> dict:
 def load_documents_from_directory(
     source_path: str, suffixes: list[str], exclude: list[str],
 ) -> tuple[list[Document], int]:
-    """Load documents from a directory, computing file_sha, file_size, and file_mtime metadata."""
     documents = []
     count = 0
     for p in list_paths(source_path, suffixes, exclude):
@@ -227,7 +224,6 @@ def repo_item(
 def load_documents_from_git(
     source_path: str, extensions: list[str], sub_path: str, exclude: str,
 ) -> tuple[list[Document], int]:
-    """Load documents from a git repo, using blob hexsha as file_sha."""
     documents = []
     count = 0
     for item in repo_item(source_path, extensions, sub_path, exclude):
@@ -245,14 +241,53 @@ def load_documents_from_git(
     return documents, count
 
 
-def build_file_manifest_document(documents: list[Document]) -> Document:
-    """Return a single Document listing all file paths in the corpus."""
-    paths = []
-    for doc in documents:
-        path = doc.metadata.get('file_path') or doc.metadata.get('file_p', '')
-        if path and path not in paths:
-            paths.append(path)
-    text = 'Repository file listing:\n' + '\n'.join(paths)
+def load_single_file_document(source_path: str, rel_path: str, file_sha: str) -> Document | None:
+    if is_git_source():
+        try:
+            repo = git.Repo(source_path)
+            blob = repo.tree() / rel_path
+            text = blob.data_stream.read().decode(errors='replace')
+            return Document(text=text, metadata={
+                'file_path': rel_path,
+                'file_sha': blob.hexsha,
+                'file_size': blob.size,
+                'file_mtime': 0,
+            })
+        except Exception:
+            return None
+    else:
+        p = Path(source_path) / rel_path
+        if not p.is_file():
+            return None
+        try:
+            suffix = p.suffix.lower()
+            if suffix == '.pdf':
+                docs = PDFReader().load_data(p)
+                raw_bytes = p.read_bytes()
+            elif suffix == '.docx':
+                docs = DocxReader().load_data(p)
+                raw_bytes = p.read_bytes()
+            elif suffix == '.md':
+                docs = MarkdownReader().load_data(p)
+                raw_bytes = p.read_bytes()
+            else:
+                raw_bytes = p.read_bytes()
+                text = raw_bytes.decode(errors='replace')
+                docs = [Document(text=text, metadata={'file_path': str(p)})]
+            computed_sha = hashlib.sha256(raw_bytes).hexdigest()
+            combined_text = '\n'.join(d.text for d in docs)
+            return Document(text=combined_text, metadata={
+                'file_path': rel_path,
+                'file_sha': computed_sha,
+                'file_size': len(raw_bytes),
+                'file_mtime': p.stat().st_mtime,
+            })
+        except Exception:
+            return None
+
+
+def build_file_manifest_document(active_paths: list[str]) -> Document:
+    text = 'Repository file listing:\n' + '\n'.join(sorted(active_paths))
     return Document(text=text, metadata={'file_path': '__manifest__'})
 
 
@@ -271,7 +306,7 @@ def check_embed_model_available(base_url: str, model_name: str) -> None:
                 raise RuntimeError(msg)
     except httpx.ConnectError as exc:
         msg = f'Could not connect to Ollama at {base_url}: {exc}'
-        raise RuntimeError(msg)
+        raise RuntimeError(msg) from exc
 
 
 def get_model_context_length(model_name: str) -> int:
@@ -298,14 +333,6 @@ def get_model_context_length(model_name: str) -> int:
 def chunk_text(
     text: str, chunk_size: int = 512, overlap: int = 64, filename: str = '',
 ) -> list[dict]:
-    """Split text into chunks with positional metadata.
-
-    Returns a list of dicts, each with keys:
-        text: the chunk text
-        byte_offset: byte offset of the chunk within the original UTF8 text
-        line_start: 1-based starting line number
-        line_end: 1-based ending line number
-    """
     ext = '.' + filename.rsplit('.', 1)[-1] if '.' in filename else ''
     language = EXTENSION_TO_LANGUAGE.get(ext)
 
@@ -352,6 +379,228 @@ def chunk_text(
     return results
 
 
+def make_chunk_id(file_sha: str, byte_offset: int, text: str) -> str:
+    return hashlib.sha256(f'{file_sha}:{byte_offset}:{text}'.encode()).hexdigest()[:32]
+
+
+def _check_shutdown() -> None:
+    if _shutdown_event.is_set():
+        msg = 'Shutdown requested'
+        raise RuntimeError(msg)
+
+
+def embed_document_chunks(
+    doc: Document, chunk_size: int, chunk_overlap: int, embed_model: OllamaEmbedding,
+) -> tuple[list[str], list[list[float]], list[dict], list[str]]:
+    file_path = (doc.metadata or {}).get('file_path', '')
+    file_sha = (doc.metadata or {}).get('file_sha', '')
+    file_size = (doc.metadata or {}).get('file_size', 0)
+    file_mtime = (doc.metadata or {}).get('file_mtime', 0)
+
+    texts, embeddings, metadatas, ids = [], [], [], []
+    for chunk_info in chunk_text(doc.text, chunk_size, chunk_overlap, file_path):
+        _check_shutdown()
+        t = chunk_info['text']
+        try:
+            embedding = embed_model.get_text_embedding(t)
+        except Exception:
+            embedding = None
+        if not embedding:
+            logger.warning('embedding failed for chunk in %s, skipping', file_path)
+            continue
+        chunk_id = make_chunk_id(file_sha, chunk_info['byte_offset'], t)
+        texts.append(t)
+        embeddings.append(embedding)
+        metadatas.append({
+            'file_path': file_path,
+            'file_sha': file_sha,
+            'file_size': file_size,
+            'file_mtime': file_mtime,
+            'byte_offset': chunk_info['byte_offset'],
+            'line_start': chunk_info['line_start'],
+            'line_end': chunk_info['line_end'],
+            'active': True,
+        })
+        ids.append(chunk_id)
+    return texts, embeddings, metadatas, ids
+
+
+def add_chunks_to_collection(
+    collection: chromadb.Collection,
+    texts: list[str], embeddings: list[list[float]],
+    metadatas: list[dict], ids: list[str],
+) -> None:
+    if not texts:
+        return
+    max_batch = collection._client.get_max_batch_size()
+    for start in range(0, len(texts), max_batch):
+        end = min(start + max_batch, len(texts))
+        collection.add(
+            documents=texts[start:end],
+            embeddings=embeddings[start:end],
+            metadatas=metadatas[start:end],
+            ids=ids[start:end],
+        )
+
+
+def set_chunks_active(collection: chromadb.Collection, chunk_ids: list[str], active: bool) -> None:
+    if not chunk_ids:
+        return
+    max_batch = collection._client.get_max_batch_size()
+    for start in range(0, len(chunk_ids), max_batch):
+        end = min(start + max_batch, len(chunk_ids))
+        batch_ids = chunk_ids[start:end]
+        collection.update(
+            ids=batch_ids,
+            metadatas=[{'active': active}] * len(batch_ids),
+        )
+
+
+def delete_chunks(collection: chromadb.Collection, chunk_ids: list[str]) -> None:
+    if not chunk_ids:
+        return
+    max_batch = collection._client.get_max_batch_size()
+    for start in range(0, len(chunk_ids), max_batch):
+        end = min(start + max_batch, len(chunk_ids))
+        collection.delete(ids=chunk_ids[start:end])
+
+
+def update_manifest(
+    collection: chromadb.Collection, active_paths: list[str],
+    chunk_size: int, chunk_overlap: int, embed_model: OllamaEmbedding,
+    file_index_entry: dict,
+) -> None:
+    old_manifest = file_index_entry.get('files', {}).get('__manifest__', {})
+    old_ids = []
+    for version_ids in old_manifest.get('versions', {}).values():
+        old_ids.extend(version_ids)
+    delete_chunks(collection, old_ids)
+
+    manifest_doc = build_file_manifest_document(active_paths)
+    texts, embeddings, metadatas, ids = embed_document_chunks(
+        manifest_doc, chunk_size, chunk_overlap, embed_model)
+    add_chunks_to_collection(collection, texts, embeddings, metadatas, ids)
+
+    manifest_sha = hashlib.sha256('\n'.join(sorted(active_paths)).encode()).hexdigest()
+    files = file_index_entry.setdefault('files', {})
+    files['__manifest__'] = {
+        'active_sha': manifest_sha,
+        'versions': {manifest_sha: ids},
+    }
+
+
+def sync_collection(
+    collection: chromadb.Collection, data_dir: Path, cname: str,
+    current_hashes: dict[str, str],
+) -> None:
+    check_embed_model_available(config.ollama_base_url, config.embed_model)
+    embed_model = OllamaEmbedding(
+        model_name=config.embed_model,
+        base_url=config.ollama_base_url,
+    )
+    chunk_size = resolve_chunk_size()
+
+    index = load_file_index(data_dir)
+    coll_entry = index.setdefault(cname, {'files': {}})
+    files_entry = coll_entry['files']
+
+    indexed_paths = {fp for fp in files_entry if fp != '__manifest__'}
+    current_paths = set(current_hashes.keys())
+
+    new_paths = current_paths - indexed_paths
+    deleted_paths = indexed_paths - current_paths
+    common_paths = current_paths & indexed_paths
+
+    modified_paths = set()
+    reactivate_paths = set()
+    unchanged_paths = set()
+
+    for fp in common_paths:
+        new_sha = current_hashes[fp]
+        active_sha = files_entry[fp].get('active_sha', '')
+        if new_sha == active_sha:
+            unchanged_paths.add(fp)
+        elif new_sha in files_entry[fp].get('versions', {}):
+            reactivate_paths.add(fp)
+        else:
+            modified_paths.add(fp)
+
+    logger.info(
+        'sync: %d new, %d modified, %d reactivate, %d deleted, %d unchanged',
+        len(new_paths), len(modified_paths), len(reactivate_paths),
+        len(deleted_paths), len(unchanged_paths),
+    )
+
+    needs_update = bool(new_paths or deleted_paths or modified_paths or reactivate_paths)
+
+    if not needs_update:
+        logger.info('collection is up to date')
+        return
+
+    httpx_logger = logging.getLogger('httpx')
+    httpx_logger_level = httpx_logger.level
+    httpx_logger.setLevel(logging.WARNING)
+
+    for fp in deleted_paths:
+        logger.info('deactivating deleted file: %s', fp)
+        file_entry = files_entry[fp]
+        for version_ids in file_entry.get('versions', {}).values():
+            set_chunks_active(collection, version_ids, False)
+        file_entry['active_sha'] = ''
+
+    for fp in reactivate_paths:
+        new_sha = current_hashes[fp]
+        file_entry = files_entry[fp]
+        old_sha = file_entry['active_sha']
+        logger.info('reactivating %s: %s -> %s', fp, old_sha, new_sha)
+        if old_sha and old_sha in file_entry.get('versions', {}):
+            set_chunks_active(collection, file_entry['versions'][old_sha], False)
+        set_chunks_active(collection, file_entry['versions'][new_sha], True)
+        file_entry['active_sha'] = new_sha
+
+    paths_to_embed = sorted(new_paths | modified_paths)
+    if paths_to_embed:
+        with tqdm.tqdm(
+            total=len(paths_to_embed), desc='Embedding files',
+            unit='file', dynamic_ncols=True,
+        ) as progress:
+            for fp in paths_to_embed:
+                _check_shutdown()
+
+                new_sha = current_hashes[fp]
+
+                if fp in modified_paths:
+                    old_sha = files_entry[fp].get('active_sha', '')
+                    if old_sha and old_sha in files_entry[fp].get('versions', {}):
+                        set_chunks_active(collection, files_entry[fp]['versions'][old_sha], False)
+
+                doc = load_single_file_document(config.source_path, fp, new_sha)
+                if doc is None:
+                    logger.warning('failed to load %s, skipping', fp)
+                    progress.update(1)
+                    continue
+
+                texts, embeddings, metadatas, ids = embed_document_chunks(
+                    doc, chunk_size, config.chunk_overlap, embed_model)
+                add_chunks_to_collection(collection, texts, embeddings, metadatas, ids)
+
+                file_entry = files_entry.setdefault(fp, {'active_sha': '', 'versions': {}})
+                file_entry['active_sha'] = new_sha
+                file_entry['versions'][new_sha] = ids
+
+                logger.info('embedded %s (%d chunks)', fp, len(ids))
+                progress.update(1)
+
+    httpx_logger.setLevel(httpx_logger_level)
+
+    active_paths = [fp for fp in current_hashes if fp != '__manifest__']
+    update_manifest(
+        collection, active_paths, chunk_size, config.chunk_overlap, embed_model, coll_entry)
+
+    save_file_index(data_dir, index)
+    logger.info('sync complete')
+
+
 def build_collection() -> chromadb.Collection:
     data_dir = Path(config.data_dir)
     chroma_dir = data_dir / 'chroma'
@@ -363,116 +612,21 @@ def build_collection() -> chromadb.Collection:
     except Exception:
         pass
     collection = chroma_client.create_collection(cname)
+
     if is_git_source():
         extensions = [e.strip() for e in config.git_extensions.split(',')]
-        documents, doc_count = load_documents_from_git(
+        current_hashes = current_file_hashes_git(
             config.source_path, extensions, config.source_sub_path, config.exclude)
     else:
         suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
-        documents, doc_count = load_documents_from_directory(
+        current_hashes = current_file_hashes_directory(
             config.source_path, suffixes, config.exclude)
-    manifest = build_file_manifest_document(documents)
-    logger.info('loaded %d files', doc_count)
-    documents = [manifest] + documents
-    check_embed_model_available(config.ollama_base_url, config.embed_model)
-    logger.info('embedding model %s', config.embed_model)
-    embed_model = OllamaEmbedding(
-        model_name=config.embed_model,
-        base_url=config.ollama_base_url,
-    )
-    all_texts = []
-    all_metadata = []
-    chunk_size = resolve_chunk_size()
-    for doc in documents:
-        file_path = (doc.metadata or {}).get('file_path', '')
-        file_sha = (doc.metadata or {}).get('file_sha', '')
-        file_size = (doc.metadata or {}).get('file_size', 0)
-        file_mtime = (doc.metadata or {}).get('file_mtime', 0)
-        for chunk_info in chunk_text(doc.text, chunk_size, config.chunk_overlap, file_path):
-            all_texts.append(chunk_info['text'])
-            all_metadata.append({
-                'file_path': file_path,
-                'file_sha': file_sha,
-                'file_size': file_size,
-                'file_mtime': file_mtime,
-                'byte_offset': chunk_info['byte_offset'],
-                'line_start': chunk_info['line_start'],
-                'line_end': chunk_info['line_end'],
-                'active': True,
-            })
-    logger.debug('embedding %d chunks from %d documents', len(all_texts), len(documents))
-    all_ids = [
-        hashlib.sha256(f"{m['file_sha']}:{m['byte_offset']}:{t}".encode()).hexdigest()[:32]
-        for t, m in zip(all_texts, all_metadata, strict=False)
-    ]
-    max_batch_size = chroma_client.get_max_batch_size()
-    logger.debug('chromadb max batch size: %d', max_batch_size)
-    httpx_logger = logging.getLogger('httpx')
-    httpx_logger_level = httpx_logger.level
-    httpx_logger.setLevel(logging.WARNING)
-    kept_texts = []
-    kept_embeddings = []
-    kept_metadata = []
-    kept_ids = []
-    total = len(all_texts)
-    with tqdm.tqdm(
-        total=total,
-        desc='Embedding',
-        unit='chunk',
-        dynamic_ncols=True,
-    ) as progress:
-        for i, (t, m, doc_id) in enumerate(zip(all_texts, all_metadata, all_ids, strict=False)):
-            if _shutdown_event.is_set():
-                msg = 'Shutdown'
-                raise RuntimeError(msg)
-            try:
-                embedding = embed_model.get_text_embedding(t)
-            except Exception:
-                embedding = None
-            if not embedding:
-                logger.warning(
-                    'embedding chunk %d of %d failed or empty, skipping',
-                    i + 1, total,
-                )
-                progress.update(1)
-                continue
-            kept_texts.append(t)
-            kept_embeddings.append(embedding)
-            kept_metadata.append(m)
-            kept_ids.append(doc_id)
-            progress.update(1)
-    httpx_logger.setLevel(httpx_logger_level)
-    logger.info('adding %d of %d chunks to collection', len(kept_texts), total)
-    kept_total = len(kept_texts)
-    for batch_start in range(0, kept_total, max_batch_size):
-        batch_end = min(batch_start + max_batch_size, kept_total)
-        logger.info(
-            'adding batch %d-%d of %d to collection',
-            batch_start + 1, batch_end, kept_total,
-        )
-        collection.add(
-            documents=kept_texts[batch_start:batch_end],
-            embeddings=kept_embeddings[batch_start:batch_end],
-            metadatas=kept_metadata[batch_start:batch_end],
-            ids=kept_ids[batch_start:batch_end],
-        )
-    logger.info(
-        'collection built with %d chunks (%d skipped)',
-        kept_total, total - kept_total,
-    )
+
     index = load_file_index(data_dir)
-    coll_entry = index.setdefault(cname, {'files': {}})
-    files_entry = coll_entry['files']
-    files_entry.clear()
-    for chunk_id, meta in zip(kept_ids, kept_metadata, strict=False):
-        fp = meta['file_path']
-        sha = meta['file_sha']
-        if fp not in files_entry:
-            files_entry[fp] = {'active_sha': sha, 'versions': {}}
-        file_entry = files_entry[fp]
-        file_entry['active_sha'] = sha
-        file_entry['versions'].setdefault(sha, []).append(chunk_id)
+    index[cname] = {'files': {}}
     save_file_index(data_dir, index)
+
+    sync_collection(collection, data_dir, cname, current_hashes)
     return collection
 
 
@@ -512,6 +666,7 @@ def get_collection() -> chromadb.Collection:
             except Exception:
                 pass
             return None
+
         if is_git_source():
             extensions = [e.strip() for e in config.git_extensions.split(',')]
             current_hashes = current_file_hashes_git(
@@ -520,13 +675,21 @@ def get_collection() -> chromadb.Collection:
             suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
             current_hashes = current_file_hashes_directory(
                 config.source_path, suffixes, config.exclude)
+
+        try:
+            collection = chroma_client.get_collection(cname)
+        except Exception:
+            return build_collection()
+
         index = load_file_index(data_dir)
         indexed_files = index.get(cname, {}).get('files', {})
         indexed_hashes = {fp: data['active_sha'] for fp, data in indexed_files.items()
-                          if fp != '__manifest__'}
+                          if fp != '__manifest__' and data.get('active_sha')}
+
         if current_hashes != indexed_hashes:
-            return build_collection()
-        return chroma_client.get_or_create_collection(cname)
+            sync_collection(collection, data_dir, cname, current_hashes)
+
+        return collection
 
 
 def select_top_k(distances: list[float], min_k: int, max_k: int) -> int:
@@ -547,13 +710,13 @@ def select_top_k(distances: list[float], min_k: int, max_k: int) -> int:
 
 def retrieve_context(query: str) -> str:
     collection = get_collection()
+    if collection is None:
+        return ''
     embed_model = OllamaEmbedding(
         model_name=config.embed_model,
         base_url=config.ollama_base_url,
     )
-    if _shutdown_event.is_set():
-        msg = 'Shutdown'
-        raise RuntimeError(msg)
+    _check_shutdown()
     count = collection.count()
     if not count:
         logger.info('collection is empty, no context to retrieve')
@@ -570,6 +733,7 @@ def retrieve_context(query: str) -> str:
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=max_top_k,
+        where={'active': True},
         include=['documents', 'distances'],
     )
     documents = results.get('documents', [[]])[0]
