@@ -137,10 +137,6 @@ def _collect_tree_sitter_errors(node: Any, errors: list) -> None:
         _collect_tree_sitter_errors(child, errors)
 
 
-def validate_typescript(code: str) -> dict[str, Any]:
-    return _tree_sitter_validate('typescript', code)
-
-
 def validate_java(code: str) -> dict[str, Any]:
     javalang = importlib.import_module('javalang')
     try:
@@ -185,16 +181,29 @@ def validate_css(code: str) -> dict[str, Any]:
     return {'valid': True, 'errors': []}
 
 
+def _populate_tree_sitter_validators(validators: dict[str, Any]) -> None:
+    try:
+        import typing
+
+        import tree_sitter_language_pack
+
+        for lang in typing.get_args(tree_sitter_language_pack.SupportedLanguage):
+            if lang not in validators:
+                validators[lang] = lambda code, l=lang: _tree_sitter_validate(l, code)
+    except Exception:
+        pass
+
+
 VALIDATORS = {
-    'python': validate_python,
     'bash': validate_bash,
-    'javascript': validate_javascript,
-    'typescript': validate_typescript,
-    'java': validate_java,
     'css': validate_css,
+    'java': validate_java,
+    'javascript': validate_javascript,
+    'python': validate_python,
 }
 
-SUPPORTED_LANGUAGES = list(VALIDATORS.keys())
+_populate_tree_sitter_validators(VALIDATORS)
+SUPPORTED_LANGUAGES = sorted(VALIDATORS)
 
 
 @app.list_tools()
@@ -336,9 +345,13 @@ def main() -> None:
     )
     parser.add_argument('--host', default='127.0.0.1', help='HTTP host (default: 127.0.0.1)')
     parser.add_argument('--port', '-p', type=int, default=3000, help='HTTP port (default: 3000)')
+    parser.add_argument('--languages', action='store_true', help='Show known languages')
     args = parser.parse_args()
 
-    if args.transport == 'stdio':
+    if args.languages:
+        for key in SUPPORTED_LANGUAGES:
+            print(key)
+    elif args.transport == 'stdio':
         asyncio.run(run_stdio())
     else:
         asyncio.run(run_http(args.host, args.port))
