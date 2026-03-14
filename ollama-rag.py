@@ -708,6 +708,41 @@ def select_top_k(distances: list[float], min_k: int, max_k: int) -> int:
     return round(min_k + ratio * (max_k - min_k))
 
 
+def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
+    chunks = sorted(
+        zip(documents, metadatas, strict=True),
+        key=lambda x: (x[1].get('file_path', ''), x[1].get('byte_offset', 0)),
+    )
+    parts = []
+    prev_file = None
+    prev_end_offset = 0
+    for text, meta in chunks:
+        file_path = meta.get('file_path', '')
+        byte_offset = meta.get('byte_offset', 0)
+        line_start = meta.get('line_start', 1)
+        line_end = meta.get('line_end', line_start)
+        if file_path == prev_file and byte_offset < prev_end_offset:
+            overlap = prev_end_offset - byte_offset
+            text_bytes = text.encode('utf-8')
+            if overlap < len(text_bytes):
+                text = text_bytes[overlap:].decode('utf-8', errors='replace')
+            else:
+                prev_end_offset = max(prev_end_offset, byte_offset + len(text.encode('utf-8')))
+                continue
+        if line_start > 0 and line_start != line_end:
+            header = f'### File: {file_path} (lines {line_start}-{line_end})'
+        elif line_start > 0:
+            header = f'### File: {file_path} (line {line_start})'
+        elif byte_offset > 0:
+            header = f'### File: {file_path} (byte offset {byte_offset})'
+        else:
+            header = f'### File: {file_path}'
+        parts.append(f'{header}\n{text}')
+        prev_file = file_path
+        prev_end_offset = byte_offset + len(text.encode('utf-8'))
+    return '\n\n'.join(parts)
+
+
 def retrieve_context(query: str) -> str:
     collection = get_collection()
     if collection is None:
@@ -734,13 +769,14 @@ def retrieve_context(query: str) -> str:
         query_embeddings=[query_embedding],
         n_results=max_top_k,
         where={'active': True},
-        include=['documents', 'distances'],
+        include=['documents', 'distances', 'metadatas'],
     )
     documents = results.get('documents', [[]])[0]
     distances = results.get('distances', [[]])[0]
+    metadatas = results.get('metadatas', [[]])[0]
     chosen_k = select_top_k(distances, min_top_k, max_top_k)
     logger.info('Adding context result documents: %d', chosen_k)
-    return '\n\n---\n\n'.join(documents[:chosen_k])
+    return format_chunks(documents[:chosen_k], metadatas[:chosen_k])
 
 
 def extract_query_text(messages: list[dict]) -> str:
