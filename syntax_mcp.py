@@ -4,6 +4,7 @@
 #   "mcp[cli]>=1.9.0",
 #   "esprima>=4.0.1",
 #   "javalang>=0.13.0",
+#   "mermaid-py>=0.5.0",
 #   "tinycss2>=1.3.0",
 #   "tree-sitter>=0.24.0",
 #   "tree-sitter-language-pack>=0.7.0",
@@ -22,24 +23,6 @@ from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.types import TextContent, Tool
 
 app = Server('syntax-validator')
-
-
-def validate_python(code: str) -> dict[str, Any]:
-    source = code.encode('utf-8')
-    try:
-        compile(source, '<string>', 'exec')
-        return {'valid': True, 'errors': []}
-    except SyntaxError as e:
-        return {
-            'valid': False,
-            'errors': [
-                {
-                    'line': e.lineno,
-                    'column': e.offset,
-                    'message': e.msg,
-                },
-            ],
-        }
 
 
 def validate_bash(code: str) -> dict[str, Any]:
@@ -78,6 +61,50 @@ def validate_bash(code: str) -> dict[str, Any]:
         }
 
 
+def validate_css(code: str) -> dict[str, Any]:
+    import tinycss2
+    rules, encoding = tinycss2.parse_stylesheet_bytes(
+        code.encode('utf-8'), skip_comments=True, skip_whitespace=True,
+    )
+    errors = []
+    for rule in rules:
+        if rule.type == 'error':
+            errors.append(
+                {
+                    'line': getattr(rule, 'source_line', None),
+                    'column': getattr(rule, 'source_column', None),
+                    'message': getattr(rule, 'message', 'CSS parse error'),
+                },
+            )
+    if errors:
+        return {'valid': False, 'errors': errors}
+    return {'valid': True, 'errors': []}
+
+
+def validate_java(code: str) -> dict[str, Any]:
+    import javalang
+    try:
+        javalang.parse.parse(code)
+        return {'valid': True, 'errors': []}
+    except javalang.parser.JavaSyntaxError as e:
+        return {
+            'valid': False,
+            'errors': [
+                {
+                    'line': getattr(e, 'at', {}).get('line')
+                    if isinstance(getattr(e, 'at', None), dict) else None,
+                    'column': None,
+                    'message': str(e),
+                },
+            ],
+        }
+    except Exception as e:
+        return {
+            'valid': False,
+            'errors': [{'line': None, 'column': None, 'message': str(e)}],
+        }
+
+
 def validate_javascript(code: str) -> dict[str, Any]:
     import esprima
     try:
@@ -99,6 +126,40 @@ def validate_javascript(code: str) -> dict[str, Any]:
         return {
             'valid': False,
             'errors': [{'line': None, 'column': None, 'message': str(e)}],
+        }
+
+
+def validate_mermaid(code: str) -> dict[str, Any]:
+    import mermaid
+    import requests
+
+    try:
+        mermaid.Mermaid(code.rstrip() + '\n')
+        return {'valid': True, 'errors': []}
+    except (ImportError, OSError, requests.exceptions.RequestException):
+        return _tree_sitter_validate('mermaid', code)
+    except Exception as exc:
+        return {
+            'valid': False,
+            'errors': [{'line': None, 'column': None, 'message': str(exc)}],
+        }
+
+
+def validate_python(code: str) -> dict[str, Any]:
+    source = code.encode('utf-8')
+    try:
+        compile(source, '<string>', 'exec')
+        return {'valid': True, 'errors': []}
+    except SyntaxError as e:
+        return {
+            'valid': False,
+            'errors': [
+                {
+                    'line': e.lineno,
+                    'column': e.offset,
+                    'message': e.msg,
+                },
+            ],
         }
 
 
@@ -140,50 +201,6 @@ def _collect_tree_sitter_errors(node: Any, errors: list) -> None:
         _collect_tree_sitter_errors(child, errors)
 
 
-def validate_java(code: str) -> dict[str, Any]:
-    import javalang
-    try:
-        javalang.parse.parse(code)
-        return {'valid': True, 'errors': []}
-    except javalang.parser.JavaSyntaxError as e:
-        return {
-            'valid': False,
-            'errors': [
-                {
-                    'line': getattr(e, 'at', {}).get('line')
-                    if isinstance(getattr(e, 'at', None), dict) else None,
-                    'column': None,
-                    'message': str(e),
-                },
-            ],
-        }
-    except Exception as e:
-        return {
-            'valid': False,
-            'errors': [{'line': None, 'column': None, 'message': str(e)}],
-        }
-
-
-def validate_css(code: str) -> dict[str, Any]:
-    import tinycss2
-    rules, encoding = tinycss2.parse_stylesheet_bytes(
-        code.encode('utf-8'), skip_comments=True, skip_whitespace=True,
-    )
-    errors = []
-    for rule in rules:
-        if rule.type == 'error':
-            errors.append(
-                {
-                    'line': getattr(rule, 'source_line', None),
-                    'column': getattr(rule, 'source_column', None),
-                    'message': getattr(rule, 'message', 'CSS parse error'),
-                },
-            )
-    if errors:
-        return {'valid': False, 'errors': errors}
-    return {'valid': True, 'errors': []}
-
-
 def _populate_tree_sitter_validators(validators: dict[str, Any]) -> None:
     try:
         import typing
@@ -202,6 +219,7 @@ VALIDATORS = {
     'css': validate_css,
     'java': validate_java,
     'javascript': validate_javascript,
+    'mermaid': validate_mermaid,
     'python': validate_python,
 }
 
@@ -245,6 +263,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     language = arguments.get('language', '').lower()
     code = arguments.get('code', '')
+    if code.startswith('```') and code.endswith('```'):
+        code = code.split('\n', 1)[1].rstrip('`')
 
     if language not in VALIDATORS:
         return [
