@@ -37,6 +37,8 @@ import fastapi
 import fastapi.middleware.cors
 import git
 import httpx
+import mcp.server.stdio
+import mcp.types
 import pathspec
 import tqdm
 import uvicorn
@@ -674,6 +676,77 @@ def mcp_list_files(path_prefix: str | None = None) -> list[str]:
     return paths
 
 
+def mcp_get_file(path: str) -> str:
+    doc = load_single_file_document(config.source_path, path)
+    if doc is None:
+        return f'Error: file not found: {path}'
+    return doc.text
+
+
+def create_mcp_server() -> mcp.server.Server:
+    server = mcp.server.Server('ollama-rag')
+
+    @server.list_tools()
+    async def _list_tools() -> list[mcp.types.Tool]:
+        return [
+            mcp.types.Tool(
+                name='search_codebase',
+                description='Search the indexed codebase using semantic '
+                'similarity. Returns relevant code or document chunks.',
+                inputSchema={
+                    'type': 'object',
+                    'properties': {
+                        'query': {'type': 'string', 'description': 'The search query'},
+                        'path_filter': {
+                            'type': 'string',
+                            'description': 'Optional: restrict results to this file path'},
+                        'top_k': {
+                            'type': 'integer',
+                            'description': 'Optional: number of results (default from config)'},
+                    },
+                    'required': ['query'],
+                },
+            ),
+            mcp.types.Tool(
+                name='list_files',
+                description='List indexed file paths, optionally filtered by a path prefix.',
+                inputSchema={
+                    'type': 'object',
+                    'properties': {
+                        'path_prefix': {
+                            'type': 'string', 'description': 'Optional: filter by path prefix'},
+                    },
+                },
+            ),
+            mcp.types.Tool(
+                name='get_file',
+                description='Retrieve the full contents of a single indexed file by its path.',
+                inputSchema={
+                    'type': 'object',
+                    'properties': {
+                        'path': {
+                            'type': 'string',
+                            'description': 'File path relative to the source root'},
+                    },
+                    'required': ['path'],
+                },
+            ),
+        ]
+
+    @server.call_tool()
+    async def _call_tool(name: str, arguments: dict) -> list[mcp.types.TextContent]:
+        dispatch = {
+            'search_codebase': lambda a: mcp_search_codebase(
+                a['query'], a.get('path_filter'), a.get('top_k')),
+            'list_files': lambda a: '\n'.join(mcp_list_files(a.get('path_prefix'))),
+            'get_file': lambda a: mcp_get_file(a['path']),
+        }
+        result = await asyncio.to_thread(dispatch[name], arguments)
+        return [mcp.types.TextContent(type='text', text=result)]
+
+    return server
+
+
 def extract_query_text(messages: list[dict]) -> str:
     for message in reversed(messages):
         if message.get('role') == 'user':
@@ -841,6 +914,18 @@ def cmd_clear(args):
     print(f'Total chunks deleted: {total_deleted}.')
 
 
+def cmd_mcp(args):
+    global config
+    config = args
+    get_collection()
+    server = create_mcp_server()
+
+    async def _run():
+        async with mcp.server.stdio.stdio_server() as (read, write):
+            await server.run(read, write, server.create_initialization_options())
+    asyncio.run(_run())
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     default_data_dir = str(Path.home() / '.local' / 'share' / 'rag_proxy')
     shared = argparse.ArgumentParser(add_help=False)
@@ -855,66 +940,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest='command', required=True)
     serve = subparsers.add_parser('serve', parents=[shared])
     clear = subparsers.add_parser('clear', parents=[shared])
-    serve.add_argument(
-        '--ollama-base-url',
-        default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
-        help='Ollama URL; default is http://localhost:11434',
-    )
-    serve.add_argument(
-        '--embed-model', '-e',
-        default=os.environ.get('RAG_EMBED_MODEL', 'nomic-embed-text'),
-        help=(
-            'Embedding model; default is nomic-embed-text.  Others are '
-            'mxbai-embed-large (good for code), all-minilm (small), '
-            'snowflake-arctic-embed, bge-m3 (multilingual), bge-large '
-            '(English). Do ollama pull on the model before using it.'
-        ),
-    )
-    serve.add_argument(
-        '--source-type', choices=['directory', 'git', 'auto'],
-        default=os.environ.get('RAG_SOURCE_TYPE', 'auto'),
-        help='Auto checks for a .git folder.  If git, only tracked files are used.',
-    )
-    serve.add_argument(
-        '--source-path', '-s',
-        default=os.environ.get('RAG_SOURCE_PATH', ''),
-        help='The root of the git repo or documents to embed',
-    )
-    serve.add_argument(
-        '--source-sub-path',
-        default=os.environ.get('RAG_SOURCE_SUB_PATH', ''),
-        help='For git repos, only embed files within this subpath',
-    )
-    serve.add_argument(
-        '--exclude', '-x',
-        default=os.environ.get('RAG_EXCLUDE', ''),
-        help='A comma-separated list of paths and file signatures to exclude',
-    )
-    serve.add_argument(
-        '--git-extensions',
-        default=os.environ.get('RAG_GIT_EXTENSIONS', '.py,.js,.java,.ts,.md,.rst'),
-        help=(
-            'Only process specific file types in a git repo; '
-            "default is '.py,.js,.java,.ts,.md,.rst'."
-        ),
-    )
-    serve.add_argument(
-        '--dir-suffixes',
-        default=os.environ.get('RAG_DIR_SUFFIXES', '.txt,.md,.pdf,.docx,.rst'),
-        help=(
-            'Only process specific file types in a non-git source folder; '
-            "default is '.txt,.md,.pdf,.docx,.rst'"
-        ),
-    )
-    serve.add_argument(
-        '--top-k', type=int,
-        default=int(os.environ.get('RAG_TOP_K', '5')),
-        help=(
-            'How much context to fetch; default is 5.  Use larger values for general queries, '
-            'smaller values for targeted queries.  A value between half and twice this will be '
-            'chosen based on recall similarity.'
-        ),
-    )
+    mcp = subparsers.add_parser('mcp', parents=[shared])
     serve.add_argument(
         '--host', type=str, default='0.0.0.0',
         help='Proxy host; default is 0.0.0.0.  Using localhost is more secure.',
@@ -924,20 +950,81 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=int(os.environ.get('RAG_PROXY_PORT', '11435')),
         help='Proxy port; default is 11435',
     )
-    serve.add_argument(
-        '--chunk-size', type=int,
-        default=int(os.environ.get('RAG_CHUNK_SIZE', '0')),
-        help='Embedding chunk size; default or 0 is determined by model.  Too big will fail',
-    )
-    serve.add_argument(
-        '--chunk-overlap', type=int,
-        default=int(os.environ.get('RAG_CHUNK_OVERLAP', '64')),
-        help='Embedding chunk overlap; default is 64',
-    )
     clear.add_argument(
         '--purge-inactive', action='store_true',
         help='Remove inactive chunks and deleted-file entries without destroying active data',
     )
+    for sub in (serve, mcp):
+        sub.add_argument(
+            '--ollama-base-url',
+            default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
+            help='Ollama URL; default is http://localhost:11434',
+        )
+        sub.add_argument(
+            '--embed-model', '-e',
+            default=os.environ.get('RAG_EMBED_MODEL', 'nomic-embed-text'),
+            help=(
+                'Embedding model; default is nomic-embed-text.  Others are '
+                'mxbai-embed-large (good for code), all-minilm (small), '
+                'snowflake-arctic-embed, bge-m3 (multilingual), bge-large '
+                '(English). Do ollama pull on the model before using it.'
+            ),
+        )
+        sub.add_argument(
+            '--source-type', choices=['directory', 'git', 'auto'],
+            default=os.environ.get('RAG_SOURCE_TYPE', 'auto'),
+            help='Auto checks for a .git folder.  If git, only tracked files are used.',
+        )
+        sub.add_argument(
+            '--source-path', '-s',
+            default=os.environ.get('RAG_SOURCE_PATH', ''),
+            help='The root of the git repo or documents to embed',
+        )
+        sub.add_argument(
+            '--source-sub-path',
+            default=os.environ.get('RAG_SOURCE_SUB_PATH', ''),
+            help='For git repos, only embed files within this subpath',
+        )
+        sub.add_argument(
+            '--exclude', '-x',
+            default=os.environ.get('RAG_EXCLUDE', ''),
+            help='A comma-separated list of paths and file signatures to exclude',
+        )
+        sub.add_argument(
+            '--git-extensions',
+            default=os.environ.get('RAG_GIT_EXTENSIONS', '.py,.js,.java,.ts,.md,.rst'),
+            help=(
+                'Only process specific file types in a git repo; '
+                "default is '.py,.js,.java,.ts,.md,.rst'."
+            ),
+        )
+        sub.add_argument(
+            '--dir-suffixes',
+            default=os.environ.get('RAG_DIR_SUFFIXES', '.txt,.md,.pdf,.docx,.rst'),
+            help=(
+                'Only process specific file types in a non-git source folder; '
+                "default is '.txt,.md,.pdf,.docx,.rst'"
+            ),
+        )
+        sub.add_argument(
+            '--top-k', type=int,
+            default=int(os.environ.get('RAG_TOP_K', '5')),
+            help=(
+                'How much context to fetch; default is 5.  Use larger values for general queries, '
+                'smaller values for targeted queries.  A value between half and twice this will be '
+                'chosen based on recall similarity.'
+            ),
+        )
+        sub.add_argument(
+            '--chunk-size', type=int,
+            default=int(os.environ.get('RAG_CHUNK_SIZE', '0')),
+            help='Embedding chunk size; default or 0 is determined by model.  Too big will fail',
+        )
+        sub.add_argument(
+            '--chunk-overlap', type=int,
+            default=int(os.environ.get('RAG_CHUNK_OVERLAP', '64')),
+            help='Embedding chunk overlap; default is 64',
+        )
     return parser
 
 
@@ -949,6 +1036,8 @@ def main():
         cmd_serve(args)
     elif args.command == 'clear':
         cmd_clear(args)
+    elif args.command == 'mcp':
+        cmd_mcp(args)
 
 
 if __name__ == '__main__':
