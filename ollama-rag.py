@@ -309,8 +309,9 @@ def embed_document_chunks(
     for chunk_info in chunk_text(doc.text, chunk_size, chunk_overlap, file_path):
         _check_shutdown()
         t = chunk_info['text']
+        embedding_input = f'### File: {file_path}\n{t}' if file_path else t
         try:
-            embedding = embed_model.get_text_embedding(t)
+            embedding = embed_model.get_text_embedding(embedding_input)
         except Exception:
             embedding = None
         if not embedding:
