@@ -259,11 +259,15 @@ def chunk_text(
         ).split_text(text)
         results = []
         search_start = 0
-        for chunk in raw_chunks:
+        for cidx, chunk in enumerate(raw_chunks):
             chunk_bytes = chunk.encode('utf-8')
             idx = text_bytes.find(chunk_bytes, search_start)
             if idx == -1:
                 idx = search_start
+            elif cidx + 1 < len(raw_chunks):
+                nidx = text_bytes.find(raw_chunks[cidx + 1].encode('utf-8'), idx + len(chunk_bytes))
+                if nidx > idx:
+                    chunk = text_bytes[idx:nidx].decode('utf-8')
             line_start = text_bytes[:idx].count(b'\n') + 1
             results.append({
                 'text': chunk, 'byte_offset': idx,
@@ -561,32 +565,50 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
         key=lambda x: (x[1].get('file_path', ''), x[1].get('byte_offset', 0)),
     )
     parts = []
-    prev_file = None
-    prev_end_offset = 0
+    current_file: str | None = None
+    current_text: str = ''
+    current_byte_start: int = 0
+    current_byte_end: int = 0
+    current_line_start: int = 1
+    current_line_end: int = 1
+
+    def flush() -> None:
+        if not current_text:
+            return
+        if current_line_start > 0 and current_line_start != current_line_end:
+            header = f'### File: {current_file} (lines {current_line_start}-{current_line_end})'
+        elif current_line_start > 0:
+            header = f'### File: {current_file} (line {current_line_start})'
+        elif current_byte_start > 0:
+            header = f'### File: {current_file} (byte offset {current_byte_start})'
+        else:
+            header = f'### File: {current_file}'
+        parts.append(f'{header}\n{current_text}')
+
     for text, meta in chunks:
         file_path = meta.get('file_path', '')
         byte_offset = meta.get('byte_offset', 0)
         line_start = meta.get('line_start', 1)
         line_end = meta.get('line_end', line_start)
-        if file_path == prev_file and byte_offset < prev_end_offset:
-            overlap = prev_end_offset - byte_offset
-            text_bytes = text.encode('utf-8')
+        text_bytes = text.encode('utf-8')
+        chunk_end = byte_offset + len(text_bytes)
+
+        if file_path == current_file and byte_offset <= current_byte_end:
+            overlap = current_byte_end - byte_offset
             if overlap < len(text_bytes):
-                text = text_bytes[overlap:].decode('utf-8', errors='replace')
-            else:
-                prev_end_offset = max(prev_end_offset, byte_offset + len(text.encode('utf-8')))
-                continue
-        if line_start > 0 and line_start != line_end:
-            header = f'### File: {file_path} (lines {line_start}-{line_end})'
-        elif line_start > 0:
-            header = f'### File: {file_path} (line {line_start})'
-        elif byte_offset > 0:
-            header = f'### File: {file_path} (byte offset {byte_offset})'
+                current_text += text_bytes[overlap:].decode('utf-8', errors='replace')
+                current_byte_end = max(current_byte_end, chunk_end)
+                current_line_end = max(current_line_end, line_end)
         else:
-            header = f'### File: {file_path}'
-        parts.append(f'{header}\n{text}')
-        prev_file = file_path
-        prev_end_offset = byte_offset + len(text.encode('utf-8'))
+            flush()
+            current_file = file_path
+            current_text = text
+            current_byte_start = byte_offset
+            current_byte_end = chunk_end
+            current_line_start = line_start
+            current_line_end = line_end
+
+    flush()
     return '\n\n'.join(parts)
 
 
