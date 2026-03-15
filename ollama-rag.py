@@ -22,6 +22,7 @@
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -38,8 +39,11 @@ import fastapi.middleware.cors
 import git
 import httpx
 import mcp.server.stdio
+import mcp.server.streamable_http_manager
 import mcp.types
 import pathspec
+import starlette.responses
+import starlette.routing
 import tqdm
 import uvicorn
 from llama_index.core.node_parser import CodeSplitter
@@ -60,13 +64,24 @@ EXTENSION_TO_LANGUAGE = {
     '.kt': 'kotlin', '.swift': 'swift',
 }
 
-app = fastapi.FastAPI()
+config: argparse.Namespace
+mcp_manager: mcp.server.streamable_http_manager.StreamableHTTPSessionManager | None = None
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    if mcp_manager is not None:
+        async with mcp_manager.run():
+            yield
+    else:
+        yield
+
+app = fastapi.FastAPI(lifespan=lifespan)
 app.add_middleware(
     fastapi.middleware.cors.CORSMiddleware,
     allow_origins=['*'], allow_credentials=True,
     allow_methods=['*'], allow_headers=['*'],
 )
-config: argparse.Namespace
 
 _shutdown_event = threading.Event()
 _build_locks_mutex = threading.Lock()
@@ -849,9 +864,36 @@ async def proxy_passthrough(request: fastapi.Request, path: str):
     )
 
 
+async def mcp_redirect(request: fastapi.Request):
+    return fastapi.responses.RedirectResponse(
+        url=str(request.url).rstrip('/') + '/',
+        status_code=307,
+    )
+
+
+async def mcp_endpoint(scope, receive, send):
+    if mcp_manager is None:
+        response = starlette.responses.JSONResponse({'error': 'MCP not enabled'}, status_code=404)
+        await response(scope, receive, send)
+        return
+    await mcp_manager.handle_request(scope, receive, send)
+
+
 def cmd_serve(args):
     global config
+    global mcp_manager
+
     config = args
+    if args.mcp_http_path:
+        mcp_manager = mcp.server.streamable_http_manager.StreamableHTTPSessionManager(
+            app=create_mcp_server(),
+            event_store=None,
+            stateless=True,
+        )
+        mcp_path = args.mcp_http_path.rstrip('/')
+        app.router.routes.insert(0, starlette.routing.Route(
+            mcp_path, endpoint=mcp_redirect, methods=['GET', 'POST', 'DELETE']))
+        app.router.routes.insert(0, starlette.routing.Mount(mcp_path, app=mcp_endpoint))
     server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port))
     server.install_signal_handlers = lambda: None
 
@@ -949,6 +991,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         '--port', type=int,
         default=int(os.environ.get('RAG_PROXY_PORT', '11435')),
         help='Proxy port; default is 11435',
+    )
+    serve.add_argument(
+        '--mcp-http-path',
+        default=os.environ.get('RAG_MCP_HTTP_PATH', '/mcp'),
+        help='Path for the MCP streamable-HTTP endpoint; default is /mcp. An '
+        'empty string disabled the endpoint',
     )
     clear.add_argument(
         '--purge-inactive', action='store_true',
