@@ -120,6 +120,9 @@ def _tree_sitter_validate(language_name: str, code: str) -> dict[str, Any]:
 
 def _collect_tree_sitter_errors(node: Any, errors: list) -> None:
     if node.type == 'ERROR' or node.is_missing:
+        for child in node.children:
+            if child.type == 'ERROR' or child.is_missing:
+                return
         start = node.start_point
         errors.append(
             {
@@ -132,6 +135,7 @@ def _collect_tree_sitter_errors(node: Any, errors: list) -> None:
                 ),
             },
         )
+        return
     for child in node.children:
         _collect_tree_sitter_errors(child, errors)
 
