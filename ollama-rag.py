@@ -185,12 +185,9 @@ def _iter_repo_blobs(
 def _load_file_docs(p: Path) -> tuple[list[Document], bytes]:
     suffix = p.suffix.lower()
     raw_bytes = p.read_bytes()
-    if suffix == '.pdf':
-        return PDFReader().load_data(p), raw_bytes
-    if suffix == '.docx':
-        return DocxReader().load_data(p), raw_bytes
-    if suffix == '.md':
-        return MarkdownReader().load_data(p), raw_bytes
+    readers = {'.pdf': PDFReader, '.docx': DocxReader, '.md': MarkdownReader}
+    if suffix in readers:
+        return readers[suffix]().load_data(p), raw_bytes
     return [Document(text=raw_bytes.decode(errors='replace'),
                      metadata={'file_path': str(p)})], raw_bytes
 
