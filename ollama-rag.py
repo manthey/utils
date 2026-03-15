@@ -668,7 +668,8 @@ async def chat_completions(request: fastapi.Request):
     if query and config.source_path:
         try:
             context = await asyncio.to_thread(retrieve_context, query)
-            logger.debug('context length: %d', len(context))
+            logger.info('context length: %d', len(context))
+            logger.debug('context:\n%s', context)
             body = inject_context(body, context)
         except Exception:
             logger.exception('retrieval failed, proceeding without context')
