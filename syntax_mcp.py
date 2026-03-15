@@ -12,7 +12,6 @@
 
 import argparse
 import asyncio
-import importlib
 import subprocess
 import traceback
 from typing import Any
@@ -80,7 +79,7 @@ def validate_bash(code: str) -> dict[str, Any]:
 
 
 def validate_javascript(code: str) -> dict[str, Any]:
-    esprima = importlib.import_module('esprima')
+    import esprima
     try:
         esprima.parseScript(code, {'tolerant': False})
         return {'valid': True, 'errors': []}
@@ -104,12 +103,12 @@ def validate_javascript(code: str) -> dict[str, Any]:
 
 
 def _tree_sitter_validate(language_name: str, code: str) -> dict[str, Any]:
-    language_pack = importlib.import_module('tree_sitter_language_pack')
-    tree_sitter = importlib.import_module('tree_sitter')
+    import tree_sitter
+    import tree_sitter_language_pack
 
-    language = language_pack.get_language(language_name)
+    language = tree_sitter_language_pack.get_language(language_name)
     parser = tree_sitter.Parser(language)
-    tree = parser.parse(code.encode('utf-8'))
+    tree = parser.parse((code.rstrip() + '\n').encode('utf-8'))
 
     errors = []
     _collect_tree_sitter_errors(tree.root_node, errors)
@@ -138,7 +137,7 @@ def _collect_tree_sitter_errors(node: Any, errors: list) -> None:
 
 
 def validate_java(code: str) -> dict[str, Any]:
-    javalang = importlib.import_module('javalang')
+    import javalang
     try:
         javalang.parse.parse(code)
         return {'valid': True, 'errors': []}
@@ -162,7 +161,7 @@ def validate_java(code: str) -> dict[str, Any]:
 
 
 def validate_css(code: str) -> dict[str, Any]:
-    tinycss2 = importlib.import_module('tinycss2')
+    import tinycss2
     rules, encoding = tinycss2.parse_stylesheet_bytes(
         code.encode('utf-8'), skip_comments=True, skip_whitespace=True,
     )
@@ -270,7 +269,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         text = f'Syntax is valid ({language}).'
     else:
         lines = [f'Syntax errors found ({language}):']
-        for error in result['errors']:
+        for error in result['errors'][:5]:
             location = ''
             if error.get('line') is not None:
                 location = f" at line {error['line']}"
