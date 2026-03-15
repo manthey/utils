@@ -8,6 +8,7 @@
 #   "httpx>=0.27",
 #   "llama-index-embeddings-ollama>=0.8",
 #   "llama-index-readers-file>=0.5",
+#   "mcp[cli]>=1.9",
 #   "pathspec",
 #   "pypdf>=4.0",
 #   "python-docx>=1.1",
@@ -613,7 +614,9 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
     return '\n\n'.join(parts)
 
 
-def retrieve_context(query: str) -> str:
+def retrieve_context(
+    query: str, *, path_filter: str | None = None, top_k_override: int | None = None,
+) -> str:
     collection = get_collection()
     if collection is None or not collection.count():
         logger.info('collection is empty or unavailable, no context to retrieve')
@@ -629,12 +632,14 @@ def retrieve_context(query: str) -> str:
         query = query[:half] + '\n...\n' + query[-half:]
     query_embedding = embed_model.get_text_embedding(query)
     count = collection.count()
-    min_top_k = min(max(1, config.top_k // 2), count)
-    max_top_k = min(config.top_k * 2, count)
+    base_k = top_k_override if top_k_override is not None else config.top_k
+    min_top_k = min(max(1, base_k // 2), count)
+    max_top_k = min(base_k * 2, count)
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=max_top_k,
-        where={'active': True},
+        where={'$and': [{'active': True}, {'file_path': {'$eq': path_filter}}],
+               } if path_filter else {'active': True},
         include=['documents', 'distances', 'metadatas'],
     )
     documents = results.get('documents', [[]])[0]
@@ -643,6 +648,30 @@ def retrieve_context(query: str) -> str:
     chosen_k = select_top_k(distances, min_top_k, max_top_k)
     logger.info('Adding context result documents: %d', chosen_k)
     return format_chunks(documents[:chosen_k], metadatas[:chosen_k])
+
+
+def get_active_file_paths() -> list[str]:
+    data_dir = Path(config.data_dir)
+    cname = collection_name(config.embed_model, config.chunk_size, config.chunk_overlap)
+    index = load_file_index(data_dir)
+    files = index.get(cname, {}).get('files', {})
+    return sorted(
+        fp for fp, entry in files.items()
+        if fp != '__manifest__' and entry.get('active_sha')
+    )
+
+
+def mcp_search_codebase(
+    query: str, path_filter: str | None = None, top_k: int | None = None,
+) -> str:
+    return retrieve_context(query, path_filter=path_filter, top_k_override=top_k)
+
+
+def mcp_list_files(path_prefix: str | None = None) -> list[str]:
+    paths = get_active_file_paths()
+    if path_prefix:
+        paths = [p for p in paths if p.startswith(path_prefix)]
+    return paths
 
 
 def extract_query_text(messages: list[dict]) -> str:
