@@ -153,7 +153,7 @@ def resolve_chunk_size(for_query: bool = False) -> int:
         logger.info('model %s context length: %d', config.embed_model, context_length)
         chunk_size = max(256, (context_length * 3) // 4)
         if not for_query:
-            chunk_size = min(chunk_size, 8192)
+            chunk_size = min(chunk_size, 4096)
         logger.info('auto chunk size: %d', chunk_size)
         return chunk_size
     return config.chunk_size
@@ -445,7 +445,7 @@ def sync_collection(
     saved_level = httpx_logger.level
     httpx_logger.setLevel(logging.WARNING)
     for fp in deleted_paths:
-        logger.info('deactivating deleted file: %s', fp)
+        logger.debug('deactivating deleted file: %s', fp)
         for version_ids in files_entry[fp].get('versions', {}).values():
             set_chunks_active(collection, version_ids, False)
         files_entry[fp]['active_sha'] = ''
@@ -453,7 +453,7 @@ def sync_collection(
         new_sha = current_hashes[fp]
         file_entry = files_entry[fp]
         old_sha = file_entry['active_sha']
-        logger.info('reactivating %s: %s -> %s', fp, old_sha, new_sha)
+        logger.debug('reactivating %s: %s -> %s', fp, old_sha, new_sha)
         if old_sha and old_sha in file_entry.get('versions', {}):
             set_chunks_active(collection, file_entry['versions'][old_sha], False)
         set_chunks_active(collection, file_entry['versions'][new_sha], True)
@@ -1035,20 +1035,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
             default=os.environ.get('RAG_EXCLUDE', ''),
             help='A comma-separated list of paths and file signatures to exclude',
         )
+        git_extensions = {
+            'py', 'js', 'java', 'ts', 'md', 'rst', 'gradle', 'pro',
+            'properties', 'xml', 'toml', 'css'}
+        git_extension_list = ','.join('.' + e for e in sorted(git_extensions))
         sub.add_argument(
             '--git-extensions',
-            default=os.environ.get('RAG_GIT_EXTENSIONS', '.py,.js,.java,.ts,.md,.rst'),
+            default=os.environ.get('RAG_GIT_EXTENSIONS', git_extension_list),
             help=(
-                'Only process specific file types in a git repo; '
-                "default is '.py,.js,.java,.ts,.md,.rst'."
+                'Only process specific file types in a git repo; default is '
+                f'{git_extension_list}'
             ),
         )
+        doc_extensions = {'txt', 'md', 'pdf', 'docx', 'doc', 'rst'}
+        doc_extension_list = ','.join('.' + e for e in sorted(doc_extensions))
         sub.add_argument(
             '--dir-suffixes',
-            default=os.environ.get('RAG_DIR_SUFFIXES', '.txt,.md,.pdf,.docx,.rst'),
+            default=os.environ.get('RAG_DIR_SUFFIXES', doc_extension_list),
             help=(
                 'Only process specific file types in a non-git source folder; '
-                "default is '.txt,.md,.pdf,.docx,.rst'"
+                f'default is {doc_extension_list}'
             ),
         )
         sub.add_argument(
@@ -1087,3 +1093,10 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+# Possible additional work:
+#  - Allow multiple -s and -x parameters
+#  - Allow specifying embed model, chunk size, chunk overlap, and top_k via
+#    rag_* parameters
+#  - Go back to one database per root path?
