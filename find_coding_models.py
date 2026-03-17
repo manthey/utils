@@ -330,7 +330,7 @@ def main():
         help='Minimum downloads to include (default: 0)',
     )
     parser.add_argument(
-        '-o', '--output-format', choices=['table', 'commands'], default='table',
+        '-o', '--output-format', choices=['table', 'commands', 't', 'c', 'push'], default='table',
         help='Output format (default: table)',
     )
     parser.add_argument('-r', '--regex', help='Filter model names via a case-insensitive regex.')
@@ -341,7 +341,7 @@ def main():
         limit=args.limit, downloads=args.downloads, name_filter=args.regex,
     )
     models.sort(key=lambda m: (-m.size_gb, m.repo_id))
-    if args.output_format == 'table':
+    if args.output_format in {'table', 't'}:
         print(f"{'Repository':<50} {'Quant':<7} {'GB':<5} Type {'Dwnlds':<6} Chk")
         print('-' * 80)
         for m in models:

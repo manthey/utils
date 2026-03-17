@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
@@ -7,12 +8,14 @@
 #   "mermaid-py>=0.5.0",
 #   "tinycss2>=1.3.0",
 #   "tree-sitter>=0.24.0",
-#   "tree-sitter-language-pack>=0.7.0",
+#   "tree-sitter-language-pack>=0.7.0; sys_platform != 'android'",
 # ]
 # ///
 
 import argparse
 import asyncio
+import json
+import logging
 import subprocess
 import traceback
 from typing import Any
@@ -20,7 +23,10 @@ from typing import Any
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.types import TextContent, Tool
+from mcp.types import CallToolResult, TextContent, Tool
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 app = Server('syntax-validator')
 
@@ -223,26 +229,104 @@ VALIDATORS = {
     'python': validate_python,
 }
 
+REPORTED_LANGUAGES = set(VALIDATORS)
 _populate_tree_sitter_validators(VALIDATORS)
 SUPPORTED_LANGUAGES = sorted(VALIDATORS)
+REPORTED_LANGUAGES = sorted(REPORTED_LANGUAGES | (set(SUPPORTED_LANGUAGES) & {
+    'typescript', 'cmake', 'c', 'cpp', 'csv', 'dockerfile', 'json',
+    'rst', 'markdown', 'yaml', 'html'}))
+
+
+VALIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
+    'type': 'object',
+    'properties': {
+        'valid': {
+            'type': 'boolean',
+            'description': 'Whether the syntax is valid.',
+        },
+        'errors': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'line': {
+                        'type': ['integer', 'null'],
+                        'description': 'Line number of the error, or null if unknown.',
+                    },
+                    'column': {
+                        'type': ['integer', 'null'],
+                        'description': 'Column number of the error, or null if unknown.',
+                    },
+                    'message': {
+                        'type': 'string',
+                        'description': 'Description of the error.',
+                    },
+                },
+                'required': ['line', 'column', 'message'],
+                'additionalProperties': False,
+            },
+            'description': 'List of syntax errors found (empty if valid). Truncated to 5 entries.',
+        },
+    },
+    'required': ['valid', 'errors'],
+    'additionalProperties': False,
+}
+
+
+def tool_result(content: dict[str, Any]) -> CallToolResult:
+    """Return a CallToolResult with both structuredContent and a TextContent fallback."""
+    logger.info('  Result: %s', repr(content)[:60])
+    text = json.dumps(content)
+    logger.debug('  Full result\n%s', text)
+    return CallToolResult(
+        content=[TextContent(type='text', text=text)],
+        structuredContent=content,
+        isError=not content.get('valid', True) if 'valid' in content else False,
+    )
 
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
+    logger.info('Listing tools')
     return [
+        Tool(
+            name='list_supported_languages',
+            description=(
+                'List all languages supported by the validate_syntax tool. '
+                'Use this if you are unsure whether a specific language is supported.'
+            ),
+            inputSchema={
+                'type': 'object',
+                'properties': {},
+            },
+            outputSchema={
+                'type': 'object',
+                'properties': {
+                    'languages': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': 'All supported language identifiers.',
+                    },
+                },
+                'required': ['languages'],
+                'additionalProperties': False,
+            },
+        ),
         Tool(
             name='validate_syntax',
             description=(
                 'Validate the syntax of code in a given language. '
-                f"Supported languages: {', '.join(SUPPORTED_LANGUAGES)}."
+                f"Common languages include languages: {', '.join(REPORTED_LANGUAGES)}.  "
             ),
             inputSchema={
                 'type': 'object',
                 'properties': {
                     'language': {
                         'type': 'string',
-                        'enum': SUPPORTED_LANGUAGES,
-                        'description': 'The programming language of the code.',
+                        'description':
+                            'The programming language of the code in '
+                            'lowercase.  Common values: ' +
+                            ', '.join(REPORTED_LANGUAGES) + '.',
                     },
                     'code': {
                         'type': 'string',
@@ -251,22 +335,30 @@ async def list_tools() -> list[Tool]:
                 },
                 'required': ['language', 'code'],
             },
+            outputSchema=VALIDATE_OUTPUT_SCHEMA,
         ),
     ]
 
 
 @app.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+    if name == 'list_supported_languages':
+        logger.info(name)
+        return tool_result({'languages': SUPPORTED_LANGUAGES})
     if name != 'validate_syntax':
         msg = f'Unknown tool: {name}'
         raise ValueError(msg)
 
     language = arguments.get('language', '').lower()
     code = arguments.get('code', '')
+    logger.info('%s: %s - %d bytes', name, language, len(code))
+    logger.info('  Starts with %s', repr(code)[:60])
+    logger.debug(code)
     if code.startswith('```') and code.endswith('```'):
         code = code.split('\n', 1)[1].rstrip('`')
 
     if language not in VALIDATORS:
+        logger.info('  Unknown langauge')
         return [
             TextContent(
                 type='text',
@@ -288,21 +380,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 },
             ],
         }
-
-    if result['valid']:
-        text = f'Syntax is valid ({language}).'
-    else:
-        lines = [f'Syntax errors found ({language}):']
-        for error in result['errors'][:5]:
-            location = ''
-            if error.get('line') is not None:
-                location = f" at line {error['line']}"
-                if error.get('column') is not None:
-                    location += f", column {error['column']}"
-            lines.append(f"  -{location}: {error['message']}")
-        text = '\n'.join(lines)
-
-    return [TextContent(type='text', text=text)]
+    return tool_result(result)
 
 
 async def run_stdio() -> None:
@@ -369,7 +447,15 @@ def main() -> None:
     parser.add_argument('--host', default='127.0.0.1', help='HTTP host (default: 127.0.0.1)')
     parser.add_argument('--port', '-p', type=int, default=3000, help='HTTP port (default: 3000)')
     parser.add_argument('--languages', action='store_true', help='Show known languages')
+    parser.add_argument('--log', help='Append logs to the specified path')
+    parser.add_argument('--verbose', '-v', action='count', default=0,
+                        help='Increase verbosity')
     args = parser.parse_args()
+    if args.log:
+        handler = logging.FileHandler(args.log, mode='a')
+        handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+        logger.addHandler(handler)
+    logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
 
     if args.languages:
         for key in SUPPORTED_LANGUAGES:
