@@ -89,26 +89,32 @@ def validate_css(code: str) -> dict[str, Any]:
 
 def validate_java(code: str) -> dict[str, Any]:
     import javalang
-    try:
-        javalang.parse.parse(code)
+
+    def _parse(source: str) -> tuple[bool, list[dict]]:
+        try:
+            javalang.parse.parse(source)
+            return True, []
+        except javalang.parser.JavaSyntaxError as e:
+            token = getattr(e, 'at', None)
+            line = getattr(token, 'position', (None,))[0] if token else None
+            col = getattr(token, 'position', (None, None))[1] if token else None
+            msg = str(e).strip() or (
+                f"Syntax error at token '{token.value}'" if token else 'Unknown syntax error'
+            )
+            return False, [{'line': line, 'column': col, 'message': msg}]
+        except Exception as e:
+            return False, [{'line': None, 'column': None, 'message': str(e)}]
+
+    success, errors = _parse(code)
+    if success:
         return {'valid': True, 'errors': []}
-    except javalang.parser.JavaSyntaxError as e:
-        return {
-            'valid': False,
-            'errors': [
-                {
-                    'line': getattr(e, 'at', {}).get('line')
-                    if isinstance(getattr(e, 'at', None), dict) else None,
-                    'column': None,
-                    'message': str(e),
-                },
-            ],
-        }
-    except Exception as e:
-        return {
-            'valid': False,
-            'errors': [{'line': None, 'column': None, 'message': str(e)}],
-        }
+    wrapped = 'public class _Wrapper_ {\n' + code + '\n}'
+    if _parse(wrapped)[0]:
+        return {'valid': True, 'errors': []}
+    wrapped_method = 'public class _Wrapper_ {\n  public void _wrapper_() {\n' + code + '\n  }\n}'
+    if _parse(wrapped_method)[0]:
+        return {'valid': True, 'errors': []}
+    return {'valid': False, 'errors': errors}
 
 
 def validate_javascript(code: str) -> dict[str, Any]:
