@@ -125,7 +125,7 @@ def estimate_memory_gb(file_size_bytes: int) -> float:
 
 def matches_type(repo_id: str, model_type: str) -> bool:
     repo_lower = repo_id.lower()
-    patterns = CODING_PATTERNS if model_type == 'coding' else VISION_PATTERNS
+    patterns = CODING_PATTERNS if model_type == 'code' else VISION_PATTERNS
     return any(re.search(p, repo_lower) for p in patterns)
 
 
@@ -186,8 +186,7 @@ def select_best_quantization(candidates: list[ModelInfo], gpu_memory_gb: float) 
 
 
 @cache.memoize(expire=3600)
-def fetch_models_for_type(model_type: str, limit: int, downloads: int) -> list:
-    tags = CODING_TAGS if model_type == 'coding' else VISION_TAGS
+def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
     all_models = []
 
     for tag in tags:
@@ -218,12 +217,12 @@ def discover_models(  # noqa
 ) -> list[ModelInfo]:
     print(f'Fetching {model_filter} models from HuggingFace...')
 
-    if model_filter == 'all':
-        all_models = []
-        for mt in ['coding', 'vision']:
-            all_models.extend(fetch_models_for_type(mt, limit, downloads))
-    else:
-        all_models = fetch_models_for_type(model_filter, limit, downloads)
+    tags = set()
+    if model_filter in {'all', 'code'}:
+        tags |= set(CODING_TAGS)
+    if model_filter in {'all', 'vision'}:
+        tags |= set(VISION_TAGS)
+    all_models = fetch_models_for_tags(tags, limit, downloads)
 
     print(f'Retrieved {len(all_models)} candidate models')
 
@@ -247,7 +246,7 @@ def discover_models(  # noqa
             print(f'  Processing {i + 1}/{len(with_gguf)}...')
 
         model_type = model_filter if model_filter != 'all' else (
-            'coding' if matches_type(model.id, 'coding') else
+            'code' if matches_type(model.id, 'code') else
             'vision' if matches_type(model.id, 'vision') else None
         )
 
@@ -318,19 +317,20 @@ def main():
         help='Available GPU memory in gigabytes',
     )
     parser.add_argument(
-        '-f', '--filter', choices=['coding', 'vision', 'all'], default='all',
+        '-f', '--filter', choices=['code', 'vision', 'all'], default='all',
         help='Filter by model type (default: all)',
     )
     parser.add_argument(
-        '-l', '--limit', type=int, default=500,
-        help='Maximum models to fetch per category (default: 500)',
+        '-l', '--limit', type=int, default=1000,
+        help='Maximum models to fetch per category (default: 1000)',
     )
     parser.add_argument(
         '-d', '--downloads', type=int, default=0,
         help='Minimum downloads to include (default: 0)',
     )
     parser.add_argument(
-        '-o', '--output-format', choices=['table', 'commands', 't', 'c', 'push'], default='table',
+        '-o', '--output-format', choices=['table', 'commands', 'push', 't', 'c', 'p'],
+        default='table',
         help='Output format (default: table)',
     )
     parser.add_argument('-r', '--regex', help='Filter model names via a case-insensitive regex.')
@@ -353,7 +353,8 @@ def main():
     else:
         print('# Ollama pull commands:')
         for m in models:
-            tag = format_ollama_tag(m.filename)
+            # tag = format_ollama_tag(m.filename)
+            tag = m.quantization
             print(f'ollama pull hf.co/{m.repo_id}:{tag}')
     print(f'Total: {len(models)} models')
 
