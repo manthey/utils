@@ -154,7 +154,7 @@ def current_file_hashes_for_source(src: SourceConfig) -> dict[str, str]:
     for p in list_paths(src.source_path, suffixes, src.exclude, src.source_sub_path):
         rel = p.relative_to(src.source_path).as_posix()
         logger.debug('%s (%d)', p, os.path.getsize(p))
-        result[os.path.join(src, rel)] = hashlib.sha256(p.read_bytes()).hexdigest()
+        result[os.path.join(src.source_path, rel)] = hashlib.sha256(p.read_bytes()).hexdigest()
     return result
 
 
@@ -175,8 +175,6 @@ def resolve_chunk_size(for_query: bool = False) -> int:
         chunk_size = max(256, (context_length * 3) // 4)
         if not for_query:
             chunk_size = min(chunk_size, 4096)
-        else:
-            chunk_size = min(chunk_size, 6144)
         logger.debug('auto chunk size: %d', chunk_size)
         return chunk_size
     return config.chunk_size
@@ -220,8 +218,8 @@ def find_source_for_path(abs_path: str) -> tuple[SourceConfig, str] | None:
     path within that source root.
     """
     for src in source_configs:
-        prefix = src.source_path.rstrip('/') + '/'
-        if abs_path.startswith(prefix):
+        prefix = src.source_path.replace('\\', '/').rstrip('/') + '/'
+        if abs_path.replace('\\', '/').startswith(prefix):
             return src, abs_path[len(prefix):]
     return None
 
