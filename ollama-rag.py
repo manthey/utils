@@ -64,7 +64,24 @@ EXTENSION_TO_LANGUAGE = {
     '.kt': 'kotlin', '.swift': 'swift',
 }
 
+
+class SourceConfig:
+    """Configuration for a single source directory or git repo."""
+
+    def __init__(
+        self, source_path: str, source_type: str, source_sub_path: str,
+        exclude: str, git_extensions: str, dir_suffixes: str,
+    ):
+        self.source_path = os.path.abspath(source_path)
+        self.source_type = source_type
+        self.source_sub_path = source_sub_path
+        self.exclude = exclude
+        self.git_extensions = git_extensions
+        self.dir_suffixes = dir_suffixes
+
+
 config: argparse.Namespace
+source_configs: list[SourceConfig] = []
 mcp_manager: mcp.server.streamable_http_manager.StreamableHTTPSessionManager | None = None
 
 
@@ -99,51 +116,54 @@ def save_file_index(data_dir: Path, index: dict) -> None:
     path.write_text(json.dumps(index))
 
 
-def _make_pathspec(exclude: str) -> pathspec.PathSpec:
+def make_pathspec(exclude: str) -> pathspec.PathSpec:
     patterns = [p.strip() for p in (exclude or '').split(',') if p.strip()]
     return pathspec.PathSpec.from_lines('gitwildmatch', patterns)
 
 
 def list_paths(
-    source_path: str, suffixes: list[str], exclude: str,
+    source_path: str, suffixes: list[str], exclude: str, sub_path: str = '',
 ) -> Generator[Path, None, None]:
-    source = Path(source_path)
-    spec = _make_pathspec(exclude)
+    base = Path(source_path)
+    source = base / sub_path if sub_path else base
+    spec = make_pathspec(exclude)
     for p in sorted(source.rglob('*')):
         if p.is_file() and p.suffix.lower() in suffixes:
-            if not spec.match_file(p.relative_to(source).as_posix()):
+            if not spec.match_file(p.relative_to(base).as_posix()):
                 yield p
 
 
-def is_git_source() -> bool:
-    return config.source_type == 'git' or (
-        config.source_type == 'auto' and
-        os.path.exists(os.path.join(config.source_path, '.git'))
+def is_git_source(src: SourceConfig) -> bool:
+    return src.source_type == 'git' or (
+        src.source_type == 'auto' and
+        os.path.exists(os.path.join(src.source_path, '.git'))
     )
 
 
-def current_file_hashes() -> dict[str, str]:
-    if is_git_source():
-        extensions = [e.strip() for e in config.git_extensions.split(',')]
+def current_file_hashes_for_source(src: SourceConfig) -> dict[str, str]:
+    if is_git_source(src):
+        extensions = [e.strip() for e in src.git_extensions.split(',')]
         return {
-            item.path: item.hexsha
-            for item in _iter_repo_blobs(
-                config.source_path, extensions, config.source_sub_path, config.exclude)
+            os.path.join(src.source_path, item.path): item.hexsha
+            for item in iter_repo_blobs(
+                src.source_path, extensions, src.source_sub_path, src.exclude)
         }
-    suffixes = [e.strip() for e in config.dir_suffixes.split(',')]
+    suffixes = [e.strip() for e in src.dir_suffixes.split(',')]
     result = {}
-    for p in list_paths(config.source_path, suffixes, config.exclude):
-        rel = p.relative_to(config.source_path).as_posix()
+    for p in list_paths(src.source_path, suffixes, src.exclude, src.source_sub_path):
+        rel = p.relative_to(src.source_path).as_posix()
         logger.debug('%s (%d)', p, os.path.getsize(p))
-        result[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+        result[os.path.join(src, rel)] = hashlib.sha256(p.read_bytes()).hexdigest()
     return result
 
 
-def collection_name(embed_model: str, chunk_size: int, chunk_overlap: int) -> str:
+def collection_name_for_source(
+    embed_model: str, chunk_size: int, chunk_overlap: int, source_path: str,
+) -> str:
     name = 'rag_' + hashlib.sha256(
-        f'{embed_model}:{chunk_size}:{chunk_overlap}'.encode(),
+        f'{embed_model}:{chunk_size}:{chunk_overlap}:{source_path}'.encode(),
     ).hexdigest()[:16]
-    logger.info('collection name %s', name)
+    logger.info('collection name %s (source %s)', name, source_path)
     return name
 
 
@@ -164,12 +184,12 @@ def strip_hop_by_hop_headers(headers: dict) -> dict:
     return {k: v for k, v in headers.items() if k.lower() not in drop}
 
 
-def _iter_repo_blobs(
+def iter_repo_blobs(
     source_path: str, extensions: list[str], sub_path: str, exclude: str,
 ) -> Generator[git.objects.blob.Blob, None, None]:
     sub_path = sub_path.replace('\\', '/')
     prefix = sub_path.strip('/') + '/' if sub_path.strip('/') else ''
-    spec = _make_pathspec(exclude)
+    spec = make_pathspec(exclude)
     repo = git.Repo(source_path)
     for item in sorted(repo.tree().traverse(), key=lambda i: i.path):
         if item.type != 'blob':
@@ -182,7 +202,7 @@ def _iter_repo_blobs(
             yield item
 
 
-def _load_file_docs(p: Path) -> tuple[list[Document], bytes]:
+def load_file_docs(p: Path) -> tuple[list[Document], bytes]:
     suffix = p.suffix.lower()
     raw_bytes = p.read_bytes()
     readers = {'.pdf': PDFReader, '.docx': DocxReader, '.md': MarkdownReader}
@@ -192,27 +212,42 @@ def _load_file_docs(p: Path) -> tuple[list[Document], bytes]:
                      metadata={'file_path': str(p)})], raw_bytes
 
 
-def load_single_file_document(source_path: str, rel_path: str) -> Document | None:
-    if is_git_source():
+def find_source_for_path(abs_path: str) -> tuple[SourceConfig, str] | None:
+    """Given an absolute path, find the owning SourceConfig and the relative
+    path within that source root.
+    """
+    for src in source_configs:
+        prefix = src.source_path.rstrip('/') + '/'
+        if abs_path.startswith(prefix):
+            return src, abs_path[len(prefix):]
+    return None
+
+
+def load_single_file_document(abs_path: str) -> Document | None:
+    found = find_source_for_path(abs_path)
+    if found is None:
+        return None
+    src, rel_path = found
+    if is_git_source(src):
         try:
-            repo = git.Repo(source_path)
+            repo = git.Repo(src.source_path)
             blob = repo.tree() / rel_path
             text = blob.data_stream.read().decode(errors='replace')
             return Document(text=text, metadata={
-                'file_path': rel_path, 'file_sha': blob.hexsha,
+                'file_path': abs_path, 'file_sha': blob.hexsha,
                 'file_size': blob.size, 'file_mtime': 0,
             })
         except Exception:
             return None
-    p = Path(source_path) / rel_path
+    p = Path(src.source_path) / rel_path
     if not p.is_file():
         return None
     try:
-        docs, raw_bytes = _load_file_docs(p)
+        docs, raw_bytes = load_file_docs(p)
         return Document(
             text='\n'.join(d.text for d in docs),
             metadata={
-                'file_path': rel_path,
+                'file_path': abs_path,
                 'file_sha': hashlib.sha256(raw_bytes).hexdigest(),
                 'file_size': len(raw_bytes),
                 'file_mtime': p.stat().st_mtime,
@@ -308,7 +343,7 @@ def make_chunk_id(file_sha: str, byte_offset: int, text: str) -> str:
     return hashlib.sha256(f'{file_sha}:{byte_offset}:{text}'.encode()).hexdigest()[:32]
 
 
-def _check_shutdown() -> None:
+def check_shutdown() -> None:
     if _shutdown_event.is_set():
         msg = 'Shutdown requested'
         raise RuntimeError(msg)
@@ -322,7 +357,7 @@ def embed_document_chunks(
     file_sha = meta.get('file_sha', '')
     texts, embeddings, metadatas, ids = [], [], [], []
     for chunk_info in chunk_text(doc.text, chunk_size, chunk_overlap, file_path):
-        _check_shutdown()
+        check_shutdown()
         t = chunk_info['text']
         embedding_input = f'### File: {file_path}\n{t}' if file_path else t
         try:
@@ -345,7 +380,7 @@ def embed_document_chunks(
     return texts, embeddings, metadatas, ids
 
 
-def _batched_collection_op(
+def batched_collection_op(
     collection: chromadb.Collection, ids: list[str], op: str, **kwargs,
 ) -> None:
     if not ids:
@@ -367,7 +402,7 @@ def add_chunks_to_collection(
     texts: list[str], embeddings: list[list[float]],
     metadatas: list[dict], ids: list[str],
 ) -> None:
-    _batched_collection_op(
+    batched_collection_op(
         collection, ids, 'add',
         documents=texts, embeddings=embeddings, metadatas=metadatas,
     )
@@ -376,14 +411,14 @@ def add_chunks_to_collection(
 def set_chunks_active(
     collection: chromadb.Collection, chunk_ids: list[str], active: bool,
 ) -> None:
-    _batched_collection_op(
+    batched_collection_op(
         collection, chunk_ids, 'update',
         metadatas=[{'active': active}] * len(chunk_ids),
     )
 
 
 def delete_chunks(collection: chromadb.Collection, chunk_ids: list[str]) -> None:
-    _batched_collection_op(collection, chunk_ids, 'delete')
+    batched_collection_op(collection, chunk_ids, 'delete')
 
 
 def update_manifest(
@@ -465,14 +500,14 @@ def sync_collection(
             unit='file', dynamic_ncols=True,
         ) as progress:
             for fp in paths_to_embed:
-                _check_shutdown()
+                check_shutdown()
                 new_sha = current_hashes[fp]
                 if fp in modified_paths:
                     old_sha = files_entry[fp].get('active_sha', '')
                     if old_sha and old_sha in files_entry[fp].get('versions', {}):
                         set_chunks_active(
                             collection, files_entry[fp]['versions'][old_sha], False)
-                doc = load_single_file_document(config.source_path, fp)
+                doc = load_single_file_document(fp)
                 if doc is None:
                     logger.warning('failed to load %s, skipping', fp)
                     progress.update(1)
@@ -495,11 +530,12 @@ def sync_collection(
     logger.info('sync complete')
 
 
-def build_collection() -> chromadb.Collection:
+def build_collection_for_source(src: SourceConfig) -> chromadb.Collection:
     data_dir = Path(config.data_dir)
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
-    cname = collection_name(config.embed_model, config.chunk_size, config.chunk_overlap)
+    cname = collection_name_for_source(
+        config.embed_model, config.chunk_size, config.chunk_overlap, src.source_path)
     chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
     try:
         chroma_client.delete_collection(cname)
@@ -509,48 +545,52 @@ def build_collection() -> chromadb.Collection:
     index = load_file_index(data_dir)
     index[cname] = {'files': {}}
     save_file_index(data_dir, index)
-    sync_collection(collection, data_dir, cname, current_file_hashes())
+    sync_collection(collection, data_dir, cname, current_file_hashes_for_source(src))
     return collection
 
 
-def get_collection() -> chromadb.Collection | None:
+def source_unavailable(src: SourceConfig) -> bool:
+    if is_git_source(src):
+        try:
+            git.Repo(src.source_path)
+            return False
+        except Exception:
+            return True
+    source = Path(src.source_path)
+    return not source.exists() or not any(source.iterdir())
+
+
+def get_collection_for_source(src: SourceConfig) -> chromadb.Collection | None:
     data_dir = Path(config.data_dir)
     chroma_dir = data_dir / 'chroma'
     chroma_dir.mkdir(parents=True, exist_ok=True)
-    cname = collection_name(config.embed_model, config.chunk_size, config.chunk_overlap)
+    cname = collection_name_for_source(
+        config.embed_model, config.chunk_size, config.chunk_overlap, src.source_path)
     chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
-    source_unavailable = False
-    if is_git_source():
-        try:
-            git.Repo(config.source_path)
-        except Exception:
-            source_unavailable = True
-    else:
-        source = Path(config.source_path)
-        source_unavailable = not source.exists() or not any(source.iterdir())
+    unavailable = source_unavailable(src)
 
     with _build_locks_mutex:
         if cname not in _build_locks:
             _build_locks[cname] = threading.Lock()
         lock = _build_locks[cname]
     with lock:
-        if source_unavailable:
+        if unavailable:
             try:
                 collection = chroma_client.get_collection(cname)
                 if collection.count() > 0:
                     logger.info(
-                        'source path %r is unavailable; reusing existing embeddings',
-                        config.source_path,
+                        'source %s unavailable; reusing existing embeddings '
+                        '(%d chunks)', src.source_path, collection.count(),
                     )
                     return collection
             except Exception:
                 pass
             return None
-        hashes = current_file_hashes()
+        hashes = current_file_hashes_for_source(src)
         try:
             collection = chroma_client.get_collection(cname)
         except Exception:
-            return build_collection()
+            return build_collection_for_source(src)
         index = load_file_index(data_dir)
         indexed_hashes = {
             fp: data['active_sha']
@@ -560,6 +600,16 @@ def get_collection() -> chromadb.Collection | None:
         if hashes != indexed_hashes:
             sync_collection(collection, data_dir, cname, hashes)
         return collection
+
+
+def get_all_collections() -> list[chromadb.Collection]:
+    """Return one collection per configured source, syncing each as needed."""
+    collections = []
+    for src in source_configs:
+        coll = get_collection_for_source(src)
+        if coll is not None and coll.count() > 0:
+            collections.append(coll)
+    return collections
 
 
 def select_top_k(distances: list[float], min_k: int, max_k: int) -> int:
@@ -631,13 +681,13 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
 def retrieve_context(
     query: str, *, path_filter: str | None = None, top_k_override: int | None = None,
 ) -> str:
-    collection = get_collection()
-    if collection is None or not collection.count():
-        logger.info('collection is empty or unavailable, no context to retrieve')
+    collections = get_all_collections()
+    if not collections:
+        logger.info('no collections available, no context to retrieve')
         return ''
     embed_model = OllamaEmbedding(
         model_name=config.embed_model, base_url=config.ollama_base_url)
-    _check_shutdown()
+    check_shutdown()
     max_query_len = resolve_chunk_size(for_query=True)
     if len(query) > max_query_len:
         logger.info('query too long for embedding (%d chars), truncating to %d',
@@ -645,20 +695,37 @@ def retrieve_context(
         half = (max_query_len - 5) // 2
         query = query[:half] + '\n...\n' + query[-half:]
     query_embedding = embed_model.get_text_embedding(query)
-    count = collection.count()
     base_k = top_k_override if top_k_override is not None else config.top_k
-    min_top_k = min(max(1, base_k // 2), count)
-    max_top_k = min(base_k * 2, count)
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=max_top_k,
-        where={'$and': [{'active': True}, {'file_path': {'$eq': path_filter}}],
-               } if path_filter else {'active': True},
-        include=['documents', 'distances', 'metadatas'],
+    total_count = sum(c.count() for c in collections)
+    min_top_k = min(max(1, base_k // 2), total_count)
+    max_top_k = min(base_k * 2, total_count)
+    where_filter = (
+        {'$and': [{'active': True}, {'file_path': {'$eq': path_filter}}]}
+        if path_filter else {'active': True}
     )
-    documents = results.get('documents', [[]])[0]
-    distances = results.get('distances', [[]])[0]
-    metadatas = results.get('metadatas', [[]])[0]
+    all_documents: list[str] = []
+    all_distances: list[float] = []
+    all_metadatas: list[dict] = []
+    for collection in collections:
+        n = min(max_top_k, collection.count())
+        if n == 0:
+            continue
+        results = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=n,
+            where=where_filter,
+            include=['documents', 'distances', 'metadatas'],
+        )
+        all_documents.extend(results.get('documents', [[]])[0])
+        all_distances.extend(results.get('distances', [[]])[0])
+        all_metadatas.extend(results.get('metadatas', [[]])[0])
+    if not all_documents:
+        return ''
+    ranked = sorted(zip(
+        all_distances, all_documents, all_metadatas, strict=True), key=lambda x: x[0])
+    distances = [d for d, _, _ in ranked]
+    documents = [doc for _, doc, _ in ranked]
+    metadatas = [m for _, _, m in ranked]
     chosen_k = select_top_k(distances, min_top_k, max_top_k)
     logger.info('Adding context result documents: %d', chosen_k)
     return format_chunks(documents[:chosen_k], metadatas[:chosen_k])
@@ -666,13 +733,17 @@ def retrieve_context(
 
 def get_active_file_paths() -> list[str]:
     data_dir = Path(config.data_dir)
-    cname = collection_name(config.embed_model, config.chunk_size, config.chunk_overlap)
     index = load_file_index(data_dir)
-    files = index.get(cname, {}).get('files', {})
-    return sorted(
-        fp for fp, entry in files.items()
-        if fp != '__manifest__' and entry.get('active_sha')
-    )
+    all_paths: set[str] = set()
+    for src in source_configs:
+        cname = collection_name_for_source(
+            config.embed_model, config.chunk_size, config.chunk_overlap, src.source_path)
+        files = index.get(cname, {}).get('files', {})
+        all_paths.update(
+            fp for fp, entry in files.items()
+            if fp != '__manifest__' and entry.get('active_sha')
+        )
+    return sorted(all_paths)
 
 
 def mcp_search_codebase(
@@ -689,7 +760,7 @@ def mcp_list_files(path_prefix: str | None = None) -> list[str]:
 
 
 def mcp_get_file(path: str) -> str:
-    doc = load_single_file_document(config.source_path, path)
+    doc = load_single_file_document(path)
     if doc is None:
         return f'Error: file not found: {path}'
     return doc.text
@@ -802,7 +873,7 @@ async def chat_completions(request: fastapi.Request):
     query = extract_query_text(body.get('messages', []))
     logger.debug('query: %s, stream: %s', query, client_wants_stream)
     ollama_base_url = config.ollama_base_url
-    if query and config.source_path:
+    if query and source_configs:
         try:
             context = await asyncio.to_thread(retrieve_context, query)
             logger.info('context length: %d', len(context))
@@ -876,11 +947,54 @@ async def mcp_endpoint(scope, receive, send):
     await mcp_manager.handle_request(scope, receive, send)
 
 
+def pad_list(shortList: list[str], length: int, default: str) -> list[str]:
+    """Extend list with default values until it has the given length."""
+    return shortList + [default] * max(0, length - len(shortList))
+
+
+def build_source_configs(args: argparse.Namespace) -> list[SourceConfig]:
+    """Build SourceConfig objects by pairing the multi-value arguments by
+    index.  The Nth --exclude applies to the Nth --source-path, etc.
+    """
+    source_paths = args.source_path or []
+    if not source_paths:
+        return []
+    n = len(source_paths)
+    source_types = pad_list(args.source_type or [], n, 'auto')
+    source_sub_paths = pad_list(args.source_sub_path or [], n, '')
+    excludes = pad_list(args.exclude or [], n, '')
+    git_exts = pad_list(
+        args.git_extensions or [], n, args._git_extensions_default)
+    dir_suffs = pad_list(
+        args.dir_suffixes or [], n, args._dir_suffixes_default)
+    configs = []
+    for i in range(n):
+        sp = source_paths[i]
+        if not sp:
+            continue
+        configs.append(SourceConfig(
+            source_path=sp,
+            source_type=source_types[i],
+            source_sub_path=source_sub_paths[i],
+            exclude=excludes[i],
+            git_extensions=git_exts[i],
+            dir_suffixes=dir_suffs[i],
+        ))
+    return configs
+
+
 def cmd_serve(args):
     global config
+    global source_configs
     global mcp_manager
 
     config = args
+    source_configs = build_source_configs(args)
+    if source_configs:
+        paths_str = ', '.join(src.source_path for src in source_configs)
+        logger.info('configured %d source(s): %s', len(source_configs), paths_str)
+    else:
+        logger.warning('no source paths configured; RAG context retrieval is disabled')
     if args.mcp_http_path:
         mcp_manager = mcp.server.streamable_http_manager.StreamableHTTPSessionManager(
             app=create_mcp_server(),
@@ -955,8 +1069,10 @@ def cmd_clear(args):
 
 def cmd_mcp(args):
     global config
+    global source_configs
     config = args
-    get_collection()
+    source_configs = build_source_configs(args)
+    get_all_collections()
     server = create_mcp_server()
 
     async def _run():
@@ -980,6 +1096,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     serve = subparsers.add_parser('serve', parents=[shared])
     clear = subparsers.add_parser('clear', parents=[shared])
     mcp = subparsers.add_parser('mcp', parents=[shared])
+    git_extensions = {
+        'py', 'js', 'java', 'ts', 'md', 'rst', 'gradle', 'pro',
+        'properties', 'xml', 'toml', 'css'}
+    git_extension_default = ','.join('.' + e for e in sorted(git_extensions))
+    doc_extensions = {'txt', 'md', 'pdf', 'docx', 'doc', 'rst'}
+    doc_extension_default = ','.join('.' + e for e in sorted(doc_extensions))
     serve.add_argument(
         '--host', type=str, default='0.0.0.0',
         help='Proxy host; default is 0.0.0.0.  Using localhost is more secure.',
@@ -1017,72 +1139,104 @@ def build_arg_parser() -> argparse.ArgumentParser:
         )
         sub.add_argument(
             '--source-type', choices=['directory', 'git', 'auto'],
-            default=os.environ.get('RAG_SOURCE_TYPE', 'auto'),
-            help='Auto checks for a .git folder.  If git, only tracked files are used.',
+            action='append', default=None,
+            help='Source type for the corresponding --source-path.  Can be '
+            'specified multiple times, paired by position.  Default is auto.',
         )
         sub.add_argument(
             '--source-path', '-s',
-            default=os.environ.get('RAG_SOURCE_PATH', ''),
-            help='The root of the git repo or documents to embed',
+            action='append', default=None,
+            help='The root of a git repo or document directory to embed.  '
+            'Can be specified multiple times to index multiple sources '
+            'into separate collections that are queried together.',
         )
         sub.add_argument(
             '--source-sub-path',
-            default=os.environ.get('RAG_SOURCE_SUB_PATH', ''),
-            help='For git repos, only embed files within this subpath',
+            action='append', default=None,
+            help='For git repos, only embed files within this subpath.  '
+            'Paired by position with --source-path.',
         )
         sub.add_argument(
             '--exclude', '-x',
-            default=os.environ.get('RAG_EXCLUDE', ''),
-            help='A comma-separated list of paths and file signatures to exclude',
+            action='append', default=None,
+            help='A comma-separated list of paths and file patterns to exclude.  '
+            'Can be specified multiple times, one per --source-path.',
         )
-        git_extensions = {
-            'py', 'js', 'java', 'ts', 'md', 'rst', 'gradle', 'pro',
-            'properties', 'xml', 'toml', 'css'}
-        git_extension_list = ','.join('.' + e for e in sorted(git_extensions))
         sub.add_argument(
             '--git-extensions',
-            default=os.environ.get('RAG_GIT_EXTENSIONS', git_extension_list),
+            action='append', default=None,
             help=(
-                'Only process specific file types in a git repo; default is '
-                f'{git_extension_list}'
+                'Only process specific file types in a git repo.  Can be '
+                'specified multiple times, one per --source-path.  Default is '
+                f'{git_extension_default}'
             ),
         )
-        doc_extensions = {'txt', 'md', 'pdf', 'docx', 'doc', 'rst'}
-        doc_extension_list = ','.join('.' + e for e in sorted(doc_extensions))
         sub.add_argument(
             '--dir-suffixes',
-            default=os.environ.get('RAG_DIR_SUFFIXES', doc_extension_list),
+            action='append', default=None,
             help=(
-                'Only process specific file types in a non-git source folder; '
-                f'default is {doc_extension_list}'
+                'Only process specific file types in a non-git source folder.  '
+                'Can be specified multiple times, one per --source-path.  '
+                f'Default is {doc_extension_default}'
             ),
         )
         sub.add_argument(
             '--top-k', type=int,
             default=int(os.environ.get('RAG_TOP_K', '5')),
             help=(
-                'How much context to fetch; default is 5.  Use larger values for general queries, '
-                'smaller values for targeted queries.  A value between half and twice this will be '
-                'chosen based on recall similarity.'
+                'How much context to fetch; default is 5.  Use larger values '
+                'for general queries, smaller values for targeted queries.  '
+                'A value between half and twice this will be chosen based on '
+                'recall similarity.'
             ),
         )
         sub.add_argument(
             '--chunk-size', type=int,
             default=int(os.environ.get('RAG_CHUNK_SIZE', '0')),
-            help='Embedding chunk size; default or 0 is determined by model.  Too big will fail',
+            help='Embedding chunk size; default or 0 is determined by model.  '
+            'Too big will fail',
         )
         sub.add_argument(
             '--chunk-overlap', type=int,
             default=int(os.environ.get('RAG_CHUNK_OVERLAP', '64')),
             help='Embedding chunk overlap; default is 64',
         )
+        sub.set_defaults(
+            _git_extensions_default=git_extension_default,
+            _dir_suffixes_default=doc_extension_default,
+        )
     return parser
 
 
-def main():
+def main():  # noqa
     parser = build_arg_parser()
     args = parser.parse_args()
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
+    if hasattr(args, 'source_path') and not args.source_path:
+        env_paths = os.environ.get('RAG_SOURCE_PATH', '')
+        if env_paths:
+            args.source_path = [
+                p.strip() for p in env_paths.split(os.pathsep) if p.strip()]
+    if hasattr(args, 'source_type') and not args.source_type:
+        env_val = os.environ.get('RAG_SOURCE_TYPE', '')
+        if env_val:
+            args.source_type = [env_val]
+    if hasattr(args, 'source_sub_path') and not args.source_sub_path:
+        env_val = os.environ.get('RAG_SOURCE_SUB_PATH', '')
+        if env_val:
+            args.source_sub_path = [env_val]
+    if hasattr(args, 'exclude') and not args.exclude:
+        env_val = os.environ.get('RAG_EXCLUDE', '')
+        if env_val:
+            args.exclude = [env_val]
+    if hasattr(args, 'git_extensions') and not args.git_extensions:
+        env_val = os.environ.get('RAG_GIT_EXTENSIONS', '')
+        if env_val:
+            args.git_extensions = [env_val]
+    if hasattr(args, 'dir_suffixes') and not args.dir_suffixes:
+        env_val = os.environ.get('RAG_DIR_SUFFIXES', '')
+        if env_val:
+            args.dir_suffixes = [env_val]
     if args.command == 'serve':
         cmd_serve(args)
     elif args.command == 'clear':
@@ -1093,10 +1247,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-# Possible additional work:
-#  - Allow multiple -s and -x parameters
-#  - Allow specifying embed model, chunk size, chunk overlap, and top_k via
-#    rag_* parameters
-#  - Go back to one database per root path?
