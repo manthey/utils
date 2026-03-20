@@ -79,21 +79,25 @@ QUANT_PRIORITY = {
     'Q1_0': 72,
 }
 
-CODING_TAGS = ['code', 'conversational']
-VISION_TAGS = ['image-text-to-text', 'conversational']
-
-CODING_PATTERNS = [
-    r'code', r'coder', r'codestral', r'starcoder', r'codellama',
-    r'wizardcoder', r'phind', r'magicoder', r'codegen', r'replit',
-    r'stable-code', r'granite-code', r'qwen.*coder', r'deepseek.*code',
-    r'claude', r'teichai',
-]
-
-VISION_PATTERNS = [
-    r'vision', r'llava', r'bakllava', r'moondream', r'cogvlm', r'minicpm-v',
-    r'internvl', r'paligemma', r'qwen.*vl', r'yi-vl', r'bunny',
-    r'nanollava', r'obsidian', r'pixtral', r'llama.*vision', '-vl',
-]
+MODEL_PATTERNS = {
+    'code': {
+        'tags': {'code', 'conversational'},
+        'patterns': {
+            r'code', r'coder', r'codestral', r'starcoder', r'codellama',
+            r'wizardcoder', r'phind', r'magicoder', r'codegen', r'replit',
+            r'stable-code', r'granite-code', r'qwen.*coder', r'deepseek.*code',
+            r'claude', r'teichai'}},
+    'embed': {
+        'tags': {'embedding', 'text-embeddings-inference'},
+        'patterns': {r'embed'}},
+    'vision': {
+        'tags': {'image-text-to-text', 'conversational'},
+        'patterns': {
+            r'vision', r'llava', r'bakllava', r'moondream', r'cogvlm', r'minicpm-v',
+            r'internvl', r'paligemma', r'qwen.*vl', r'yi-vl', r'bunny',
+            r'nanollava', r'obsidian', r'pixtral', r'llama.*vision', '-vl',
+        }},
+}
 
 
 def rate_limited_call(func, max_retries=8, base_delay=5):
@@ -125,7 +129,7 @@ def estimate_memory_gb(file_size_bytes: int) -> float:
 
 def matches_type(repo_id: str, model_type: str) -> bool:
     repo_lower = repo_id.lower()
-    patterns = CODING_PATTERNS if model_type == 'code' else VISION_PATTERNS
+    patterns = MODEL_PATTERNS.get(model_type)['patterns']
     return any(re.search(p, repo_lower) for p in patterns)
 
 
@@ -176,9 +180,11 @@ def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tupl
     return single_files
 
 
-def select_best_quantization(candidates: list[ModelInfo], gpu_memory_gb: float) -> ModelInfo | None:
-    fitting = [m for m in candidates if m.size_gb <=
-               gpu_memory_gb and m.quantization in QUANT_PRIORITY]
+def select_best_quantization(
+    candidates: list[ModelInfo], gpu_memory_gb: float, min_memory: float | None,
+) -> ModelInfo | None:
+    fitting = [m for m in candidates if (
+        min_memory or 0) <= m.size_gb <= gpu_memory_gb and m.quantization in QUANT_PRIORITY]
     if not fitting:
         return None
     fitting.sort(key=lambda m: QUANT_PRIORITY.get(m.quantization, 99))
@@ -214,20 +220,20 @@ def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
 def discover_models(  # noqa
     api: huggingface_hub.HfApi, gpu_memory_gb: float, model_filter: str,
     limit: int, downloads: int, name_filter: str | None = None,
+    min_memory: float | None = None,
 ) -> list[ModelInfo]:
     print(f'Fetching {model_filter} models from HuggingFace...')
 
     tags = set()
-    if model_filter in {'all', 'code'}:
-        tags |= set(CODING_TAGS)
-    if model_filter in {'all', 'vision'}:
-        tags |= set(VISION_TAGS)
-    all_models = fetch_models_for_tags(tags, limit, downloads)
+    for key in MODEL_PATTERNS:
+        if model_filter in {key, 'all'}:
+            tags |= MODEL_PATTERNS[key]['tags']
+    found_models = fetch_models_for_tags(tags, limit, downloads)
 
-    print(f'Retrieved {len(all_models)} candidate models')
+    print(f'Retrieved {len(found_models)} candidate models')
 
     with_gguf = []
-    for model in all_models:
+    for model in found_models:
         if name_filter and not re.search(name_filter, model.id, re.IGNORECASE):
             continue
         siblings = getattr(model, 'siblings', None)
@@ -287,7 +293,7 @@ def discover_models(  # noqa
                 downloads=getattr(model, 'downloads', 0) or 0,
             ))
 
-        best = select_best_quantization(candidates, gpu_memory_gb)
+        best = select_best_quantization(candidates, gpu_memory_gb, min_memory)
         if best:
             discovered[model.id] = best
         else:
@@ -310,14 +316,18 @@ def format_ollama_tag(filename: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Discover Ollama-compatible coding/vision models from HuggingFace',
+        description='Find Ollama-compatible models from HuggingFace',
     )
     parser.add_argument(
         '-m', '--gpu-memory-gb', type=float, required=True,
         help='Available GPU memory in gigabytes',
     )
     parser.add_argument(
-        '-f', '--filter', choices=['code', 'vision', 'all'], default='all',
+        '--min', '--min-gpu-memory-gb', type=float,
+        help='Minimum model GPU memory in gigabytes',
+    )
+    parser.add_argument(
+        '-f', '--filter', choices=['code', 'vision', 'embed', 'all'], default='all',
         help='Filter by model type (default: all)',
     )
     parser.add_argument(
@@ -339,6 +349,7 @@ def main():
     models = discover_models(
         api=api, gpu_memory_gb=args.gpu_memory_gb, model_filter=args.filter,
         limit=args.limit, downloads=args.downloads, name_filter=args.regex,
+        min_memory=args.min,
     )
     models.sort(key=lambda m: (-m.size_gb, m.repo_id))
     if args.output_format in {'table', 't'}:
