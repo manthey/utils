@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import threading
@@ -174,7 +175,9 @@ def resolve_chunk_size(for_query: bool = False) -> int:
         chunk_size = max(256, (context_length * 3) // 4)
         if not for_query:
             chunk_size = min(chunk_size, 4096)
-        logger.info('auto chunk size: %d', chunk_size)
+        else:
+            chunk_size = min(chunk_size, 6144)
+        logger.debug('auto chunk size: %d', chunk_size)
         return chunk_size
     return config.chunk_size
 
@@ -235,7 +238,7 @@ def load_single_file_document(abs_path: str) -> Document | None:
             text = blob.data_stream.read().decode(errors='replace')
             return Document(text=text, metadata={
                 'file_path': abs_path, 'file_sha': blob.hexsha,
-                'file_size': blob.size, 'file_mtime': 0,
+                'file_size': blob.size, 'file_mtime': 0, 'rel_path': rel_path,
             })
         except Exception:
             return None
@@ -249,8 +252,8 @@ def load_single_file_document(abs_path: str) -> Document | None:
             metadata={
                 'file_path': abs_path,
                 'file_sha': hashlib.sha256(raw_bytes).hexdigest(),
-                'file_size': len(raw_bytes),
-                'file_mtime': p.stat().st_mtime,
+                'file_size': len(raw_bytes), 'file_mtime': p.stat().st_mtime,
+                'rel_path': rel_path,
             },
         )
     except Exception:
@@ -355,11 +358,12 @@ def embed_document_chunks(
     meta = doc.metadata or {}
     file_path = meta.get('file_path', '')
     file_sha = meta.get('file_sha', '')
+    rel_path = meta.get('rel_path', file_path)
     texts, embeddings, metadatas, ids = [], [], [], []
     for chunk_info in chunk_text(doc.text, chunk_size, chunk_overlap, file_path):
         check_shutdown()
         t = chunk_info['text']
-        embedding_input = f'### File: {file_path}\n{t}' if file_path else t
+        embedding_input = f'### File: {rel_path}\n{t}' if file_path else t
         try:
             embedding = embed_model.get_text_embedding(embedding_input)
         except Exception:
@@ -370,7 +374,7 @@ def embed_document_chunks(
         texts.append(t)
         embeddings.append(embedding)
         metadatas.append({
-            'file_path': file_path, 'file_sha': file_sha,
+            'file_path': file_path, 'file_sha': file_sha, 'rel_path': rel_path,
             'file_size': meta.get('file_size', 0), 'file_mtime': meta.get('file_mtime', 0),
             'byte_offset': chunk_info['byte_offset'],
             'line_start': chunk_info['line_start'], 'line_end': chunk_info['line_end'],
@@ -632,6 +636,7 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
     )
     parts = []
     current_file: str | None = None
+    rel_file: str | None = None
     current_text: str = ''
     current_byte_start: int = 0
     current_byte_end: int = 0
@@ -642,13 +647,13 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
         if not current_text:
             return
         if current_line_start > 0 and current_line_start != current_line_end:
-            header = f'### File: {current_file} (lines {current_line_start}-{current_line_end})'
+            header = f'### File: {rel_file} (lines {current_line_start}-{current_line_end})'
         elif current_line_start > 0:
-            header = f'### File: {current_file} (line {current_line_start})'
+            header = f'### File: {rel_file} (line {current_line_start})'
         elif current_byte_start > 0:
-            header = f'### File: {current_file} (byte offset {current_byte_start})'
+            header = f'### File: {rel_file} (byte offset {current_byte_start})'
         else:
-            header = f'### File: {current_file}'
+            header = f'### File: {rel_file}'
         parts.append(f'{header}\n{current_text}')
 
     for text, meta in chunks:
@@ -668,6 +673,7 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
         else:
             flush()
             current_file = file_path
+            rel_file = meta.get('rel_path', file_path)
             current_text = text
             current_byte_start = byte_offset
             current_byte_end = chunk_end
@@ -679,12 +685,23 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
 
 
 def retrieve_context(
-    query: str, *, path_filter: str | None = None, top_k_override: int | None = None,
+    query: str, *, path_filter: str | None = None,
+    path_pattern: str | None = None, top_k_override: int | None = None,
 ) -> str:
     collections = get_all_collections()
     if not collections:
         logger.info('no collections available, no context to retrieve')
         return ''
+    pattern_matched_paths: list[str] | None = None
+    if path_pattern is not None:
+        all_active = get_active_file_paths()
+        for abs_path in all_active:
+            found = find_source_for_path(abs_path)
+            rel_path = abs_path if found is None else found[1]
+            if re.search(path_pattern, rel_path):
+                if pattern_matched_paths is None:
+                    pattern_matched_paths = []
+                pattern_matched_paths.append(abs_path)
     embed_model = OllamaEmbedding(
         model_name=config.embed_model, base_url=config.ollama_base_url)
     check_shutdown()
@@ -699,10 +716,18 @@ def retrieve_context(
     total_count = sum(c.count() for c in collections)
     min_top_k = min(max(1, base_k // 2), total_count)
     max_top_k = min(base_k * 2, total_count)
-    where_filter = (
-        {'$and': [{'active': True}, {'file_path': {'$eq': path_filter}}]}
-        if path_filter else {'active': True}
-    )
+    active_condition: dict = {'active': True}
+    if path_filter:
+        where_filter = {'$and': [active_condition, {'file_path': {'$eq': path_filter}}]}
+    elif pattern_matched_paths is not None:
+        where_filter = {
+            '$and': [
+                active_condition,
+                {'file_path': {'$in': pattern_matched_paths}},
+            ],
+        }
+    else:
+        where_filter = active_condition
     all_documents: list[str] = []
     all_distances: list[float] = []
     all_metadatas: list[dict] = []
@@ -866,6 +891,29 @@ def inject_context(body: dict, context: str) -> dict:
     return body
 
 
+def extract_rag_params(body: dict) -> dict:
+    rag_params: dict = {}
+    for key in list(body.keys()):
+        if key.startswith('rag_'):
+            rag_params[key] = body.pop(key)
+    return rag_params
+
+
+def apply_rag_params(
+    rag_params: dict,
+) -> tuple[int | None, str | None]:
+    top_k_override: int | None = None
+    path_pattern: str | None = None
+
+    if 'rag_top_k' in rag_params:
+        top_k_override = int(rag_params['rag_top_k'])
+
+    if 'rag_path_pattern' in rag_params:
+        path_pattern = str(rag_params['rag_path_pattern'])
+
+    return top_k_override, path_pattern
+
+
 @app.post('/v1/chat/completions')
 async def chat_completions(request: fastapi.Request):
     body = await request.json()
@@ -873,9 +921,14 @@ async def chat_completions(request: fastapi.Request):
     query = extract_query_text(body.get('messages', []))
     logger.debug('query: %s, stream: %s', query, client_wants_stream)
     ollama_base_url = config.ollama_base_url
+    rag_params = extract_rag_params(body)
+    if rag_params:
+        logger.info('rag params: %s', rag_params)
+    top_k_override, path_pattern = apply_rag_params(rag_params)
     if query and source_configs:
         try:
-            context = await asyncio.to_thread(retrieve_context, query)
+            context = await asyncio.to_thread(
+                retrieve_context, query, path_pattern=path_pattern, top_k_override=top_k_override)
             logger.info('context length: %d', len(context))
             logger.debug('context:\n%s', context)
             body = inject_context(body, context)
@@ -992,7 +1045,8 @@ def cmd_serve(args):
     source_configs = build_source_configs(args)
     if source_configs:
         paths_str = ', '.join(src.source_path for src in source_configs)
-        logger.info('configured %d source(s): %s', len(source_configs), paths_str)
+        logger.info('configured %d source%s: %s', len(source_configs),
+                    's' if len(source_configs) != 1 else '', paths_str)
     else:
         logger.warning('no source paths configured; RAG context retrieval is disabled')
     if args.mcp_http_path:
@@ -1097,8 +1151,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     clear = subparsers.add_parser('clear', parents=[shared])
     mcp = subparsers.add_parser('mcp', parents=[shared])
     git_extensions = {
-        'py', 'js', 'java', 'ts', 'md', 'rst', 'gradle', 'pro',
-        'properties', 'xml', 'toml', 'css'}
+        'py', 'js', 'java', 'ts', 'md', 'rst', 'gradle', 'pro', 'ini', 'cfg',
+        'properties', 'xml', 'toml', 'css', 'cmake', 'html', 'in', 'mako',
+        'txt', 'pug', 'sh', 'styl', 'yaml', 'yml',
+    }
     git_extension_default = ','.join('.' + e for e in sorted(git_extensions))
     doc_extensions = {'txt', 'md', 'pdf', 'docx', 'doc', 'rst'}
     doc_extension_default = ','.join('.' + e for e in sorted(doc_extensions))
