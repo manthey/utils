@@ -58,7 +58,7 @@ def expand_paths(paths, exclude_paths):
             found = glob.glob(path, recursive=True)
         total -= {os.path.relpath(p) for p in found}
     return [p for p in sorted(total)
-            if os.path.isfile(p) and is_git_tracked(p) and not is_binary(p)]
+            if os.path.isfile(p) and ((is_git_tracked(p) and not is_binary(p)) or p in paths)]
 
 
 def escape_backticks(content):
