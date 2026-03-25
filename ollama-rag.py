@@ -70,6 +70,33 @@ EXTENSION_TO_LANGUAGE = {
     '.kt': 'kotlin', '.swift': 'swift',
 }
 
+PREAMBLES = {
+    'code':
+        "The following code fragments were retrieved from the project's "
+        "source files based on semantic similarity to the user's query. Each "
+        'fragment is preceded by a header indicating the file path and line '
+        'range. The fragments may not represent the complete contents of each '
+        'file, and multiple fragments from the same file may not be '
+        'contiguous. When referencing code in your response, cite the file '
+        'path and line numbers. Base your response on the information '
+        'provided in these fragments.',
+    'directory':
+        'The following document excerpts were retrieved based on semantic '
+        "similarity to the user's query. Each excerpt is preceded by a header "
+        'indicating the source file and position within that file. The '
+        'excerpts may not represent the complete contents of each document, '
+        'and multiple excerpts from the same document may not be contiguous. '
+        'Base your response on the information provided in these excerpts.',
+    'mixed':
+        'The following excerpts from source code and documents were retrieved '
+        "based on semantic similarity to the user's query. Each excerpt is "
+        'preceded by a header indicating the file path and location. The '
+        'excerpts may not represent the complete contents of each file, and '
+        'multiple excerpts from the same file may not be contiguous. When '
+        'referencing code, cite the file path and line numbers. Base your '
+        'response on the information provided in these excerpts.',
+}
+
 
 class SourceConfig:
     """Configuration for a single source directory or git repo."""
@@ -922,10 +949,11 @@ def extract_query_text(messages: list[dict]) -> str:
 
 
 def inject_context(body: dict, context: str) -> dict:
-    system_content = (
-        "Use the following retrieved context to help answer the user's question.\n\n" +
-        context
-    )
+    """Add the context to the first system prompt that exists."""
+    gitcount = len([s for s in source_configs if is_git_source(s)])
+    category = ('code' if gitcount == len(source_configs) else
+                'directory' if not gitcount else 'mixed')
+    system_content = PREAMBLES[category] + '\n\n' + context
     new_messages = []
     inserted = False
     for message in body.get('messages', []):
