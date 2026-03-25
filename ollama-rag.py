@@ -2,8 +2,10 @@
 # /// script
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
+#   "cachetools",
 #   "chromadb>=0.5",
 #   "fastapi>=0.111",
+#   "filelock",
 #   "gitpython>=3.1",
 #   "httpx>=0.27",
 #   "llama-index-embeddings-ollama>=0.8",
@@ -22,6 +24,7 @@
 
 import argparse
 import asyncio
+import concurrent.futures
 import contextlib
 import hashlib
 import json
@@ -34,9 +37,11 @@ import threading
 from collections.abc import Generator
 from pathlib import Path
 
+import cachetools
 import chromadb
 import fastapi
 import fastapi.middleware.cors
+import filelock
 import git
 import httpx
 import mcp.server.stdio
@@ -106,15 +111,50 @@ _build_locks_mutex = threading.Lock()
 _build_locks: dict[str, threading.Lock] = {}
 
 
-def load_file_index(data_dir: Path) -> dict:
+def file_index_lock(data_dir: Path) -> filelock.FileLock:
+    return filelock.FileLock(data_dir / 'file_index.lock', timeout=60)
+
+
+def file_atomic_write(path: Path, data: str) -> None:
+    tmp = path.with_suffix('.tmp.' + str(os.getpid()))
+    try:
+        tmp.write_text(data)
+        try:
+            tmp.replace(path)
+        except OSError:
+            shutil.copy2(str(tmp), str(path))
+            tmp.unlink(missing_ok=True)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def load_file_index(data_dir: Path, held_lock: filelock.FileLock | None = None) -> dict:
     path = data_dir / 'file_index.json'
-    return json.loads(path.read_text()) if path.exists() else {}
+    if held_lock is not None:
+        return json.loads(path.read_text()) if path.exists() else {}
+    with file_index_lock(data_dir):
+        return json.loads(path.read_text()) if path.exists() else {}
 
 
-def save_file_index(data_dir: Path, index: dict) -> None:
+def save_file_index(
+    data_dir: Path, index: dict, held_lock: filelock.FileLock | None = None,
+) -> None:
     path = data_dir / 'file_index.json'
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(index))
+    if held_lock is not None:
+        file_atomic_write(path, json.dumps(index))
+    else:
+        with file_index_lock(data_dir):
+            file_atomic_write(path, json.dumps(index))
+
+
+def save_file_index_entry(data_dir: Path, cname: str, coll_entry: dict) -> None:
+    lock = file_index_lock(data_dir)
+    with lock:
+        index = load_file_index(data_dir, held_lock=lock)
+        index[cname] = coll_entry
+        save_file_index(data_dir, index, held_lock=lock)
 
 
 def make_pathspec(exclude: str) -> pathspec.PathSpec:
@@ -151,10 +191,21 @@ def current_file_hashes_for_source(src: SourceConfig) -> dict[str, str]:
         }
     suffixes = [e.strip() for e in src.dir_suffixes.split(',')]
     result = {}
-    for p in list_paths(src.source_path, suffixes, src.exclude, src.source_sub_path):
-        rel = p.relative_to(src.source_path).as_posix()
-        logger.debug('%s (%d)', p, os.path.getsize(p))
-        result[os.path.join(src.source_path, rel)] = hashlib.sha256(p.read_bytes()).hexdigest()
+
+    @cachetools.cached(cache=cachetools.TTLCache(ttl=3600, maxsize=10000))
+    def get_hash(p, p_size):
+        with open(p, 'rb') as fptr:
+            return hashlib.file_digest(fptr, 'sha256').hexdigest()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {}
+        for p in list_paths(src.source_path, suffixes, src.exclude, src.source_sub_path):
+            p_size = os.path.getsize(p)
+            logger.debug('%s (%d)', p, p_size)
+            futures[executor.submit(get_hash, p, p_size)] = p
+        for future, p in futures.items():
+            rel = p.relative_to(src.source_path).as_posix()
+            result[os.path.join(src.source_path, rel)] = future.result()
     return result
 
 
@@ -453,8 +504,11 @@ def sync_collection(
     embed_model = OllamaEmbedding(
         model_name=config.embed_model, base_url=config.ollama_base_url)
     chunk_size = resolve_chunk_size()
-    index = load_file_index(data_dir)
-    coll_entry = index.setdefault(cname, {'files': {}})
+    lock = file_index_lock(data_dir)
+    with lock:
+        index = load_file_index(data_dir, held_lock=lock)
+        coll_entry = index.setdefault(cname, {'files': {}})
+        save_file_index(data_dir, index, held_lock=lock)
     files_entry = coll_entry['files']
     indexed_paths = {fp for fp in files_entry if fp != '__manifest__'}
     current_paths = set(current_hashes.keys())
@@ -520,6 +574,7 @@ def sync_collection(
                 file_entry = files_entry.setdefault(fp, {'active_sha': '', 'versions': {}})
                 file_entry['active_sha'] = new_sha
                 file_entry['versions'][new_sha] = ids
+                save_file_index_entry(data_dir, cname, coll_entry)
                 logger.debug('embedded %s (%d chunks)', fp, len(ids))
                 progress.update(1)
     httpx_logger.setLevel(saved_level)
@@ -528,7 +583,7 @@ def sync_collection(
         [fp for fp in current_hashes if fp != '__manifest__'],
         chunk_size, config.chunk_overlap, embed_model, coll_entry,
     )
-    save_file_index(data_dir, index)
+    save_file_index(data_dir, index, coll_entry)
     logger.info('sync complete')
 
 
@@ -544,9 +599,7 @@ def build_collection_for_source(src: SourceConfig) -> chromadb.Collection:
     except Exception:
         pass
     collection = chroma_client.create_collection(cname)
-    index = load_file_index(data_dir)
-    index[cname] = {'files': {}}
-    save_file_index(data_dir, index)
+    save_file_index_entry(data_dir, cname, {'files': {}})
     sync_collection(collection, data_dir, cname, current_file_hashes_for_source(src))
     return collection
 
@@ -1068,6 +1121,8 @@ def cmd_serve(args):
     signal.signal(signal.SIGTERM, _handle_signal)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
+    if args.initial:
+        get_all_collections()
     while thread.is_alive():
         thread.join(timeout=0.5)
     logging.getLogger('uvicorn.error').setLevel(logging.INFO)
@@ -1124,7 +1179,8 @@ def cmd_mcp(args):
     global source_configs
     config = args
     source_configs = build_source_configs(args)
-    get_all_collections()
+    if args.initial:
+        get_all_collections()
     server = create_mcp_server()
 
     async def _run():
@@ -1254,6 +1310,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
             '--chunk-overlap', type=int,
             default=int(os.environ.get('RAG_CHUNK_OVERLAP', '64')),
             help='Embedding chunk overlap; default is 64',
+        )
+        sub.add_argument(
+            '--initial', action='store_true',
+            help='Immediately embed source data on initial start rather than '
+            'waiting for a query',
         )
         sub.set_defaults(
             _git_extensions_default=git_extension_default,
