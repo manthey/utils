@@ -1,6 +1,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
+#     "python-dateutil",
 #     "diskcache",
 #     "huggingface-hub>=0.20.0",
 # ]
@@ -14,6 +15,7 @@ import shutil
 import time
 from dataclasses import dataclass
 
+import dateutil.parser
 import diskcache
 import huggingface_hub
 
@@ -331,6 +333,10 @@ def main():
     parser.add_argument(
         '--modified', action='store_true', default=False,
         help='Show modified date rather than created date')
+    parser.add_argument(
+        '--before', help='Only show models before this date')
+    parser.add_argument(
+        '--after', help='Only show models after this date')
     args = parser.parse_args()
     api = huggingface_hub.HfApi()
     models = discover_models(
@@ -338,6 +344,20 @@ def main():
         limit=args.limit, downloads=args.downloads, name_filter=args.regex,
         min_memory=args.min,
     )
+    if args.before or args.after:
+        filtered = []
+        before = dateutil.parser.parse(args.before).astimezone(
+            datetime.timezone.utc) if args.before else None
+        after = dateutil.parser.parse(args.after).astimezone(
+            datetime.timezone.utc) if args.after else None
+        for m in models:
+            mdate = (m.modified if args.modified else m.created) or m.created
+            if mdate and before is not None and mdate > before:
+                continue
+            if mdate and after is not None and mdate < after:
+                continue
+            filtered.append(m)
+        models = filtered
     models.sort(key=lambda m: (-m.size_gb, m.repo_id))
     tw, _ = shutil.get_terminal_size()
     rw = tw - 7 - 1 - 5 - 1 - 8 - 1 - 6 - 1
