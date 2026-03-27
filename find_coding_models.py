@@ -7,8 +7,10 @@
 # ///
 
 import argparse
+import datetime
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 
@@ -28,6 +30,8 @@ class ModelInfo:
     model_type: str
     is_chunked: bool
     downloads: int
+    created: datetime.datetime | None
+    modified: datetime.datetime | None
 
 
 QUANT_PRIORITY = {
@@ -107,7 +111,7 @@ def rate_limited_call(func, max_retries=8, base_delay=5):
         except huggingface_hub.utils.HfHubHTTPError as e:
             if '429' in str(e) or 'rate limit' in str(e).lower():
                 delay = base_delay * (2 ** attempt)
-                print(f'  Rate limited. Waiting {delay}s (attempt {attempt + 1}/{max_retries})...')
+                print(f'  Rate limited. Waiting {delay}s (attempt {attempt + 1}/{max_retries})')
                 time.sleep(delay)
             else:
                 raise
@@ -152,31 +156,25 @@ def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tupl
         files = rate_limited_call(fetch)
     except Exception:
         return []
-
     single_files = []
     chunked_groups = {}
-
     for f in files:
         filename = getattr(f, 'path', None)
         if not filename or not filename.endswith('.gguf'):
             continue
         if 'mmproj' in filename:
             continue
-
         size = getattr(f, 'size', None)
         if not size:
             continue
-
         chunk_match = re.match(r'(.+)-(\d{5})-of-(\d{5})\.gguf$', filename)
         if chunk_match:
             base = chunk_match.group(1)
             chunked_groups[base] = chunked_groups.get(base, 0) + size
         else:
             single_files.append((filename, size, False))
-
     for base, total_size in chunked_groups.items():
         single_files.append((f'{base}.gguf', total_size, True))
-
     return single_files
 
 
@@ -194,20 +192,18 @@ def select_best_quantization(
 @cache.memoize(expire=3600)
 def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
     all_models = []
-
     for tag in tags:
         def fetch(t=tag):
             return list(huggingface_hub.list_models(
                 filter=t,
                 gated=False,
-                expand=['siblings'],
+                expand=['siblings', 'createdAt', 'lastModified'],
                 sort='downloads',
                 limit=limit,
             ))
-        print(f"  Fetching models with tag '{tag}'...")
+        print(f"  Fetching models with tag '{tag}'")
         models = rate_limited_call(fetch)
         all_models.extend(models)
-
     seen = set()
     unique = []
     for m in all_models:
@@ -222,16 +218,13 @@ def discover_models(  # noqa
     limit: int, downloads: int, name_filter: str | None = None,
     min_memory: float | None = None,
 ) -> list[ModelInfo]:
-    print(f'Fetching {model_filter} models from HuggingFace...')
-
+    print(f'Fetching {model_filter} models from HuggingFace')
     tags = set()
     for key in MODEL_PATTERNS:
         if model_filter in {key, 'all'}:
             tags |= MODEL_PATTERNS[key]['tags']
     found_models = fetch_models_for_tags(tags, limit, downloads)
-
     print(f'Retrieved {len(found_models)} candidate models')
-
     with_gguf = []
     for model in found_models:
         if name_filter and not re.search(name_filter, model.id, re.IGNORECASE):
@@ -239,33 +232,25 @@ def discover_models(  # noqa
         siblings = getattr(model, 'siblings', None)
         if has_gguf_files(siblings):
             with_gguf.append(model)
-
     print(f'Found {len(with_gguf)} models with GGUF files')
-
     discovered = {}
     skipped_name_mismatch = 0
     skipped_no_fit = 0
     skipped_fetch_failed = 0
-
     for i, model in enumerate(with_gguf):
         if (i + 1) % 20 == 0:
-            print(f'  Processing {i + 1}/{len(with_gguf)}...')
-
+            print(f'  Processing {i + 1}/{len(with_gguf)}')
         model_type = model_filter if model_filter != 'all' else (
             'code' if matches_type(model.id, 'code') else
             'vision' if matches_type(model.id, 'vision') else None
         )
-
         if model_filter != 'all' and not matches_type(model.id, model_filter):
             skipped_name_mismatch += 1
             continue
-
         gguf_files = fetch_gguf_file_sizes(api, model.id)
-
         if not gguf_files:
             skipped_fetch_failed += 1
             continue
-
         candidates = []
         quants = {}
         for filename, size_bytes, is_chunked in gguf_files:
@@ -291,19 +276,18 @@ def discover_models(  # noqa
                 model_type=model_type,
                 is_chunked=is_chunked,
                 downloads=getattr(model, 'downloads', 0) or 0,
+                created=getattr(model, 'created_at', None),
+                modified=getattr(model, 'last_modified', None),
             ))
-
         best = select_best_quantization(candidates, gpu_memory_gb, min_memory)
         if best:
             discovered[model.id] = best
         else:
             skipped_no_fit += 1
-
     print(f'Found {len(discovered)} matching models')
     print(f'  Skipped (name mismatch): {skipped_name_mismatch}')
     print(f'  Skipped (fetch failed): {skipped_fetch_failed}')
     print(f'  Skipped (all too large): {skipped_no_fit}')
-
     return list(discovered.values())
 
 
@@ -344,6 +328,9 @@ def main():
         help='Output format (default: table)',
     )
     parser.add_argument('-r', '--regex', help='Filter model names via a case-insensitive regex.')
+    parser.add_argument(
+        '--modified', action='store_true', default=False,
+        help='Show modified date rather than created date')
     args = parser.parse_args()
     api = huggingface_hub.HfApi()
     models = discover_models(
@@ -352,15 +339,19 @@ def main():
         min_memory=args.min,
     )
     models.sort(key=lambda m: (-m.size_gb, m.repo_id))
+    tw, _ = shutil.get_terminal_size()
+    rw = tw - 7 - 1 - 5 - 1 - 8 - 1 - 6 - 1
     if args.output_format in {'table', 't'}:
-        print(f"{'Repository':<50} {'Quant':<7} {'GB':<5} Type {'Dwnlds':<6} Chk")
-        print('-' * 80)
+        print(f"{'Repository':<{rw}} {'Quant':<7} {'GB':>5} {'Date':>8} {'Dwnlds':>6}")
+        print('-' * tw)
         for m in models:
-            chunked_str = 'yes' if m.is_chunked else 'no'
-            repo_short = m.repo_id[:47] + '...' if len(m.repo_id) > 50 else m.repo_id
+            # chunked_str = 'yes' if m.is_chunked else 'no'
+            repo_short = m.repo_id[:rw - 3] + '...' if len(m.repo_id) > rw else m.repo_id
+            mdate = (m.modified if args.modified else m.created) or m.created
+            mdate_str = mdate.strftime('%Y%m%d') if mdate else ''
             print(
-                f'{repo_short:<50} {m.quantization:<7} {m.size_gb:<5.1f} '
-                f'{str(m.model_type)[:4]:<4} {m.downloads:6} {chunked_str:<3}')
+                f'{repo_short:<{rw}} {m.quantization:<7} {m.size_gb:5.1f} '
+                f'{mdate_str:<8} {m.downloads:6}')
     else:
         print('# Ollama pull commands:')
         for m in models:
