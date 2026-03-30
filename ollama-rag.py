@@ -4,6 +4,7 @@
 # dependencies = [
 #   "cachetools",
 #   "chromadb>=0.5",
+#   "docx2txt",
 #   "fastapi>=0.111",
 #   "filelock",
 #   "gitpython>=3.1",
@@ -298,8 +299,12 @@ def load_file_docs(p: Path) -> tuple[list[Document], bytes]:
     raw_bytes = p.read_bytes()
     readers = {'.pdf': PDFReader, '.docx': DocxReader, '.md': MarkdownReader}
     if suffix in readers:
-        return readers[suffix]().load_data(p), raw_bytes
-    return [Document(text=raw_bytes.decode(errors='replace'),
+        try:
+            return readers[suffix]().load_data(p), raw_bytes
+        except Exception as exc:
+            logger.warning('reading failed for %s: %r', p, exc)
+            raise
+    return [Document(text=raw_bytes.decode(errors='ignore'),
                      metadata={'file_path': str(p)})], raw_bytes
 
 
@@ -909,6 +914,7 @@ def expand_context(
     fused: list[tuple[str, dict]],
     collections: list[chromadb.Collection],
     expansion_lines: int = 20,
+    expansion_bytes: int = 4096,
 ) -> list[tuple[str, dict]]:
     expanded: list[tuple[str, dict]] = []
     seen: set[str] = set()
@@ -933,7 +939,10 @@ def expand_context(
                     'metadatas', []), strict=True):
                 neighbor_key = f"{file_path}:{m.get('byte_offset', 0)}"
                 line_distance = abs(m.get('line_start', 0) - meta.get('line_start', 0))
-                if neighbor_key not in seen and line_distance <= expansion_lines:
+                byte_distance = abs(m.get('byte_offset', 0) - meta.get('byte_offset', 0))
+                if (neighbor_key not in seen and
+                        line_distance <= expansion_lines and
+                        byte_distance < expansion_bytes):
                     seen.add(neighbor_key)
                     expanded.append((doc, m))
     return expanded
@@ -1033,7 +1042,7 @@ def retrieve_context(  # noqa
     fused = reciprocal_rank_fusion(semantic_top, bm25_top, max_top_k)
     logger.info('RRF fused: %d', len(fused))
     expansion_lines = max(20, config.chunk_size // 32) if config.chunk_size > 0 else 20
-    expanded = expand_context(fused, collections, expansion_lines)
+    expanded = expand_context(fused, collections, expansion_lines, resolve_chunk_size())
     logger.info('expanded context chunks: %d (from %d fused)', len(expanded), len(fused))
     final_documents = [text for text, _ in expanded]
     final_metadatas = [meta for _, meta in expanded]
