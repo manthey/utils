@@ -11,9 +11,11 @@
 #   "llama-index-embeddings-ollama>=0.8",
 #   "llama-index-readers-file>=0.5",
 #   "mcp[cli]>=1.9",
+#   "msgpack>=1.0",
 #   "pathspec",
 #   "pypdf>=4.0",
 #   "python-docx>=1.1",
+#   "rank-bm25>=0.2",
 #   "tqdm>=4.0",
 #   "tree-sitter-languages>=1.10",
 #   "tree-sitter>=0.21",
@@ -47,7 +49,9 @@ import httpx
 import mcp.server.stdio
 import mcp.server.streamable_http_manager
 import mcp.types
+import msgpack
 import pathspec
+import rank_bm25
 import starlette.responses
 import starlette.routing
 import tqdm
@@ -113,9 +117,17 @@ class SourceConfig:
         self.dir_suffixes = dir_suffixes
 
 
+class BM25Index:
+    def __init__(self, bm25: rank_bm25.BM25Okapi, documents: list[str], metadatas: list[dict]):
+        self.bm25 = bm25
+        self.documents = documents
+        self.metadatas = metadatas
+
+
 config: argparse.Namespace
 source_configs: list[SourceConfig] = []
 mcp_manager: mcp.server.streamable_http_manager.StreamableHTTPSessionManager | None = None
+bm25_cache: dict[str, BM25Index] = {}
 
 
 @contextlib.asynccontextmanager
@@ -523,6 +535,86 @@ def update_manifest(
     }
 
 
+def bm25_path_for_collection(data_dir: Path, cname: str) -> Path:
+    return data_dir / 'bm25' / f'{cname}.msgpack'
+
+
+def save_bm25_index(data_dir: Path, cname: str, bm25_idx: BM25Index) -> None:
+    path = bm25_path_for_collection(data_dir, cname)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        'documents': bm25_idx.documents,
+        'metadatas': bm25_idx.metadatas,
+    }
+    path.write_bytes(msgpack.packb(payload, use_bin_type=True))
+    logger.info('saved BM25 index for %s (%d documents)', cname, len(bm25_idx.documents))
+
+
+def load_bm25_index(data_dir: Path, cname: str) -> BM25Index | None:
+    path = bm25_path_for_collection(data_dir, cname)
+    if not path.exists():
+        return None
+    try:
+        payload = msgpack.unpackb(path.read_bytes(), raw=False)
+        documents = payload['documents']
+        metadatas = payload['metadatas']
+        tokenized = [doc.lower().split() for doc in documents]
+        if not tokenized:
+            tokenized = [['']]
+        bm25 = rank_bm25.BM25Okapi(tokenized)
+        return BM25Index(bm25, documents, metadatas)
+    except Exception:
+        logger.warning('failed to load BM25 index for %s', cname)
+        return None
+
+
+def build_bm25_from_collection(collection: chromadb.Collection) -> BM25Index:
+    all_documents: list[str] = []
+    all_metadatas: list[dict] = []
+    count = collection.count()
+    if count > 0:
+        max_batch = collection._client.get_max_batch_size()
+        for offset in range(0, count, max_batch):
+            batch = collection.get(
+                offset=offset,
+                limit=min(max_batch, count - offset),
+                where={'active': True},
+                include=['documents', 'metadatas'],
+            )
+            all_documents.extend(batch.get('documents', []))
+            all_metadatas.extend(batch.get('metadatas', []))
+    tokenized = [doc.lower().split() for doc in all_documents]
+    if not tokenized:
+        tokenized = [['']]
+    bm25 = rank_bm25.BM25Okapi(tokenized)
+    return BM25Index(bm25, all_documents, all_metadatas)
+
+
+def get_bm25_for_collection(
+    collection: chromadb.Collection, data_dir: Path, cname: str,
+    force_rebuild: bool = False,
+) -> BM25Index:
+    if not force_rebuild and cname in bm25_cache:
+        return bm25_cache[cname]
+    if not force_rebuild:
+        loaded = load_bm25_index(data_dir, cname)
+        if loaded is not None:
+            bm25_cache[cname] = loaded
+            return loaded
+    bm25_idx = build_bm25_from_collection(collection)
+    save_bm25_index(data_dir, cname, bm25_idx)
+    bm25_cache[cname] = bm25_idx
+    return bm25_idx
+
+
+def rebuild_bm25_for_source(
+    collection: chromadb.Collection, data_dir: Path, cname: str,
+) -> None:
+    bm25_idx = build_bm25_from_collection(collection)
+    save_bm25_index(data_dir, cname, bm25_idx)
+    bm25_cache[cname] = bm25_idx
+
+
 def sync_collection(
     collection: chromadb.Collection, data_dir: Path, cname: str,
     current_hashes: dict[str, str],
@@ -611,6 +703,7 @@ def sync_collection(
         chunk_size, config.chunk_overlap, embed_model, coll_entry,
     )
     save_file_index(data_dir, index, coll_entry)
+    rebuild_bm25_for_source(collection, data_dir, cname)
     logger.info('sync complete')
 
 
@@ -628,7 +721,6 @@ def build_collection_for_source(src: SourceConfig) -> chromadb.Collection:
     collection = chroma_client.create_collection(cname)
     save_file_index_entry(data_dir, cname, {'files': {}})
     sync_collection(collection, data_dir, cname, current_file_hashes_for_source(src))
-    return collection
 
 
 def source_unavailable(src: SourceConfig) -> bool:
@@ -650,7 +742,6 @@ def get_collection_for_source(src: SourceConfig) -> chromadb.Collection | None:
         config.embed_model, config.chunk_size, config.chunk_overlap, src.source_path)
     chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
     unavailable = source_unavailable(src)
-
     with _build_locks_mutex:
         if cname not in _build_locks:
             _build_locks[cname] = threading.Lock()
@@ -682,6 +773,11 @@ def get_collection_for_source(src: SourceConfig) -> chromadb.Collection | None:
         if hashes != indexed_hashes:
             sync_collection(collection, data_dir, cname, hashes)
         return collection
+    bm25_path = bm25_path_for_collection(data_dir, cname)
+    if not bm25_path.exists() and collection.count() > 0:
+        logger.info('BM25 index missing for %s, building from existing collection', cname)
+        rebuild_bm25_for_source(collection, data_dir, cname)
+    return collection
 
 
 def get_all_collections() -> list[chromadb.Collection]:
@@ -762,7 +858,88 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
     return '\n\n'.join(parts)
 
 
-def retrieve_context(
+def bm25_search(
+    bm25_idx: BM25Index,
+    query: str,
+    top_n: int,
+    path_filter: str | None = None,
+) -> list[tuple[str, dict, float]]:
+    if not bm25_idx.documents:
+        return []
+    tokenized_query = query.lower().split()
+    scores = bm25_idx.bm25.get_scores(tokenized_query)
+    indexed = list(zip(range(len(bm25_idx.documents)), scores, strict=True))
+    if path_filter:
+        indexed = [
+            (i, s) for i, s in indexed
+            if bm25_idx.metadatas[i].get('file_path') == path_filter
+        ]
+    indexed.sort(key=lambda x: x[1], reverse=True)
+    return [
+        (bm25_idx.documents[i], bm25_idx.metadatas[i], score)
+        for i, score in indexed[:top_n]
+        if score > 0
+    ]
+
+
+def reciprocal_rank_fusion(
+    semantic_results: list[tuple[str, dict]],
+    bm25_results: list[tuple[str, dict, float]],
+    max_results: int,
+    k: int = 60,
+) -> list[tuple[str, dict]]:
+    scores: dict[str, float] = {}
+    doc_map: dict[str, tuple[str, dict]] = {}
+    for rank, (text, meta) in enumerate(semantic_results):
+        chunk_key = f"{meta.get('file_path', '')}:{meta.get('byte_offset', 0)}"
+        scores[chunk_key] = scores.get(chunk_key, 0.0) + 1.0 / (k + rank + 1)
+        doc_map[chunk_key] = (text, meta)
+    for rank, (text, meta, _bm25_score) in enumerate(bm25_results):
+        chunk_key = f"{meta.get('file_path', '')}:{meta.get('byte_offset', 0)}"
+        scores[chunk_key] = scores.get(chunk_key, 0.0) + 1.0 / (k + rank + 1)
+        doc_map[chunk_key] = (text, meta)
+    ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return [
+        doc_map[chunk_key]
+        for chunk_key, rrf_score in ranked[:max_results]
+    ]
+
+
+def expand_context(
+    fused: list[tuple[str, dict]],
+    collections: list[chromadb.Collection],
+    expansion_lines: int = 20,
+) -> list[tuple[str, dict]]:
+    expanded: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for text, meta in fused:
+        file_path = meta.get('file_path', '')
+        chunk_key = f"{file_path}:{meta.get('byte_offset', 0)}"
+        if chunk_key in seen:
+            continue
+        seen.add(chunk_key)
+        expanded.append((text, meta))
+        if not file_path or file_path == '__manifest__':
+            continue
+        for collection in collections:
+            try:
+                results = collection.get(
+                    where={'$and': [{'active': True}, {'file_path': {'$eq': file_path}}]},
+                    include=['documents', 'metadatas'],
+                )
+            except Exception:
+                continue
+            for doc, m in zip(results.get('documents', []), results.get(
+                    'metadatas', []), strict=True):
+                neighbor_key = f"{file_path}:{m.get('byte_offset', 0)}"
+                line_distance = abs(m.get('line_start', 0) - meta.get('line_start', 0))
+                if neighbor_key not in seen and line_distance <= expansion_lines:
+                    seen.add(neighbor_key)
+                    expanded.append((doc, m))
+    return expanded
+
+
+def retrieve_context(  # noqa
     query: str, *, path_filter: str | None = None,
     path_pattern: str | None = None, top_k_override: int | None = None,
 ) -> str:
@@ -809,6 +986,7 @@ def retrieve_context(
     all_documents: list[str] = []
     all_distances: list[float] = []
     all_metadatas: list[dict] = []
+    data_dir = Path(config.data_dir)
     for collection in collections:
         n = min(max_top_k, collection.count())
         if n == 0:
@@ -824,14 +1002,42 @@ def retrieve_context(
         all_metadatas.extend(results.get('metadatas', [[]])[0])
     if not all_documents:
         return ''
-    ranked = sorted(zip(
-        all_distances, all_documents, all_metadatas, strict=True), key=lambda x: x[0])
-    distances = [d for d, _, _ in ranked]
-    documents = [doc for _, doc, _ in ranked]
-    metadatas = [m for _, _, m in ranked]
-    chosen_k = select_top_k(distances, min_top_k, max_top_k)
-    logger.info('Adding context result documents: %d', chosen_k)
-    return format_chunks(documents[:chosen_k], metadatas[:chosen_k])
+    semantic_ranked = sorted(zip(all_distances, all_documents, all_metadatas, strict=True))
+    semantic_distances = [dist for dist, _, _ in semantic_ranked]
+    semantic_chosen_k = select_top_k(semantic_distances, min_top_k, max_top_k)
+    semantic_top = [
+        (doc, meta) for _, doc, meta in semantic_ranked[:semantic_chosen_k]
+    ]
+    logger.info('semantic chosen: %d', semantic_chosen_k)
+
+    all_bm25_results: list[tuple[str, dict, float]] = []
+    for src in source_configs:
+        cname = collection_name_for_source(
+            config.embed_model, config.chunk_size, config.chunk_overlap, src.source_path)
+        for collection in collections:
+            if collection.name == cname:
+                bm25_idx = get_bm25_for_collection(collection, data_dir, cname)
+                all_bm25_results.extend(
+                    bm25_search(bm25_idx, query, max_top_k, path_filter))
+                break
+
+    all_bm25_results.sort(key=lambda x: x[2], reverse=True)
+    bm25_scores = [s for _, _, s in all_bm25_results]
+    if bm25_scores:
+        bm25_distances = [1.0 / (1.0 + s) for s in bm25_scores]
+        bm25_chosen_k = select_top_k(bm25_distances, min_top_k, max_top_k)
+    else:
+        bm25_chosen_k = 0
+    bm25_top = all_bm25_results[:bm25_chosen_k]
+    logger.info('bm25 chosen: %d', bm25_chosen_k)
+    fused = reciprocal_rank_fusion(semantic_top, bm25_top, max_top_k)
+    logger.info('RRF fused: %d', len(fused))
+    expansion_lines = max(20, config.chunk_size // 32) if config.chunk_size > 0 else 20
+    expanded = expand_context(fused, collections, expansion_lines)
+    logger.info('expanded context chunks: %d (from %d fused)', len(expanded), len(fused))
+    final_documents = [text for text, _ in expanded]
+    final_metadatas = [meta for _, meta in expanded]
+    return format_chunks(final_documents, final_metadatas)
 
 
 def get_active_file_paths() -> list[str]:
@@ -983,13 +1189,10 @@ def apply_rag_params(
 ) -> tuple[int | None, str | None]:
     top_k_override: int | None = None
     path_pattern: str | None = None
-
     if 'rag_top_k' in rag_params:
         top_k_override = int(rag_params['rag_top_k'])
-
     if 'rag_path_pattern' in rag_params:
         path_pattern = str(rag_params['rag_path_pattern'])
-
     return top_k_override, path_pattern
 
 
