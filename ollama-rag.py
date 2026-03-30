@@ -615,10 +615,6 @@ def rebuild_bm25_for_source(
     bm25_cache[cname] = bm25_idx
 
 
-def invalidatebm25_cache(cname: str) -> None:
-    bm25_cache.pop(cname, None)
-
-
 def sync_collection(
     collection: chromadb.Collection, data_dir: Path, cname: str,
     current_hashes: dict[str, str],
@@ -746,7 +742,6 @@ def get_collection_for_source(src: SourceConfig) -> chromadb.Collection | None:
         config.embed_model, config.chunk_size, config.chunk_overlap, src.source_path)
     chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
     unavailable = source_unavailable(src)
-
     with _build_locks_mutex:
         if cname not in _build_locks:
             _build_locks[cname] = threading.Lock()
@@ -888,13 +883,14 @@ def bm25_search(
 
 
 def reciprocal_rank_fusion(
-    semantic_results: list[tuple[str, dict, float]],
+    semantic_results: list[tuple[str, dict]],
     bm25_results: list[tuple[str, dict, float]],
+    max_results: int,
     k: int = 60,
-) -> list[tuple[str, dict, float]]:
+) -> list[tuple[str, dict]]:
     scores: dict[str, float] = {}
     doc_map: dict[str, tuple[str, dict]] = {}
-    for rank, (text, meta, _distance) in enumerate(semantic_results):
+    for rank, (text, meta) in enumerate(semantic_results):
         chunk_key = f"{meta.get('file_path', '')}:{meta.get('byte_offset', 0)}"
         scores[chunk_key] = scores.get(chunk_key, 0.0) + 1.0 / (k + rank + 1)
         doc_map[chunk_key] = (text, meta)
@@ -904,19 +900,19 @@ def reciprocal_rank_fusion(
         doc_map[chunk_key] = (text, meta)
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     return [
-        (doc_map[chunk_key][0], doc_map[chunk_key][1], rrf_score)
-        for chunk_key, rrf_score in ranked
+        doc_map[chunk_key]
+        for chunk_key, rrf_score in ranked[:max_results]
     ]
 
 
 def expand_context(
-    fused: list[tuple[str, dict, float]],
+    fused: list[tuple[str, dict]],
     collections: list[chromadb.Collection],
     expansion_lines: int = 20,
 ) -> list[tuple[str, dict]]:
     expanded: list[tuple[str, dict]] = []
     seen: set[str] = set()
-    for text, meta, _score in fused:
+    for text, meta in fused:
         file_path = meta.get('file_path', '')
         chunk_key = f"{file_path}:{meta.get('byte_offset', 0)}"
         if chunk_key in seen:
@@ -991,9 +987,8 @@ def retrieve_context(  # noqa
     all_distances: list[float] = []
     all_metadatas: list[dict] = []
     data_dir = Path(config.data_dir)
-    fetch_n = min(base_k * 4, total_count)
     for collection in collections:
-        n = min(fetch_n, collection.count())
+        n = min(max_top_k, collection.count())
         if n == 0:
             continue
         results = collection.query(
@@ -1008,36 +1003,38 @@ def retrieve_context(  # noqa
     if not all_documents:
         return ''
     semantic_ranked = sorted(zip(all_distances, all_documents, all_metadatas, strict=True))
-    semantic_results = [(doc, meta, dist) for dist, doc, meta in semantic_ranked]
+    semantic_distances = [dist for dist, _, _ in semantic_ranked]
+    semantic_chosen_k = select_top_k(semantic_distances, min_top_k, max_top_k)
+    semantic_top = [
+        (doc, meta) for _, doc, meta in semantic_ranked[:semantic_chosen_k]
+    ]
+    logger.info('semantic chosen: %d', semantic_chosen_k)
 
     all_bm25_results: list[tuple[str, dict, float]] = []
     for src in source_configs:
         cname = collection_name_for_source(
             config.embed_model, config.chunk_size, config.chunk_overlap, src.source_path)
-        bm25_idx = None
         for collection in collections:
             if collection.name == cname:
                 bm25_idx = get_bm25_for_collection(collection, data_dir, cname)
+                all_bm25_results.extend(
+                    bm25_search(bm25_idx, query, max_top_k, path_filter))
                 break
-        if bm25_idx is not None:
-            all_bm25_results.extend(
-                bm25_search(bm25_idx, query, fetch_n, path_filter))
 
     all_bm25_results.sort(key=lambda x: x[2], reverse=True)
-    all_bm25_results = all_bm25_results[:fetch_n]
-    logger.info('semantic results: %d, bm25 results: %d',
-                len(semantic_results), len(all_bm25_results))
-
-    fused = reciprocal_rank_fusion(semantic_results, all_bm25_results)
-    distances_for_select = [1.0 / (1.0 + score) for _, _, score in fused]
-    chosen_k = select_top_k(distances_for_select, min_top_k, max_top_k)
-    fused_top = fused[:chosen_k]
-    logger.info('RRF fused results: %d, chosen top-k: %d', len(fused), chosen_k)
-
+    bm25_scores = [s for _, _, s in all_bm25_results]
+    if bm25_scores:
+        bm25_distances = [1.0 / (1.0 + s) for s in bm25_scores]
+        bm25_chosen_k = select_top_k(bm25_distances, min_top_k, max_top_k)
+    else:
+        bm25_chosen_k = 0
+    bm25_top = all_bm25_results[:bm25_chosen_k]
+    logger.info('bm25 chosen: %d', bm25_chosen_k)
+    fused = reciprocal_rank_fusion(semantic_top, bm25_top, max_top_k)
+    logger.info('RRF fused: %d', len(fused))
     expansion_lines = max(20, config.chunk_size // 32) if config.chunk_size > 0 else 20
-    expanded = expand_context(fused_top, collections, expansion_lines)
-    logger.info('expanded context chunks: %d (from %d)', len(expanded), chosen_k)
-
+    expanded = expand_context(fused, collections, expansion_lines)
+    logger.info('expanded context chunks: %d (from %d fused)', len(expanded), len(fused))
     final_documents = [text for text, _ in expanded]
     final_metadatas = [meta for _, meta in expanded]
     return format_chunks(final_documents, final_metadatas)
@@ -1192,13 +1189,10 @@ def apply_rag_params(
 ) -> tuple[int | None, str | None]:
     top_k_override: int | None = None
     path_pattern: str | None = None
-
     if 'rag_top_k' in rag_params:
         top_k_override = int(rag_params['rag_top_k'])
-
     if 'rag_path_pattern' in rag_params:
         path_pattern = str(rag_params['rag_path_pattern'])
-
     return top_k_override, path_pattern
 
 
