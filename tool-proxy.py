@@ -14,6 +14,10 @@ import asyncio
 import json
 import logging
 import os
+import queue
+import shlex
+import subprocess
+import threading
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -32,93 +36,110 @@ class StdioConnection:
     def __init__(self, cmd: str, env: dict[str, str] | None):
         self.cmd = cmd
         self.env = env
-        self.process: asyncio.subprocess.Process | None = None
-        self.lock = asyncio.Lock()
-        self.write_lock = asyncio.Lock()
-        self.pending: dict[Any, asyncio.Future] = {}
-        self.reader_task: asyncio.Task | None = None
+        self.process: subprocess.Popen | None = None
+        self.lock = threading.Lock()
+        self.pending: dict[Any, queue.Queue] = {}
+        self.should_stop = threading.Event()
 
-    async def start(self):
+    def start(self):
         full_env = os.environ.copy()
         if self.env:
             full_env.update(self.env)
-        self.process = await asyncio.create_subprocess_shell(
-            self.cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+
+        self.should_stop.clear()
+        self.process = subprocess.Popen(
+            # self.cmd,
+            shlex.split(self.cmd),
+            # shell=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=full_env,
+            bufsize=0,
         )
-        logger.info('Started stdio process for command: %s (pid=%d)', self.cmd, self.process.pid)
-        self.reader_task = asyncio.create_task(self.read_stdout())
-        asyncio.create_task(self.drain_stderr())
 
-    async def drain_stderr(self):
-        while self.process and self.process.stderr:
-            line = await self.process.stderr.readline()
+        threading.Thread(target=self.read_stdout, daemon=True).start()
+        threading.Thread(target=self.read_stderr, daemon=True).start()
+
+    def read_stderr(self):
+        while not self.should_stop.is_set() and self.process:
+            line = self.process.stderr.readline()
             if not line:
                 break
-            logger.debug('stdio stderr: %s', line.decode(errors='replace').rstrip())
+            logger.debug('stderr: %s', line.decode(errors='replace').rstrip())
 
-    async def read_stdout(self):
-        while self.process and self.process.stdout:
-            line = await self.process.stdout.readline()
+    def read_stdout(self):
+        while not self.should_stop.is_set() and self.process:
+            line = self.process.stdout.readline()
             if not line:
                 break
-            logger.debug('stdio raw output from %s: %s', self.cmd,
-                         line.decode(errors='replace').rstrip())
+
             try:
                 message = json.loads(line)
+                message_id = message.get('id')
+                if message_id in self.pending:
+                    self.pending[message_id].put(line)
             except json.JSONDecodeError:
-                logger.warning('Non-JSON line from stdio process: %s',
-                               line.decode(errors='replace').rstrip())
-                continue
-            message_id = message.get('id')
-            if message_id is not None and message_id in self.pending:
-                self.pending[message_id].set_result(line)
-            else:
-                logger.debug('Unroutable stdio message (notification or unknown id): %s',
-                             line.decode(errors='replace').rstrip())
-        for future in self.pending.values():
-            if not future.done():
-                future.set_exception(ConnectionError('stdio process exited'))
+                logger.warning('Non-JSON line: %s', line.decode(errors='replace').rstrip())
+
+        for q in list(self.pending.values()):
+            q.put(None)
         self.pending.clear()
 
-    async def ensure_running(self):
-        if self.process is None or self.process.returncode is not None:
-            async with self.lock:
-                if self.process is None or self.process.returncode is not None:
+    def ensure_running(self):
+        if self.process is None or self.process.poll() is not None:
+            with self.lock:
+                if self.process is None or self.process.poll() is not None:
                     self.pending.clear()
-                    await self.start()
+                    self.start()
 
     async def send(self, body: bytes, request_id: Any = None) -> bytes | None:
-        await self.ensure_running()
-        future = None
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.send_sync, body, request_id)
+
+    def send_sync(self, body: bytes, request_id: Any = None) -> bytes | None:
+        self.ensure_running()
+
+        response_queue = None
         if request_id is not None:
-            future = asyncio.get_event_loop().create_future()
-            self.pending[request_id] = future
-        async with self.write_lock:
+            response_queue = queue.Queue(maxsize=1)
+            self.pending[request_id] = response_queue
+
+        try:
             self.process.stdin.write(body)
             if not body.endswith(b'\n'):
                 self.process.stdin.write(b'\n')
-            await self.process.stdin.drain()
-        if future is None:
+            self.process.stdin.flush()
+        except Exception:
+            if request_id:
+                self.pending.pop(request_id, None)
+            raise
+
+        if response_queue is None:
             return None
+
         try:
-            return await future
+            response = response_queue.get(timeout=300)
+            if response is None:
+                msg = 'stdio process exited'
+                raise ConnectionError(msg)
+            return response
         finally:
             self.pending.pop(request_id, None)
 
     async def close(self):
-        if self.reader_task and not self.reader_task.done():
-            self.reader_task.cancel()
-        if self.process and self.process.returncode is None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self.close_sync)
+
+    def close_sync(self):
+        self.should_stop.set()
+        if self.process and self.process.poll() is None:
             self.process.terminate()
             try:
-                await asyncio.wait_for(self.process.wait(), timeout=5)
-            except asyncio.TimeoutError:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
                 self.process.kill()
-            logger.info('Stopped stdio process for command: %s', self.cmd)
+                self.process.wait()
 
 
 class StreamingHttpConnection:
@@ -133,7 +154,6 @@ class StreamingHttpConnection:
             headers=self.headers,
             timeout=httpx.Timeout(300, connect=30),
         )
-        logger.info('Created persistent HTTP client for url: %s', self.url)
 
     async def ensure_running(self):
         if self.client is None:
@@ -142,7 +162,6 @@ class StreamingHttpConnection:
     async def close(self):
         if self.client:
             await self.client.aclose()
-            logger.info('Closed HTTP client for url: %s', self.url)
 
 
 class ToolServer:
@@ -160,12 +179,13 @@ class ToolServer:
                 cmd=self.config['cmd'],
                 env=self.config.get('env'),
             )
+            await asyncio.get_event_loop().run_in_executor(None, self.connection.start)
         else:
             self.connection = StreamingHttpConnection(
                 url=self.config['url'],
                 headers=self.config.get('headers'),
             )
-        await self.connection.ensure_running()
+            await self.connection.start()
 
     async def close(self):
         if self.connection:
@@ -175,9 +195,6 @@ class ToolServer:
 def load_config(path: str) -> list[dict[str, Any]]:
     with open(path) as f:
         data = yaml.safe_load(f)
-    if not isinstance(data, list):
-        msg = 'Config file must contain a YAML list of tool server entries'
-        raise ValueError(msg)
     return data
 
 
@@ -192,7 +209,6 @@ def build_app(config_path: str) -> Starlette:  # noqa
             server = ToolServer(name, entry)
             await server.start()
             servers[name] = server
-            logger.info('Registered tool server: %s', name)
         yield
         for server in servers.values():
             await server.close()
@@ -202,7 +218,7 @@ def build_app(config_path: str) -> Starlette:  # noqa
         server_name = request.path_params['server_name']
 
         if server_name not in servers:
-            return Response(status_code=404, content=f'Unknown tool server: {server_name}')
+            return Response(status_code=404, content=f'Unknown server: {server_name}')
 
         tool_server = servers[server_name]
 
@@ -223,14 +239,13 @@ def build_app(config_path: str) -> Starlette:  # noqa
         }
 
         if tool_server.is_stdio():
-            return await handle_stdio_request(request, tool_server, cors_headers)
-        return await handle_http_request(request, tool_server, cors_headers)
+            return await handle_stdio(request, tool_server, cors_headers)
+        return await handle_http(request, tool_server, cors_headers)
 
-    async def handle_stdio_request(
+    async def handle_stdio(
         request: Request, tool_server: ToolServer, cors_headers: dict[str, str],
     ) -> Response:
         body = await request.body()
-        logger.debug('stdio request to %s: %s', tool_server.name, body.decode(errors='replace'))
 
         try:
             message = json.loads(body)
@@ -242,26 +257,21 @@ def build_app(config_path: str) -> Starlette:  # noqa
         response_line = await connection.send(body, request_id=request_id)
 
         if response_line is None:
-            logger.debug('Notification sent to %s, no response expected', tool_server.name)
             return Response(status_code=202, headers=cors_headers)
 
-        logger.debug('stdio response from %s: %s', tool_server.name,
-                     response_line.decode(errors='replace').rstrip())
         return Response(
             content=response_line,
             media_type='application/json',
             headers=cors_headers,
         )
 
-    async def handle_http_request(
+    async def handle_http(
         request: Request, tool_server: ToolServer, cors_headers: dict[str, str],
     ) -> Response:
         connection: StreamingHttpConnection = tool_server.connection
         await connection.ensure_running()
 
         body = await request.body()
-        logger.debug('HTTP request to %s: %s %s', tool_server.name,
-                     request.method, body.decode(errors='replace'))
 
         incoming_headers = dict(request.headers)
         incoming_headers.pop('host', None)
@@ -283,7 +293,6 @@ def build_app(config_path: str) -> Starlette:  # noqa
             async def stream_body():
                 try:
                     async for chunk in upstream_response.aiter_bytes():
-                        logger.debug('SSE chunk from %s: %s', tool_server.name, chunk[:200])
                         yield chunk
                 finally:
                     await upstream_response.aclose()
@@ -299,9 +308,9 @@ def build_app(config_path: str) -> Starlette:  # noqa
                 status_code=upstream_response.status_code,
                 headers=response_headers,
             )
+
         response_body = await upstream_response.aread()
         await upstream_response.aclose()
-        logger.debug('HTTP response from %s: %s', tool_server.name, response_body[:500])
 
         response_headers = dict(cors_headers)
         if content_type:
@@ -317,21 +326,18 @@ def build_app(config_path: str) -> Starlette:  # noqa
         Route('/{server_name}/mcp', handle_mcp, methods=['GET', 'POST', 'OPTIONS']),
     ]
 
-    app = Starlette(routes=routes, lifespan=lifespan)
-    return app
+    return Starlette(routes=routes, lifespan=lifespan)
 
 
 if __name__ == '__main__':
     import uvicorn
 
     parser = argparse.ArgumentParser(description='MCP tool server proxy')
-    parser.add_argument('config', nargs='?', default='tool-proxy.yaml',
-                        help='Path to YAML config file (default: tool-proxy.yaml)')
-    parser.add_argument('--host', default='127.0.0.1', help='Host to bind to')
-    parser.add_argument('--port', type=int, default=8000, help='Port to bind to')
-    parser.add_argument('--log', help='Append logs to the specified path')
-    parser.add_argument('--verbose', '-v', action='count', default=0,
-                        help='Increase verbosity')
+    parser.add_argument('config', nargs='?', default='tool-proxy.yaml')
+    parser.add_argument('--host', default='127.0.0.1')
+    parser.add_argument('--port', type=int, default=8000)
+    parser.add_argument('--log', help='Log file path')
+    parser.add_argument('--verbose', '-v', action='count', default=0)
     args = parser.parse_args()
 
     if args.log:
