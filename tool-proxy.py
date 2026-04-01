@@ -33,7 +33,8 @@ logger.addHandler(logging.NullHandler())
 
 
 class StdioConnection:
-    def __init__(self, cmd: str, env: dict[str, str] | None):
+    def __init__(self, name: str, cmd: str, env: dict[str, str] | None):
+        self.name = name
         self.cmd = cmd
         self.env = env
         self.process: subprocess.Popen | None = None
@@ -45,7 +46,6 @@ class StdioConnection:
         full_env = os.environ.copy()
         if self.env:
             full_env.update(self.env)
-
         self.should_stop.clear()
         self.process = subprocess.Popen(
             # self.cmd,
@@ -57,7 +57,6 @@ class StdioConnection:
             env=full_env,
             bufsize=0,
         )
-
         threading.Thread(target=self.read_stdout, daemon=True).start()
         threading.Thread(target=self.read_stderr, daemon=True).start()
 
@@ -66,14 +65,13 @@ class StdioConnection:
             line = self.process.stderr.readline()
             if not line:
                 break
-            logger.debug('stderr: %s', line.decode(errors='replace').rstrip())
+            logger.debug('%s: %s', self.name, line.decode(errors='replace').rstrip())
 
     def read_stdout(self):
         while not self.should_stop.is_set() and self.process:
             line = self.process.stdout.readline()
             if not line:
                 break
-
             try:
                 message = json.loads(line)
                 message_id = message.get('id')
@@ -81,7 +79,6 @@ class StdioConnection:
                     self.pending[message_id].put(line)
             except json.JSONDecodeError:
                 logger.warning('Non-JSON line: %s', line.decode(errors='replace').rstrip())
-
         for q in list(self.pending.values()):
             q.put(None)
         self.pending.clear()
@@ -94,12 +91,12 @@ class StdioConnection:
                     self.start()
 
     async def send(self, body: bytes, request_id: Any = None) -> bytes | None:
+        logger.debug('%s send: %s', self.name, body.decode(errors='ignore').strip())
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.send_sync, body, request_id)
 
     def send_sync(self, body: bytes, request_id: Any = None) -> bytes | None:
         self.ensure_running()
-
         response_queue = None
         if request_id is not None:
             response_queue = queue.Queue(maxsize=1)
@@ -114,10 +111,8 @@ class StdioConnection:
             if request_id:
                 self.pending.pop(request_id, None)
             raise
-
         if response_queue is None:
             return None
-
         try:
             response = response_queue.get(timeout=300)
             if response is None:
@@ -143,10 +138,12 @@ class StdioConnection:
 
 
 class StreamingHttpConnection:
-    def __init__(self, url: str, headers: dict[str, str] | None):
+    def __init__(self, name: str, url: str, headers: dict[str, str] | None):
+        self.name = name
         self.url = url
         self.headers = headers or {}
         self.client: httpx.AsyncClient | None = None
+        self.session_id: str | None = None
 
     async def start(self):
         self.client = httpx.AsyncClient(
@@ -154,6 +151,7 @@ class StreamingHttpConnection:
             headers=self.headers,
             timeout=httpx.Timeout(300, connect=30),
         )
+        self.session_id = None
 
     async def ensure_running(self):
         if self.client is None:
@@ -176,12 +174,14 @@ class ToolServer:
     async def start(self):
         if self.is_stdio():
             self.connection = StdioConnection(
+                name=self.name,
                 cmd=self.config['cmd'],
                 env=self.config.get('env'),
             )
             await asyncio.get_event_loop().run_in_executor(None, self.connection.start)
         else:
             self.connection = StreamingHttpConnection(
+                name=self.name,
                 url=self.config['url'],
                 headers=self.config.get('headers'),
             )
@@ -216,12 +216,9 @@ def build_app(config_path: str) -> Starlette:  # noqa
 
     async def handle_mcp(request: Request) -> Response:
         server_name = request.path_params['server_name']
-
         if server_name not in servers:
             return Response(status_code=404, content=f'Unknown server: {server_name}')
-
         tool_server = servers[server_name]
-
         if request.method == 'OPTIONS':
             return Response(
                 status_code=204,
@@ -231,13 +228,11 @@ def build_app(config_path: str) -> Starlette:  # noqa
                     'Access-Control-Allow-Headers': '*',
                 },
             )
-
         cors_headers = {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
             'Access-Control-Allow-Headers': '*',
         }
-
         if tool_server.is_stdio():
             return await handle_stdio(request, tool_server, cors_headers)
         return await handle_http(request, tool_server, cors_headers)
@@ -246,19 +241,15 @@ def build_app(config_path: str) -> Starlette:  # noqa
         request: Request, tool_server: ToolServer, cors_headers: dict[str, str],
     ) -> Response:
         body = await request.body()
-
         try:
             message = json.loads(body)
         except json.JSONDecodeError:
             return Response(status_code=400, content='Invalid JSON', headers=cors_headers)
-
         request_id = message.get('id')
         connection: StdioConnection = tool_server.connection
         response_line = await connection.send(body, request_id=request_id)
-
         if response_line is None:
             return Response(status_code=202, headers=cors_headers)
-
         return Response(
             content=response_line,
             media_type='application/json',
@@ -270,30 +261,38 @@ def build_app(config_path: str) -> Starlette:  # noqa
     ) -> Response:
         connection: StreamingHttpConnection = tool_server.connection
         await connection.ensure_running()
-
         body = await request.body()
-
         incoming_headers = dict(request.headers)
         incoming_headers.pop('host', None)
         incoming_headers.pop('transfer-encoding', None)
-
+        incoming_headers.pop('content-length', None)
+        if connection.session_id and 'mcp-session-id' not in incoming_headers:
+            incoming_headers['mcp-session-id'] = connection.session_id
         upstream_request = connection.client.build_request(
             method=request.method,
             url='/mcp',
             content=body if body else None,
             headers=incoming_headers,
         )
-
+        if body:
+            logger.debug('%s send: %s', tool_server.name, body.decode(errors='ignore').strip())
         upstream_response = await connection.client.send(upstream_request, stream=True)
-
+        session_id = upstream_response.headers.get('mcp-session-id')
+        if session_id:
+            connection.session_id = session_id
         content_type = upstream_response.headers.get('content-type', '')
         is_event_stream = 'text/event-stream' in content_type
-
         if is_event_stream:
+            proxy_base = str(request.base_url).rstrip('/')
+            upstream_base = str(connection.url).rstrip('/')
+
             async def stream_body():
                 try:
                     async for chunk in upstream_response.aiter_bytes():
-                        yield chunk
+                        decoded = chunk.decode(errors='replace')
+                        rewritten = decoded.replace(
+                            upstream_base, f'{proxy_base}/{tool_server.name}')
+                        yield rewritten.encode()
                 finally:
                     await upstream_response.aclose()
 
@@ -302,30 +301,28 @@ def build_app(config_path: str) -> Starlette:  # noqa
             cache_control = upstream_response.headers.get('cache-control')
             if cache_control:
                 response_headers['cache-control'] = cache_control
-
+            if session_id:
+                response_headers['mcp-session-id'] = session_id
             return StreamingResponse(
                 content=stream_body(),
                 status_code=upstream_response.status_code,
                 headers=response_headers,
             )
-
         response_body = await upstream_response.aread()
         await upstream_response.aclose()
-
         response_headers = dict(cors_headers)
         if content_type:
             response_headers['content-type'] = content_type
-
+        if session_id:
+            response_headers['mcp-session-id'] = session_id
         return Response(
             content=response_body,
             status_code=upstream_response.status_code,
             headers=response_headers,
         )
-
     routes = [
         Route('/{server_name}/mcp', handle_mcp, methods=['GET', 'POST', 'OPTIONS']),
     ]
-
     return Starlette(routes=routes, lifespan=lifespan)
 
 
@@ -334,17 +331,15 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='MCP tool server proxy')
     parser.add_argument('config', nargs='?', default='tool-proxy.yaml')
-    parser.add_argument('--host', default='127.0.0.1')
-    parser.add_argument('--port', type=int, default=8000)
+    parser.add_argument('--host', default='0.0.0.0')
+    parser.add_argument('--port', type=int, default=3000)
     parser.add_argument('--log', help='Log file path')
     parser.add_argument('--verbose', '-v', action='count', default=0)
     args = parser.parse_args()
-
     if args.log:
         handler = logging.FileHandler(args.log, mode='a')
         handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
         logger.addHandler(handler)
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
-
     app = build_app(args.config)
     uvicorn.run(app, host=args.host, port=args.port)
