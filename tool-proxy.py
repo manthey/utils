@@ -191,6 +191,10 @@ class ToolServer:
         if self.connection:
             await self.connection.close()
 
+    async def ensure_running(self):
+        if self.connection is None:
+            await self.start()
+
 
 def load_config(path: str) -> list[dict[str, Any]]:
     with open(path) as f:
@@ -206,9 +210,7 @@ def build_app(config_path: str) -> Starlette:  # noqa
         config_entries = load_config(config_path)
         for entry in config_entries:
             name = entry['name']
-            server = ToolServer(name, entry)
-            await server.start()
-            servers[name] = server
+            servers[name] = ToolServer(name, entry)
         yield
         for server in servers.values():
             await server.close()
@@ -218,7 +220,6 @@ def build_app(config_path: str) -> Starlette:  # noqa
         server_name = request.path_params['server_name']
         if server_name not in servers:
             return Response(status_code=404, content=f'Unknown server: {server_name}')
-        tool_server = servers[server_name]
         if request.method == 'OPTIONS':
             return Response(
                 status_code=204,
@@ -233,6 +234,8 @@ def build_app(config_path: str) -> Starlette:  # noqa
             'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
             'Access-Control-Allow-Headers': '*',
         }
+        tool_server = servers[server_name]
+        await tool_server.ensure_running()
         if tool_server.is_stdio():
             return await handle_stdio(request, tool_server, cors_headers)
         return await handle_http(request, tool_server, cors_headers)
