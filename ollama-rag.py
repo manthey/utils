@@ -146,9 +146,9 @@ app.add_middleware(
     allow_methods=['*'], allow_headers=['*'],
 )
 
-_shutdown_event = threading.Event()
-_build_locks_mutex = threading.Lock()
-_build_locks: dict[str, threading.Lock] = {}
+shutdown_event = threading.Event()
+build_locks_mutex = threading.Lock()
+build_locks: dict[str, threading.Lock] = {}
 
 
 def file_index_lock(data_dir: Path) -> filelock.FileLock:
@@ -440,7 +440,7 @@ def make_chunk_id(file_sha: str, byte_offset: int, text: str) -> str:
 
 
 def check_shutdown() -> None:
-    if _shutdown_event.is_set():
+    if shutdown_event.is_set():
         msg = 'Shutdown requested'
         raise RuntimeError(msg)
 
@@ -747,10 +747,10 @@ def get_collection_for_source(src: SourceConfig) -> chromadb.Collection | None:
         config.embed_model, config.chunk_size, config.chunk_overlap, src.source_path)
     chroma_client = chromadb.PersistentClient(path=str(chroma_dir))
     unavailable = source_unavailable(src)
-    with _build_locks_mutex:
-        if cname not in _build_locks:
-            _build_locks[cname] = threading.Lock()
-        lock = _build_locks[cname]
+    with build_locks_mutex:
+        if cname not in build_locks:
+            build_locks[cname] = threading.Lock()
+        lock = build_locks[cname]
     with lock:
         if unavailable:
             try:
@@ -1088,7 +1088,7 @@ def create_mcp_server() -> mcp.server.Server:
     server = mcp.server.Server('ollama-rag')
 
     @server.list_tools()
-    async def _list_tools() -> list[mcp.types.Tool]:
+    async def list_tools() -> list[mcp.types.Tool]:
         return [
             mcp.types.Tool(
                 name='search_codebase',
@@ -1135,7 +1135,7 @@ def create_mcp_server() -> mcp.server.Server:
         ]
 
     @server.call_tool()
-    async def _call_tool(name: str, arguments: dict) -> list[mcp.types.TextContent]:
+    async def call_tool(name: str, arguments: dict) -> list[mcp.types.TextContent]:
         dispatch = {
             'search_codebase': lambda a: mcp_search_codebase(
                 a['query'], a.get('path_filter'), a.get('top_k')),
@@ -1308,9 +1308,9 @@ def build_source_configs(args: argparse.Namespace) -> list[SourceConfig]:
     source_sub_paths = pad_list(args.source_sub_path or [], n, '')
     excludes = pad_list(args.exclude or [], n, '')
     git_exts = pad_list(
-        args.git_extensions or [], n, args._git_extensions_default)
+        args.git_extensions or [], n, args.git_extensions_default)
     dir_suffs = pad_list(
-        args.dir_suffixes or [], n, args._dir_suffixes_default)
+        args.dir_suffixes or [], n, args.dir_suffixes_default)
     configs = []
     for i in range(n):
         sp = source_paths[i]
@@ -1353,12 +1353,12 @@ def cmd_serve(args):
     server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port))
     server.install_signal_handlers = lambda: None
 
-    def _handle_signal(signum, frame):
-        _shutdown_event.set()
+    def handle_signal(signum, frame):
+        shutdown_event.set()
         server.should_exit = True
 
-    signal.signal(signal.SIGINT, _handle_signal)
-    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, handle_signal)
+    signal.signal(signal.SIGTERM, handle_signal)
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
     if args.initial:
@@ -1423,10 +1423,10 @@ def cmd_mcp(args):
         get_all_collections()
     server = create_mcp_server()
 
-    async def _run():
+    async def run():
         async with mcp.server.stdio.stdio_server() as (read, write):
             await server.run(read, write, server.create_initialization_options())
-    asyncio.run(_run())
+    asyncio.run(run())
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1557,8 +1557,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
             'waiting for a query',
         )
         sub.set_defaults(
-            _git_extensions_default=git_extension_default,
-            _dir_suffixes_default=doc_extension_default,
+            git_extensions_default=git_extension_default,
+            dir_suffixes_default=doc_extension_default,
         )
     return parser
 
