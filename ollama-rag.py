@@ -36,6 +36,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 import threading
 from collections.abc import Generator
 from pathlib import Path
@@ -209,9 +210,12 @@ def list_paths(
     source = base / sub_path if sub_path else base
     spec = make_pathspec(exclude)
     for p in sorted(source.rglob('*')):
-        if p.is_file() and p.suffix.lower() in suffixes:
-            if not spec.match_file(p.relative_to(base).as_posix()):
-                yield p
+        try:
+            if p.is_file() and p.suffix.lower() in suffixes:
+                if not spec.match_file(p.relative_to(base).as_posix()):
+                    yield p
+        except Exception:
+            pass
 
 
 def is_git_source(src: SourceConfig) -> bool:
@@ -294,22 +298,49 @@ def iter_repo_blobs(
             yield item
 
 
-def load_file_docs(p: Path) -> tuple[list[Document], bytes]:
+def load_file_docs(p: Path) -> list[Document]:
     suffix = p.suffix.lower()
-    raw_bytes = p.read_bytes()
     readers = {'.pdf': PDFReader, '.docx': DocxReader, '.md': MarkdownReader}
+    limit = 256 * 1024 * 1024
     if suffix in readers:
         try:
-            return readers[suffix]().load_data(p), raw_bytes
+            return readers[suffix]().load_data(p)
         except Exception as exc:
             logger.warning('reading failed for %s: %r', p, exc)
             raise
+    if suffix != '.txt':
+        proc = None
+        try:
+            proc = subprocess.Popen([
+                'pandoc', str(p), '-t', 'plain', '--wrap=none'],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, bufsize=0)
+            chunks = []
+            size = 0
+            while True:
+                chunk = proc.stdout.read(8192)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > limit:
+                    proc.kill()
+                    return None
+                chunks.append(chunk)
+            proc.wait(timeout=30)
+            return [Document(text=(''.join(chunks)),
+                             metadata={'file_path': str(p)})]
+        except Exception:
+            if proc is not None:
+                proc.kill()
+    if p.stat().st_size > limit:
+        return None
+    raw_bytes = p.read_bytes()
     return [Document(text=raw_bytes.decode(errors='ignore'),
-                     metadata={'file_path': str(p)})], raw_bytes
+                     metadata={'file_path': str(p)})]
 
 
 def find_source_for_path(abs_path: str) -> tuple[SourceConfig, str] | None:
-    """Given an absolute path, find the owning SourceConfig and the relative
+    """
+    Given an absolute path, find the owning SourceConfig and the relative
     path within that source root.
     """
     for src in source_configs:
@@ -339,13 +370,14 @@ def load_single_file_document(abs_path: str) -> Document | None:
     if not p.is_file():
         return None
     try:
-        docs, raw_bytes = load_file_docs(p)
+        docs = load_file_docs(p)
         return Document(
             text='\n'.join(d.text for d in docs),
             metadata={
                 'file_path': abs_path,
-                'file_sha': hashlib.sha256(raw_bytes).hexdigest(),
-                'file_size': len(raw_bytes), 'file_mtime': p.stat().st_mtime,
+                'file_sha': hashlib.file_digest(open(p, 'rb'), 'sha256').hexdigest(),
+                'file_size': p.stat().st_size,
+                'file_mtime': p.stat().st_mtime,
                 'rel_path': rel_path,
             },
         )
