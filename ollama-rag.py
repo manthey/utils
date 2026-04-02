@@ -1450,7 +1450,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         'txt', 'pug', 'sh', 'styl', 'yaml', 'yml',
     }
     git_extension_default = ','.join('.' + e for e in sorted(git_extensions))
-    doc_extensions = {'txt', 'md', 'pdf', 'docx', 'doc', 'rst'}
+    doc_extensions = {'txt', 'md', 'pdf', 'docx', 'doc', 'rst', 'tex', 'bbl', 'sty', 'bst', 'bib'}
     doc_extension_default = ','.join('.' + e for e in sorted(doc_extensions))
     serve.add_argument(
         '--host', type=str, default='0.0.0.0',
