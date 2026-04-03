@@ -38,6 +38,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import time
 from collections.abc import Generator
 from pathlib import Path
 
@@ -126,10 +127,72 @@ class BM25Index:
         self.metadatas = metadatas
 
 
+class AdjustBatchSize:
+    """Adjusts embedding batch size based on per-item throughput."""
+
+    def __init__(
+        self, initial: int = 4, minimum: int = 1, maximum: int = 4096,
+        slowdown_threshold: float = 1.5, backoff_seconds: float = 30.0,  # ##DWM::
+    ):
+        self.lock = threading.Lock()
+        self.minimum = minimum
+        self.maximum = maximum
+        self.current = initial
+        self.baseline_rate: float | None = None
+        self.slowdown_threshold = slowdown_threshold
+        self.ceiling: int | None = None
+        self.ceiling_until: float = 0.0
+        self.backoff_seconds = backoff_seconds
+
+    @property
+    def batch_size(self) -> int:
+        with self.lock:
+            size = self.current
+            if self.ceiling is not None:
+                if time.monotonic() < self.ceiling_until:
+                    size = min(size, self.ceiling)
+                else:
+                    self.ceiling = None
+            return max(self.minimum, size)
+
+    def report(self, size: int, elapsed: float) -> None:
+        if not elapsed:
+            return
+        with self.lock:
+            rate = elapsed / max(size, 1)
+            if self.baseline_rate is None or size <= self.minimum:
+                self.baseline_rate = rate
+                self.current = min(size * 2, self.maximum)
+                logger.debug('batch %d at %.3f/item, increased to %d',
+                             size, rate, self.current)
+                return
+            if rate > self.baseline_rate * self.slowdown_threshold:
+                self.current = self.ceiling = max(self.minimum, size // 2)
+                self.ceiling_until = time.monotonic() + self.backoff_seconds
+                logger.debug(
+                    'batch %d too slow (%.3fs/item vs baseline %.3fs/item), reducing to %d',
+                    size, rate, self.baseline_rate or 0, self.current)
+                self.baseline_rate = None
+            else:
+                if rate < self.baseline_rate:
+                    self.baseline_rate = rate
+                self.current = min(max(self.current, size * 2), self.maximum)
+                logger.debug('batch %d at %.3f/item, increased to %d',
+                             size, rate, self.current)
+
+    def report_failure(self, size: int) -> None:
+        with self.lock:
+            self.current = self.ceiling = max(self.minimum, size // 2)
+            self.ceiling_until = time.monotonic() + self.backoff_seconds
+            logger.debug('batch %d failed, reducing to %d', size, self.current)
+            self.baseline_rate = None
+
+
 config: argparse.Namespace
 source_configs: list[SourceConfig] = []
 mcp_manager: mcp.server.streamable_http_manager.StreamableHTTPSessionManager | None = None
 bm25_cache: dict[str, BM25Index] = {}
+adjust_batch_size = AdjustBatchSize()
 
 
 @contextlib.asynccontextmanager
@@ -477,6 +540,27 @@ def check_shutdown() -> None:
         raise RuntimeError(msg)
 
 
+def embed_batch_adaptive(embed_model: OllamaEmbedding, texts: list[str]) -> list[list[float]]:
+    results: list[list[float]] = []
+    offset = 0
+    while offset < len(texts):
+        batch = texts[offset:offset + adjust_batch_size.batch_size]
+        try:
+            t0 = time.monotonic()
+            embeddings = embed_model.get_text_embedding_batch(batch)
+            adjust_batch_size.report(len(batch), time.monotonic() - t0)
+            results.extend(embeddings)
+            offset += len(batch)
+        except Exception:
+            if len(batch) <= 1:
+                logger.warning('embedding failed at offset %d, skipping', offset)
+                results.append([])
+                offset += 1
+            else:
+                adjust_batch_size.report_failure(len(batch))
+    return results
+
+
 def embed_document_chunks(
     doc: Document, chunk_size: int, chunk_overlap: int, embed_model: OllamaEmbedding,
 ) -> tuple[list[str], list[list[float]], list[dict], list[str]]:
@@ -484,19 +568,19 @@ def embed_document_chunks(
     file_path = meta.get('file_path', '')
     file_sha = meta.get('file_sha', '')
     rel_path = meta.get('rel_path', file_path)
+    chunk_infos = chunk_text(doc.text, chunk_size, chunk_overlap, file_path)
+    check_shutdown()
+    embedding_inputs = [
+        (f'### File: {rel_path}\n{ci["text"]}' if file_path else ci['text'])
+        for ci in chunk_infos
+    ]
+    raw_embeddings = embed_batch_adaptive(embed_model, embedding_inputs)
     texts, embeddings, metadatas, ids = [], [], [], []
-    for chunk_info in chunk_text(doc.text, chunk_size, chunk_overlap, file_path):
-        check_shutdown()
-        t = chunk_info['text']
-        embedding_input = f'### File: {rel_path}\n{t}' if file_path else t
-        try:
-            embedding = embed_model.get_text_embedding(embedding_input)
-        except Exception:
-            embedding = None
+    for chunk_info, embedding in zip(chunk_infos, raw_embeddings, strict=True):
         if not embedding:
             logger.warning('embedding failed for chunk in %s, skipping', file_path)
             continue
-        texts.append(t)
+        texts.append(chunk_info['text'])
         embeddings.append(embedding)
         metadatas.append({
             'file_path': file_path, 'file_sha': file_sha, 'rel_path': rel_path,
@@ -505,7 +589,7 @@ def embed_document_chunks(
             'line_start': chunk_info['line_start'], 'line_end': chunk_info['line_end'],
             'active': True,
         })
-        ids.append(make_chunk_id(file_sha, chunk_info['byte_offset'], t))
+        ids.append(make_chunk_id(file_sha, chunk_info['byte_offset'], chunk_info['text']))
     return texts, embeddings, metadatas, ids
 
 
@@ -724,6 +808,7 @@ def sync_collection(
                     logger.warning('failed to load %s, skipping', fp)
                     progress.update(1)
                     continue
+                logger.debug('embedding %s (%d)', fp, os.path.getsize(fp))
                 texts, embeddings, metadatas, ids = embed_document_chunks(
                     doc, chunk_size, config.chunk_overlap, embed_model)
                 add_chunks_to_collection(collection, texts, embeddings, metadatas, ids)
