@@ -306,7 +306,7 @@ def load_file_docs(p: Path) -> list[Document]:
         try:
             return readers[suffix]().load_data(p)
         except Exception as exc:
-            logger.warning('reading failed for %s: %r', p, exc)
+            logger.warning('reading failed for %s: %s', p, str(exc)[:40])
             raise
     if suffix != '.txt':
         proc = None
@@ -334,7 +334,7 @@ def load_file_docs(p: Path) -> list[Document]:
     if p.stat().st_size > limit:
         return None
     raw_bytes = p.read_bytes()
-    return [Document(text=raw_bytes.decode(errors='ignore'),
+    return [Document(text=raw_bytes.decode('utf-8', errors='ignore'),
                      metadata={'file_path': str(p)})]
 
 
@@ -359,7 +359,7 @@ def load_single_file_document(abs_path: str) -> Document | None:
         try:
             repo = git.Repo(src.source_path)
             blob = repo.tree() / rel_path
-            text = blob.data_stream.read().decode(errors='replace')
+            text = blob.data_stream.read().decode('utf-8', errors='replace')
             return Document(text=text, metadata={
                 'file_path': abs_path, 'file_sha': blob.hexsha,
                 'file_size': blob.size, 'file_mtime': 0, 'rel_path': rel_path,
@@ -429,7 +429,7 @@ def chunk_text(
 ) -> list[dict]:
     ext = '.' + filename.rsplit('.', 1)[-1] if '.' in filename else ''
     language = EXTENSION_TO_LANGUAGE.get(ext)
-    text_bytes = text.encode('utf-8')
+    text_bytes = text.encode('utf-8', errors='ignore')
     if language:
         raw_chunks = CodeSplitter(
             language=language, chunk_lines=chunk_size // 16,
@@ -438,14 +438,16 @@ def chunk_text(
         results = []
         search_start = 0
         for cidx, chunk in enumerate(raw_chunks):
-            chunk_bytes = chunk.encode('utf-8')
+            chunk_bytes = chunk.encode('utf-8', errors='ignore')
             idx = text_bytes.find(chunk_bytes, search_start)
             if idx == -1:
                 idx = search_start
             elif cidx + 1 < len(raw_chunks):
-                nidx = text_bytes.find(raw_chunks[cidx + 1].encode('utf-8'), idx + len(chunk_bytes))
+                nidx = text_bytes.find(
+                    raw_chunks[cidx + 1].encode('utf-8', errors='ignore'),
+                    idx + len(chunk_bytes))
                 if nidx > idx:
-                    chunk = text_bytes[idx:nidx].decode('utf-8')
+                    chunk = text_bytes[idx:nidx].decode('utf-8', errors='ignore')
             line_start = text_bytes[:idx].count(b'\n') + 1
             results.append({
                 'text': chunk, 'byte_offset': idx,
@@ -457,7 +459,7 @@ def chunk_text(
     start = 0
     while start < len(text):
         chunk = text[start:min(start + chunk_size, len(text))]
-        byte_offset = len(text[:start].encode('utf-8'))
+        byte_offset = len(text[:start].encode('utf-8', errors='ignore'))
         line_start = text[:start].count('\n') + 1
         results.append({
             'text': chunk, 'byte_offset': byte_offset,
@@ -488,11 +490,16 @@ def embed_document_chunks(
     for chunk_info in chunk_text(doc.text, chunk_size, chunk_overlap, file_path):
         check_shutdown()
         t = chunk_info['text']
+        t = t.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
         embedding_input = f'### File: {rel_path}\n{t}' if file_path else t
         try:
             embedding = embed_model.get_text_embedding(embedding_input)
         except Exception:
-            embedding = None
+            try:
+                embedding = embed_model.get_text_embedding(embedding_input.encode(
+                    'utf-8', errors='ignore').decode('utf-8', errors='ignore'))
+            except Exception:
+                embedding = None
         if not embedding:
             logger.warning('embedding failed for chunk in %s, skipping', file_path)
             continue
@@ -547,7 +554,7 @@ def set_chunks_active(
 
 
 def delete_chunks(collection: chromadb.Collection, chunk_ids: list[str]) -> None:
-    batched_collection_op(collection, chunk_ids, 'delete')
+    batched_collection_op(collection, list(set(chunk_ids)), 'delete')
 
 
 def update_manifest(
@@ -565,7 +572,8 @@ def update_manifest(
     texts, embeddings, metadatas, ids = embed_document_chunks(
         manifest_doc, chunk_size, chunk_overlap, embed_model)
     add_chunks_to_collection(collection, texts, embeddings, metadatas, ids)
-    manifest_sha = hashlib.sha256('\n'.join(sorted(active_paths)).encode()).hexdigest()
+    manifest_sha = hashlib.sha256('\n'.join(sorted(active_paths)).encode(
+        'utf-8', errors='ignore')).hexdigest()
     coll_entry.setdefault('files', {})['__manifest__'] = {
         'active_sha': manifest_sha,
         'versions': {manifest_sha: ids},
@@ -652,7 +660,7 @@ def rebuild_bm25_for_source(
     bm25_cache[cname] = bm25_idx
 
 
-def sync_collection(
+def sync_collection(  # noqa
     collection: chromadb.Collection, data_dir: Path, cname: str,
     current_hashes: dict[str, str],
 ) -> None:
@@ -726,7 +734,11 @@ def sync_collection(
                     continue
                 texts, embeddings, metadatas, ids = embed_document_chunks(
                     doc, chunk_size, config.chunk_overlap, embed_model)
-                add_chunks_to_collection(collection, texts, embeddings, metadatas, ids)
+                try:
+                    add_chunks_to_collection(collection, texts, embeddings, metadatas, ids)
+                except Exception:
+                    logger.info('Failed to add chunks for %s (%r)', fp)
+                    continue
                 file_entry = files_entry.setdefault(fp, {'active_sha': '', 'versions': {}})
                 file_entry['active_sha'] = new_sha
                 file_entry['versions'][new_sha] = ids
@@ -872,7 +884,7 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
         byte_offset = meta.get('byte_offset', 0)
         line_start = meta.get('line_start', 1)
         line_end = meta.get('line_end', line_start)
-        text_bytes = text.encode('utf-8')
+        text_bytes = text.encode('utf-8', errors='ignore')
         chunk_end = byte_offset + len(text_bytes)
 
         if file_path == current_file and byte_offset <= current_byte_end:
