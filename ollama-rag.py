@@ -1043,7 +1043,8 @@ def retrieve_context(  # noqa
         all_metadatas.extend(results.get('metadatas', [[]])[0])
     if not all_documents:
         return ''
-    semantic_ranked = sorted(zip(all_distances, all_documents, all_metadatas, strict=True))
+    semantic_ranked = sorted(zip(all_distances, all_documents, all_metadatas, strict=True),
+                             key=lambda x: x[0])
     semantic_distances = [dist for dist, _, _ in semantic_ranked]
     semantic_chosen_k = select_top_k(semantic_distances, min_top_k, max_top_k)
     semantic_top = [
