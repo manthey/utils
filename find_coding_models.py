@@ -9,10 +9,13 @@
 
 import argparse
 import datetime
+import json
 import os
 import re
 import shutil
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 
 import dateutil.parser
@@ -25,6 +28,7 @@ cache = diskcache.Cache(cache_path)
 
 @dataclass
 class ModelInfo:
+    source: str
     repo_id: str
     filename: str
     size_gb: float
@@ -271,6 +275,7 @@ def discover_models(  # noqa
             mem_gb = quants[quant]['size']
             is_chunked = False
             candidates.append(ModelInfo(
+                source='huggingface',
                 repo_id=model.id,
                 filename=filename,
                 size_gb=mem_gb,
@@ -300,13 +305,100 @@ def format_ollama_tag(filename: str) -> str:
     return tag.upper()
 
 
+def ollama_api_get(host: str, path: str) -> object:
+    url = f'http://{host}{path}'
+    req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode())
+
+
+def ollama_api_post(host: str, path: str, body: dict) -> object:
+    url = f'http://{host}{path}'
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
+def infer_model_type_from_details(details: dict, name: str) -> str | None:
+    arch = (details.get('family', '') or details.get('architecture', '') or '').lower()
+    name_lower = name.lower()
+    if any(x in arch for x in ('clip', 'llava')) or any(
+            re.search(p, name_lower) for p in MODEL_PATTERNS['vision']['patterns']):
+        return 'vision'
+    if 'embed' in arch or any(
+            re.search(p, name_lower) for p in MODEL_PATTERNS['embed']['patterns']):
+        return 'embed'
+    if any(x in arch for x in ('code', 'coder')) or any(
+            re.search(p, name_lower) for p in MODEL_PATTERNS['code']['patterns']):
+        return 'code'
+    return None
+
+
+def discover_ollama_models(  # noqa
+    host: str, name_filter: str | None, gpu_memory_gb: float | None,
+) -> list[ModelInfo]:
+    try:
+        tags_response = ollama_api_get(host, '/api/tags')
+    except (urllib.error.URLError, OSError) as e:
+        print(f'Could not reach ollama at {host}: {e}')
+        return []
+    raw_models = tags_response.get('models', [])
+    models = []
+    for entry in raw_models:
+        name = entry.get('name', '')
+        if name_filter and not re.search(name_filter, name, re.IGNORECASE):
+            continue
+        size_bytes = entry.get('size', 0)
+        size_gb = size_bytes / (1024 ** 3)
+        if gpu_memory_gb is not None and size_gb > gpu_memory_gb:
+            continue
+        modified_str = entry.get('modified_at', '')
+        modified = None
+        if modified_str:
+            try:
+                modified = dateutil.parser.parse(modified_str).astimezone(datetime.timezone.utc)
+            except (ValueError, OverflowError):
+                pass
+        try:
+            show_response = ollama_api_post(host, '/api/show', {'name': name, 'verbose': True})
+        except (urllib.error.URLError, OSError) as e:
+            print(f'  Could not fetch details for {name}: {e}')
+            show_response = {}
+        details = show_response.get('details', {}) or {}
+        model_info_block = show_response.get('model_info', {}) or {}
+        quantization = (details.get('quantization_level', '') or '').upper()
+        if not quantization or quantization == 'UNKNOWN':
+            for key in model_info_block:
+                if 'quantization' in key.lower() and 'version' not in key.lower():
+                    quantization = str(model_info_block[key]).upper()
+                    break
+        if not quantization or quantization == 'UNKNOWN':
+            tag_part = name.rsplit(':', 1)[1] if ':' in name else ''
+            quantization = tag_part.upper() or 'UNKNOWN'
+        model_type = infer_model_type_from_details(details, name)
+        models.append(ModelInfo(
+            source='ollama',
+            repo_id=name,
+            filename=name,
+            size_gb=size_gb,
+            quantization=quantization,
+            model_type=model_type,
+            is_chunked=False,
+            downloads=0,
+            created=None,
+            modified=modified,
+        ))
+    return models
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Find Ollama-compatible models from HuggingFace',
     )
     parser.add_argument(
-        '-m', '--gpu-memory-gb', type=float, required=True,
-        help='Available GPU memory in gigabytes',
+        '-m', '--gpu-memory-gb', type=float, default=None,
+        help='Available GPU memory in gigabytes (required unless --ollama)',
     )
     parser.add_argument(
         '--min', '--min-gpu-memory-gb', type=float,
@@ -337,27 +429,44 @@ def main():
         '--before', help='Only show models before this date')
     parser.add_argument(
         '--after', help='Only show models after this date')
-    args = parser.parse_args()
-    api = huggingface_hub.HfApi()
-    models = discover_models(
-        api=api, gpu_memory_gb=args.gpu_memory_gb, model_filter=args.filter,
-        limit=args.limit, downloads=args.downloads, name_filter=args.regex,
-        min_memory=args.min,
+    parser.add_argument(
+        '--ollama', action='store_true', default=False,
+        help='Inspect locally available ollama models instead of querying HuggingFace',
     )
-    if args.before or args.after:
-        filtered = []
-        before = dateutil.parser.parse(args.before).astimezone(
-            datetime.timezone.utc) if args.before else None
-        after = dateutil.parser.parse(args.after).astimezone(
-            datetime.timezone.utc) if args.after else None
-        for m in models:
-            mdate = (m.modified if args.modified else m.created) or m.created
-            if mdate and before is not None and mdate > before:
-                continue
-            if mdate and after is not None and mdate < after:
-                continue
-            filtered.append(m)
-        models = filtered
+    parser.add_argument(
+        '--ollama-host', default=os.environ.get('OLLAMA_HOST', '127.0.0.1:11434'),
+        help='Ollama server address (default: 127.0.0.1:11434 or OLLAMA_HOST env var)',
+    )
+    args = parser.parse_args()
+    if not args.ollama and args.gpu_memory_gb is None:
+        parser.error('-m/--gpu-memory-gb is required unless --ollama is specified')
+    if args.ollama:
+        models = discover_ollama_models(
+            host=args.ollama_host,
+            name_filter=args.regex,
+            gpu_memory_gb=args.gpu_memory_gb,
+        )
+    else:
+        api = huggingface_hub.HfApi()
+        models = discover_models(
+            api=api, gpu_memory_gb=args.gpu_memory_gb, model_filter=args.filter,
+            limit=args.limit, downloads=args.downloads, name_filter=args.regex,
+            min_memory=args.min,
+        )
+        if args.before or args.after:
+            filtered = []
+            before = dateutil.parser.parse(args.before).astimezone(
+                datetime.timezone.utc) if args.before else None
+            after = dateutil.parser.parse(args.after).astimezone(
+                datetime.timezone.utc) if args.after else None
+            for m in models:
+                mdate = (m.modified if args.modified else m.created) or m.created
+                if mdate and before is not None and mdate > before:
+                    continue
+                if mdate and after is not None and mdate < after:
+                    continue
+                filtered.append(m)
+            models = filtered
     models.sort(key=lambda m: (-m.size_gb, m.repo_id))
     tw, _ = shutil.get_terminal_size()
     rw = tw - 7 - 1 - 5 - 1 - 8 - 1 - 6 - 1
