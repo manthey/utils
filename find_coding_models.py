@@ -39,6 +39,7 @@ class ModelInfo:
     downloads: int
     created: datetime.datetime | None
     modified: datetime.datetime | None
+    context_size: int | None = None
 
 
 QUANT_PRIORITY = {
@@ -107,6 +108,11 @@ MODEL_PATTERNS = {
             r'vision', r'llava', r'bakllava', r'moondream', r'cogvlm', r'minicpm-v',
             r'internvl', r'paligemma', r'qwen.*vl', r'yi-vl', r'bunny',
             r'nanollava', r'obsidian', r'pixtral', r'llama.*vision', '-vl',
+        }},
+    'medical': {
+        'tags': {'medical', 'image-feature-extraction'},
+        'patterns': {
+            r'medical', r'extract', r'path',
         }},
 }
 
@@ -204,9 +210,10 @@ def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
             return list(huggingface_hub.list_models(
                 filter=t,
                 gated=False,
-                expand=['siblings', 'createdAt', 'lastModified'],
+                expand=['siblings', 'createdAt', 'lastModified', 'gguf'],
                 sort='downloads',
-                limit=limit,
+                apps='ollama',
+                limit=limit if limit else None,
             ))
         print(f"  Fetching models with tag '{tag}'")
         models = rate_limited_call(fetch)
@@ -286,6 +293,7 @@ def discover_models(  # noqa
                 downloads=getattr(model, 'downloads', 0) or 0,
                 created=getattr(model, 'created_at', None),
                 modified=getattr(model, 'last_modified', None),
+                context_size=getattr(model, 'gguf', {}).get('context_length'),
             ))
         best = select_best_quantization(candidates, gpu_memory_gb, min_memory)
         if best:
@@ -330,6 +338,9 @@ def infer_model_type_from_details(details: dict, name: str) -> str | None:
     if 'embed' in arch or any(
             re.search(p, name_lower) for p in MODEL_PATTERNS['embed']['patterns']):
         return 'embed'
+    if 'medical' in arch or any(
+            re.search(p, name_lower) for p in MODEL_PATTERNS['medical']['patterns']):
+        return 'medical'
     if any(x in arch for x in ('code', 'coder')) or any(
             re.search(p, name_lower) for p in MODEL_PATTERNS['code']['patterns']):
         return 'code'
@@ -379,6 +390,14 @@ def discover_ollama_models(  # noqa
             tag_part = ''.join(tag_part.upper().split('.GGUF')).split('.')[-1].split('-')[-1]
             quantization = tag_part.upper() or 'UNKNOWN'
         model_type = infer_model_type_from_details(details, name)
+        context_size = None
+        for k, v in model_info_block.items():
+            if 'context_length' in k and not context_size:
+                try:
+                    context_size = int(v)
+                    break
+                except (ValueError, TypeError):
+                    pass
         models.append(ModelInfo(
             source='ollama',
             repo_id=name,
@@ -390,6 +409,7 @@ def discover_ollama_models(  # noqa
             downloads=0,
             created=modified,
             modified=modified,
+            context_size=context_size,
         ))
     return models
 
@@ -407,7 +427,7 @@ def main():  # noqa
         help='Minimum model GPU memory in gigabytes',
     )
     parser.add_argument(
-        '-f', '--filter', choices=['code', 'vision', 'embed', 'all'], default='all',
+        '-f', '--filter', choices=['code', 'vision', 'embed', 'medical', 'all'], default='all',
         help='Filter by model type (default: all)',
     )
     parser.add_argument(
@@ -446,6 +466,11 @@ def main():  # noqa
             'func': lambda m, rw: m.repo_id[:rw - 3] + '...' if len(m.repo_id) > rw else m.repo_id},
         'quantization': {'name': 'Quant', 'format': ' <7', 'func': lambda m: m.quantization},
         'size_gb': {'name': 'GB', 'format': ' 5.1f', 'func': lambda m: m.size_gb},
+        'context': {
+            'name': 'Ctx', 'format': ' >5',
+            'func': lambda m: '' if not m.context_size else
+            f'{m.context_size // 1024 // 1024}M' if m.context_size >= 10240000 else
+            f'{m.context_size // 1024}k' if m.context_size >= 10000 else f'{m.context_size} '},
         'date': {
             'name': 'Date', 'format': ' >8',
             'func': lambda m: mdate.strftime('%Y%m%d') if (
