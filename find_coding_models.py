@@ -375,6 +375,7 @@ def discover_ollama_models(  # noqa
                     break
         if not quantization or quantization == 'UNKNOWN':
             tag_part = name.rsplit(':', 1)[1] if ':' in name else ''
+            tag_part = ''.join(tag_part.upper().split('.GGUF')).split('.')[-1].split('-')[-1]
             quantization = tag_part.upper() or 'UNKNOWN'
         model_type = infer_model_type_from_details(details, name)
         models.append(ModelInfo(
@@ -386,7 +387,7 @@ def discover_ollama_models(  # noqa
             model_type=model_type,
             is_chunked=False,
             downloads=0,
-            created=None,
+            created=modified,
             modified=modified,
         ))
     return models
