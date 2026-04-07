@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -393,7 +394,7 @@ def discover_ollama_models(  # noqa
     return models
 
 
-def main():
+def main():  # noqa
     parser = argparse.ArgumentParser(
         description='Find Ollama-compatible models from HuggingFace',
     )
@@ -439,6 +440,21 @@ def main():
         help='Ollama server address (default: 127.0.0.1:11434 or OLLAMA_HOST env var)',
     )
     args = parser.parse_args()
+    columns = {
+        'repo': {
+            'name': 'Repository', 'format': 'rw',
+            'func': lambda m, rw: m.repo_id[:rw - 3] + '...' if len(m.repo_id) > rw else m.repo_id},
+        'quantization': {'name': 'Quant', 'format': ' <7', 'func': lambda m: m.quantization},
+        'size_gb': {'name': 'GB', 'format': ' 5.1f', 'func': lambda m: m.size_gb},
+        'date': {
+            'name': 'Date', 'format': ' >8',
+            'func': lambda m: mdate.strftime('%Y%m%d') if (
+                mdate := (m.modified if args.modified else m.created) or m.created) else ''},
+        'downloads': {'name': 'Dwnlds', 'format': ' >6', 'func': lambda m: m.downloads},
+        'chunked': {
+            'name': 'C', 'format': '1',
+            'func': lambda m: 'Y' if m.is_chunked else 'n', 'show': False},
+    }
     if not args.ollama and args.gpu_memory_gb is None:
         parser.error('-m/--gpu-memory-gb is required unless --ollama is specified')
     if args.ollama:
@@ -447,6 +463,7 @@ def main():
             name_filter=args.regex,
             gpu_memory_gb=args.gpu_memory_gb,
         )
+        columns['downloads']['show'] = False
     else:
         api = huggingface_hub.HfApi()
         models = discover_models(
@@ -469,19 +486,40 @@ def main():
                 filtered.append(m)
             models = filtered
     models.sort(key=lambda m: (-m.size_gb, m.repo_id))
-    tw, _ = shutil.get_terminal_size()
-    rw = tw - 7 - 1 - 5 - 1 - 8 - 1 - 6 - 1
     if args.output_format in {'table', 't'}:
-        print(f"{'Repository':<{rw}} {'Quant':<7} {'GB':>5} {'Date':>8} {'Dwnlds':>6}")
-        print('-' * tw)
+        tw, _ = shutil.get_terminal_size()
+        rw = tw
+        for col in columns.values():
+            if col.get('show') is False or col['format'] == 'rw':
+                continue
+            rw -= int(col['format'].strip().lstrip('<').lstrip('>').split('.')[0]) + (
+                1 if col['format'][0] == ' ' else 0)
+        for col in columns.values():
+            if col.get('show') is False:
+                continue
+            if col['format'][0] == ' ':
+                sys.stdout.write(' ')
+            form = col['format'].lstrip()
+            if '.' in form:
+                form = '>' + form.split('.')[0]
+            if form == 'rw':
+                form = '<' + str(rw)
+            sys.stdout.write(f'{col["name"]:{form}}')
+        sys.stdout.write('\n' + ('-' * tw) + '\n')
         for m in models:
-            # chunked_str = 'yes' if m.is_chunked else 'no'
-            repo_short = m.repo_id[:rw - 3] + '...' if len(m.repo_id) > rw else m.repo_id
-            mdate = (m.modified if args.modified else m.created) or m.created
-            mdate_str = mdate.strftime('%Y%m%d') if mdate else ''
-            print(
-                f'{repo_short:<{rw}} {m.quantization:<7} {m.size_gb:5.1f} '
-                f'{mdate_str:<8} {m.downloads:6}')
+            for col in columns.values():
+                if col.get('show') is False:
+                    continue
+                if col['format'][0] == ' ':
+                    sys.stdout.write(' ')
+                form = col['format'].lstrip()
+                if form == 'rw':
+                    form = '<' + str(rw)
+                    sys.stdout.write(f'{col["func"](m, rw):{form}}')
+                else:
+                    sys.stdout.write(f'{col["func"](m):{form}}')
+            sys.stdout.write('\n')
+            sys.stdout.flush()
     else:
         print('# Ollama pull commands:')
         for m in models:
