@@ -183,31 +183,42 @@ def fetch_config_json(repo_id: str) -> dict:
         return {}
 
 
-def parse_gguf_metadata(data: bytes) -> dict:  # noqa
+class StreamingBuffer:
+    def __init__(self, response):
+        self.response = response
+        self.buffer = bytearray()
+
+    def read(self, n: int) -> bytes:
+        while len(self.buffer) < n:
+            chunk = self.response.read(65536)
+            if not chunk:
+                break
+            self.buffer.extend(chunk)
+        result = bytes(self.buffer[:n])
+        self.buffer = self.buffer[n:]
+        return result
+
+
+def parse_gguf_metadata(stream: 'StreamingBuffer') -> dict:  # noqa
     GGUF_MAGIC = 0x46554747
     GGUF_VALUE_FORMATS = {
         0: '<B', 1: '<b', 2: '<H', 3: '<h', 4: '<I', 5: '<i',
         6: '<f', 7: '<B', 10: '<Q', 11: '<q', 12: '<d',
     }
-    offset = 0
 
     def read_fmt(fmt):
-        nonlocal offset
         size = struct.calcsize(fmt)
-        if offset + size > len(data):
+        raw = stream.read(size)
+        if len(raw) < size:
             raise BufferError
-        value = struct.unpack_from(fmt, data, offset)[0]
-        offset += size
-        return value
+        return struct.unpack(fmt, raw)[0]
 
     def read_string():
-        nonlocal offset
         length = read_fmt('<Q')
-        if offset + length > len(data):
+        raw = stream.read(length)
+        if len(raw) < length:
             raise BufferError
-        s = data[offset:offset + length].decode('utf-8', errors='replace')
-        offset += length
-        return s
+        return raw.decode('utf-8', errors='replace')
 
     def read_value(value_type):
         if value_type == 8:
@@ -235,7 +246,8 @@ def parse_gguf_metadata(data: bytes) -> dict:  # noqa
             key = read_string()
             value_type = read_fmt('<I')
             value = read_value(value_type)
-            metadata[key] = value
+            if not key.startswith('tokenizer.ggml.'):
+                metadata[key] = value
         except (BufferError, ValueError):
             break
     return metadata
@@ -243,15 +255,11 @@ def parse_gguf_metadata(data: bytes) -> dict:  # noqa
 
 @cache.memoize(expire=86400 * 10)
 def fetch_gguf_metadata_from_repo(repo_id: str, filename: str) -> dict:
-    GGUF_FETCH_BYTES = 256 * 1024
     url = f'https://huggingface.co/{repo_id}/resolve/main/{filename}'
-    req = urllib.request.Request(url, headers={
-        'User-Agent': 'huggingface-hub',
-        'Range': f'bytes=0-{GGUF_FETCH_BYTES - 1}',
-    })
+    req = urllib.request.Request(url, headers={'User-Agent': 'huggingface-hub'})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return parse_gguf_metadata(resp.read(GGUF_FETCH_BYTES))
+            return parse_gguf_metadata(StreamingBuffer(resp))
     except Exception:
         return {}
 
