@@ -53,6 +53,10 @@ class ModelInfo:
     context_size: int | None = None
     arch_params: ModelArchParams | None = None
     memory_burden_gb: float | None = None
+    has_tools: bool = False
+    has_reasoning: bool = False
+    has_vision: bool = False
+    has_embedding: bool = False
 
 
 QUANT_PRIORITY_BITS = {
@@ -324,6 +328,49 @@ def arch_params_from_ollama_model_info(model_info: dict) -> ModelArchParams:
     )
 
 
+def extract_capabilities_from_gguf(metadata: dict, filenames: list[str]) -> dict:
+    caps = {'has_tools': False, 'has_reasoning': False, 'has_vision': False, 'has_embedding': False}
+    arch = str(metadata.get('general.architecture', '')).lower()
+    chat_template = str(metadata.get('tokenizer.chat_template', '')).lower()
+    vision_archs = ['llava', 'clip', 'mllama', 'minicpmv', 'qwen2vl',
+                    'qwen3vl', 'paligemma', 'cogvlm', 'internvl', 'pixtral']
+    tags = metadata.get('general.tags', [])
+    if any(v in arch for v in vision_archs):
+        caps['has_vision'] = True
+    if any('mmproj' in f for f in filenames):
+        caps['has_vision'] = True
+    if any('vision' in k for k in metadata) or any('vision' in t.lower() for t in tags):
+        caps['has_vision'] = True
+    if any('pooling_type' in k for k in metadata) or any('embed' in t.lower() for t in tags):
+        caps['has_embedding'] = True
+    if 'bert' in arch or 'nomic' in arch or 'embedding' in arch:
+        caps['has_embedding'] = True
+    if 'tools' in chat_template or 'function' in chat_template or 'tool_call' in chat_template:
+        caps['has_tools'] = True
+    if metadata.get('general.reasoning'):
+        caps['has_reasoning'] = True
+    if 'think' in chat_template or 'reasoning' in chat_template:
+        caps['has_reasoning'] = True
+    return caps
+
+
+def extract_capabilities_from_ollama(show_response: dict) -> dict:
+    caps = {'has_tools': False, 'has_reasoning': False, 'has_vision': False, 'has_embedding': False}
+    capabilities = show_response.get('capabilities', []) or show_response.get(
+        'details', {}).get('capabilities', [])
+    for cap in capabilities:
+        cap_lower = cap.lower()
+        if cap_lower == 'tools':
+            caps['has_tools'] = True
+        elif cap_lower in ('thinking', 'reasoning'):
+            caps['has_reasoning'] = True
+        elif cap_lower == 'vision':
+            caps['has_vision'] = True
+        elif cap_lower == 'embedding':
+            caps['has_embedding'] = True
+    return caps
+
+
 def compute_memory_burden_gb(
     arch: ModelArchParams, quantization: str, requested_context: int,
 ) -> float | None:
@@ -427,7 +474,6 @@ def discover_models(  # noqa
         if (not name_filter or re.search(name_filter, m.id, re.IGNORECASE)) and
         has_gguf_files(getattr(m, 'siblings', None))
     ]
-    print(f'Found {len(with_gguf)} models with GGUF files')
     discovered = {}
     skipped_name_mismatch = 0
     skipped_no_fit = 0
@@ -447,13 +493,17 @@ def discover_models(  # noqa
             skipped_fetch_failed += 1
             continue
         gguf_meta = getattr(model, 'gguf', {}) or {}
+        gguf_candidate = next((f for f, _, chunked in gguf_files if not chunked), None)
+        gguf_meta_parsed = fetch_gguf_metadata_from_repo(
+            model.id, gguf_candidate) if gguf_candidate else {}
+        caps = extract_capabilities_from_gguf(gguf_meta_parsed, [f for f, _, _ in gguf_files])
         try:
             param_count_hint = int(gguf_meta['total']) if 'total' in gguf_meta else None
         except (ValueError, TypeError):
             param_count_hint = None
         try:
-            hf_context_length = int(gguf_meta['context_length'],
-                                    ) if 'context_length' in gguf_meta else None
+            hf_context_length = int(
+                gguf_meta['context_length']) if 'context_length' in gguf_meta else None
         except (ValueError, TypeError):
             hf_context_length = None
         arch = arch_params_from_config_json(fetch_config_json(model.id), param_count_hint)
@@ -502,6 +552,10 @@ def discover_models(  # noqa
                 context_size=arch.context_length,
                 arch_params=arch,
                 memory_burden_gb=compute_memory_burden_gb(arch, quant, context_memory),
+                has_tools=caps['has_tools'],
+                has_reasoning=caps['has_reasoning'],
+                has_vision=caps['has_vision'],
+                has_embedding=caps['has_embedding'],
             ))
         best = select_best_quantization(candidates, gpu_memory_gb, min_memory, context_limit_gb)
         if best:
@@ -584,6 +638,7 @@ def discover_ollama_models(  # noqa
             print(f'  Could not fetch details for {name}: {e}')
             show_response = {}
         details = show_response.get('details', {}) or {}
+        caps = extract_capabilities_from_ollama(show_response)
         model_info_block = show_response.get('model_info', {}) or {}
         quantization = (details.get('quantization_level', '') or '').upper()
         if not quantization or quantization == 'UNKNOWN':
@@ -614,6 +669,10 @@ def discover_ollama_models(  # noqa
             context_size=arch.context_length,
             arch_params=arch,
             memory_burden_gb=memory_burden_gb,
+            has_tools=caps['has_tools'],
+            has_reasoning=caps['has_reasoning'],
+            has_vision=caps['has_vision'],
+            has_embedding=caps['has_embedding'],
         ))
     return models
 
@@ -686,14 +745,26 @@ def main():  # noqa
             'func': lambda m: '' if not m.context_size else
             f'{m.context_size // 1024 // 1024}M' if m.context_size >= 10240000 else
             f'{m.context_size // 1024}k' if m.context_size >= 10000 else f'{m.context_size} '},
+        'tools': {
+            'name': 'T', 'format': ' 1',
+            'func': lambda m: 'Y' if m.has_tools else ' '},
+        'reasoning': {
+            'name': 'R', 'format': '1',
+            'func': lambda m: 'Y' if m.has_reasoning else ' '},
+        'vision': {
+            'name': 'V', 'format': '1',
+            'func': lambda m: 'Y' if m.has_vision else ' '},
+        'embedding': {
+            'name': 'E', 'format': '1',
+            'func': lambda m: 'Y' if m.has_embedding else ' '},
+        'chunked': {
+            'name': 'C', 'format': '1',
+            'func': lambda m: 'Y' if m.is_chunked else 'n', 'show': False},
         'date': {
             'name': 'Date', 'format': ' >8',
             'func': lambda m: mdate.strftime('%Y%m%d') if (
                 mdate := (m.modified if args.modified else m.created) or m.created) else ''},
         'downloads': {'name': 'Dwnlds', 'format': ' >6', 'func': lambda m: m.downloads},
-        'chunked': {
-            'name': 'C', 'format': '1',
-            'func': lambda m: 'Y' if m.is_chunked else 'n', 'show': False},
     }
     if not args.local and args.gpu_memory_gb is None and args.context_limit is None:
         parser.error('-m/--gpu-memory-gb is required unless --local is specified')
