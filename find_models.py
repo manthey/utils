@@ -10,6 +10,7 @@
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import shutil
@@ -175,7 +176,8 @@ def fetch_config_json(repo_id: str) -> dict:
     req = urllib.request.Request(url, headers={'User-Agent': 'huggingface-hub'})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode())
+            config = json.loads(resp.read().decode())
+            return config
     except (urllib.error.URLError, urllib.error.HTTPError, OSError):
         return {}
 
@@ -222,11 +224,12 @@ def arch_params_from_ollama_model_info(model_info: dict) -> ModelArchParams:
         for pattern, target in TARGETS.items():
             if target not in gathered and re.fullmatch(pattern, key):
                 try:
-                    gathered[target] = int(value)
+                    gathered[target] = (
+                        int(math.ceil(sum(value) / len(value)))
+                        if isinstance(value, list) else int(value))
                 except (ValueError, TypeError):
                     pass
                 break
-
     head_count = gathered.pop('head_count', None)
     embedding_length = gathered.pop('embedding_length', None)
     head_dim = embedding_length // head_count if embedding_length and head_count else None
@@ -282,10 +285,18 @@ def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tupl
 
 
 def select_best_quantization(
-    candidates: list[ModelInfo], gpu_memory_gb: float, min_memory: float | None,
+    candidates: list[ModelInfo], gpu_memory_gb: float,
+    min_memory: float | None, context_limit_gb: float | None = None,
 ) -> ModelInfo | None:
-    fitting = [m for m in candidates if (min_memory or 0) <= m.size_gb <= gpu_memory_gb and
-               QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0] is not None]
+    if context_limit_gb is not None:
+        fitting = [
+            m for m in candidates if m.memory_burden_gb is not None and
+            (min_memory or 0) <= m.memory_burden_gb <= context_limit_gb and
+            QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0] is not None]
+    else:
+        fitting = [
+            m for m in candidates if (min_memory or 0) <= m.size_gb <= gpu_memory_gb and
+            QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0] is not None]
     if not fitting:
         return None
     fitting.sort(key=lambda m: QUANT_PRIORITY_BITS.get(m.quantization, (99, 0))[0])
@@ -317,9 +328,10 @@ def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
 
 
 def discover_models(  # noqa
-    api: huggingface_hub.HfApi, gpu_memory_gb: float, model_filter: str,
+    api: huggingface_hub.HfApi, gpu_memory_gb: float | None, model_filter: str,
     limit: int, downloads: int, name_filter: str | None = None,
     min_memory: float | None = None, context_memory: int = 32768,
+    context_limit_gb: float | None = None,
 ) -> list[ModelInfo]:
     print(f'Fetching {model_filter} models from HuggingFace')
     tags = set()
@@ -396,7 +408,7 @@ def discover_models(  # noqa
                 arch_params=arch,
                 memory_burden_gb=compute_memory_burden_gb(arch, quant, context_memory),
             ))
-        best = select_best_quantization(candidates, gpu_memory_gb, min_memory)
+        best = select_best_quantization(candidates, gpu_memory_gb, min_memory, context_limit_gb)
         if best:
             discovered[model.id] = best
         else:
@@ -449,7 +461,7 @@ def infer_model_type_from_details(details: dict, name: str) -> str | None:
 
 def discover_ollama_models(  # noqa
     host: str, name_filter: str | None, gpu_memory_gb: float | None,
-    context_memory: int = 32768,
+    context_memory: int = 32768, context_limit_gb: float | None = None,
 ) -> list[ModelInfo]:
     try:
         tags_response = ollama_api_get(host, '/api/tags')
@@ -489,6 +501,10 @@ def discover_ollama_models(  # noqa
             quantization = ''.join(tag_part.upper().split('.GGUF')).split(
                 '.')[-1].split('-')[-1] or 'UNKNOWN'
         arch = arch_params_from_ollama_model_info(model_info_block)
+        memory_burden_gb = compute_memory_burden_gb(arch, quantization, context_memory)
+        if context_limit_gb is not None and (
+                memory_burden_gb is None or memory_burden_gb > context_limit_gb):
+            continue
         models.append(ModelInfo(
             source='ollama',
             repo_id=name,
@@ -502,7 +518,7 @@ def discover_ollama_models(  # noqa
             modified=modified,
             context_size=arch.context_length,
             arch_params=arch,
-            memory_burden_gb=compute_memory_burden_gb(arch, quantization, context_memory),
+            memory_burden_gb=memory_burden_gb,
         ))
     return models
 
@@ -513,7 +529,7 @@ def main():  # noqa
     )
     parser.add_argument(
         '-m', '--gpu-memory-gb', type=float, default=None,
-        help='Available GPU memory in gigabytes (required unless --ollama)',
+        help='Available GPU memory in gigabytes (required unless --local)',
     )
     parser.add_argument(
         '--min', '--min-gpu-memory-gb', type=float,
@@ -524,8 +540,8 @@ def main():  # noqa
         help='Filter by model type (default: all)',
     )
     parser.add_argument(
-        '-l', '--limit', type=int, default=1000,
-        help='Maximum models to fetch per category (default: 1000)',
+        '-l', '--limit', type=int, default=0,
+        help='Maximum models to fetch per category, 0 for all (default: 0)',
     )
     parser.add_argument(
         '-d', '--downloads', type=int, default=0,
@@ -545,7 +561,7 @@ def main():  # noqa
     parser.add_argument(
         '--after', help='Only show models after this date')
     parser.add_argument(
-        '--ollama', action='store_true', default=False,
+        '--local', action='store_true', default=False,
         help='Inspect locally available ollama models instead of querying HuggingFace',
     )
     parser.add_argument(
@@ -555,6 +571,10 @@ def main():  # noqa
     parser.add_argument(
         '--context-memory', '-c', type=int, default=32768,
         help='Context size to use when estimating memory burden (default: 32768)',
+    )
+    parser.add_argument(
+        '-x', '--context-limit', type=float, default=None,
+        help='Use context memory as the measure for choosing models',
     )
     args = parser.parse_args()
     columns = {
@@ -580,14 +600,14 @@ def main():  # noqa
             'name': 'C', 'format': '1',
             'func': lambda m: 'Y' if m.is_chunked else 'n', 'show': False},
     }
-    if not args.ollama and args.gpu_memory_gb is None:
-        parser.error('-m/--gpu-memory-gb is required unless --ollama is specified')
-    if args.ollama:
+    if not args.local and args.gpu_memory_gb is None and args.context_limit is None:
+        parser.error('-m/--gpu-memory-gb is required unless --local is specified')
+    if args.local:
         models = discover_ollama_models(
-            host=args.ollama_host,
-            name_filter=args.regex,
+            host=args.ollama_host, name_filter=args.regex,
             gpu_memory_gb=args.gpu_memory_gb,
             context_memory=args.context_memory,
+            context_limit_gb=args.context_limit,
         )
         columns['downloads']['show'] = False
     else:
@@ -596,6 +616,7 @@ def main():  # noqa
             api=api, gpu_memory_gb=args.gpu_memory_gb, model_filter=args.filter,
             limit=args.limit, downloads=args.downloads, name_filter=args.regex,
             min_memory=args.min, context_memory=args.context_memory,
+            context_limit_gb=args.context_limit,
         )
         if args.before or args.after:
             before = dateutil.parser.parse(args.before).astimezone(
