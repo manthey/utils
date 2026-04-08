@@ -14,6 +14,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import sys
 import time
 import urllib.error
@@ -175,10 +176,83 @@ def fetch_config_json(repo_id: str) -> dict:
     url = f'https://huggingface.co/{repo_id}/resolve/main/config.json'
     req = urllib.request.Request(url, headers={'User-Agent': 'huggingface-hub'})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with rate_limited_call(lambda: urllib.request.urlopen(req, timeout=30)) as resp:
             config = json.loads(resp.read().decode())
             return config
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+    except Exception:
+        return {}
+
+
+def parse_gguf_metadata(data: bytes) -> dict:  # noqa
+    GGUF_MAGIC = 0x46554747
+    GGUF_VALUE_FORMATS = {
+        0: '<B', 1: '<b', 2: '<H', 3: '<h', 4: '<I', 5: '<i',
+        6: '<f', 7: '<B', 10: '<Q', 11: '<q', 12: '<d',
+    }
+    offset = 0
+
+    def read_fmt(fmt):
+        nonlocal offset
+        size = struct.calcsize(fmt)
+        if offset + size > len(data):
+            raise BufferError
+        value = struct.unpack_from(fmt, data, offset)[0]
+        offset += size
+        return value
+
+    def read_string():
+        nonlocal offset
+        length = read_fmt('<Q')
+        if offset + length > len(data):
+            raise BufferError
+        s = data[offset:offset + length].decode('utf-8', errors='replace')
+        offset += length
+        return s
+
+    def read_value(value_type):
+        if value_type == 8:
+            return read_string()
+        if value_type == 9:
+            elem_type = read_fmt('<I')
+            count = read_fmt('<Q')
+            return [read_value(elem_type) for _ in range(count)]
+        fmt = GGUF_VALUE_FORMATS.get(value_type)
+        if fmt is None:
+            raise BufferError
+        return read_fmt(fmt)
+
+    try:
+        if read_fmt('<I') != GGUF_MAGIC:
+            return {}
+        read_fmt('<I')
+        read_fmt('<Q')
+        metadata_kv_count = read_fmt('<Q')
+    except BufferError:
+        return {}
+    metadata = {}
+    for _ in range(metadata_kv_count):
+        try:
+            key = read_string()
+            value_type = read_fmt('<I')
+            value = read_value(value_type)
+            metadata[key] = value
+        except (BufferError, ValueError):
+            break
+    return metadata
+
+
+@cache.memoize(expire=86400 * 10)
+def fetch_gguf_metadata_from_repo(repo_id: str, filename: str) -> dict:
+    GGUF_FETCH_BYTES = 256 * 1024
+    url = f'https://huggingface.co/{repo_id}/resolve/main/{filename}'
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'huggingface-hub',
+        'Range': f'bytes=0-{GGUF_FETCH_BYTES - 1}',
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return parse_gguf_metadata(resp.read(GGUF_FETCH_BYTES))
+    except Exception:
         return {}
 
 
@@ -381,6 +455,19 @@ def discover_models(  # noqa
                 num_kv_heads=arch.num_kv_heads, head_dim=arch.head_dim,
                 context_length=hf_context_length,
             )
+        if arch.num_layers is None or arch.num_kv_heads is None or arch.head_dim is None:
+            gguf_candidate = next((f for f, _, chunked in gguf_files if not chunked), None)
+            if gguf_candidate:
+                gguf_meta_parsed = fetch_gguf_metadata_from_repo(model.id, gguf_candidate)
+                if gguf_meta_parsed:
+                    gguf_arch = arch_params_from_ollama_model_info(gguf_meta_parsed)
+                    arch = ModelArchParams(
+                        param_count=arch.param_count or gguf_arch.param_count,
+                        num_layers=arch.num_layers or gguf_arch.num_layers,
+                        num_kv_heads=arch.num_kv_heads or gguf_arch.num_kv_heads,
+                        head_dim=arch.head_dim or gguf_arch.head_dim,
+                        context_length=arch.context_length or gguf_arch.context_length,
+                    )
         candidates = []
         quants = {}
         for filename, size_bytes, is_chunked in gguf_files:
