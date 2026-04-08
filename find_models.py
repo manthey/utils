@@ -719,7 +719,9 @@ def main():  # noqa
                     continue
                 filtered.append(m)
             models = filtered
-    models.sort(key=lambda m: (-m.size_gb, m.repo_id))
+    models.sort(key=lambda m: (
+        -m.size_gb if args.context_limit is None else (-m.memory_burden_gb or 0),
+        -m.size_gb, m.repo_id))
     if args.output_format in {'table', 't'}:
         tw, _ = shutil.get_terminal_size()
         rw = tw
