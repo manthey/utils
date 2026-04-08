@@ -28,6 +28,15 @@ cache = diskcache.Cache(cache_path)
 
 
 @dataclass
+class ModelArchParams:
+    param_count: int | None
+    num_layers: int | None
+    num_kv_heads: int | None
+    head_dim: int | None
+    context_length: int | None
+
+
+@dataclass
 class ModelInfo:
     source: str
     repo_id: str
@@ -40,55 +49,57 @@ class ModelInfo:
     created: datetime.datetime | None
     modified: datetime.datetime | None
     context_size: int | None = None
+    arch_params: ModelArchParams | None = None
+    memory_burden_gb: float | None = None
 
 
-QUANT_PRIORITY = {
+QUANT_PRIORITY_BITS = {
     # Full precision
-    'F32': 1,
-    'F16': 2,
-    # "BF16": 3,   # disabled because of my specific GPUs
+    'F32': (1, 32.0),
+    'F16': (2, 16.0),
+    'BF16': (None, 16.0),   # disabled because of my specific GPUs
     # Near-lossless
-    'Q8_0': 10,
-    'Q8_1': 11,
+    'Q8_0': (10, 8.5),
+    'Q8_1': (11, 9.0),
     # High quality
-    'Q6_K': 20,
-    'Q6_K_L': 21,
+    'Q6_K': (20, 6.5625),
+    'Q6_K_L': (21, 6.5625),
     # Good quality
-    'Q5_K_H': 30,
-    'Q5_K_L': 31,
-    'Q5_K_M': 32,
-    'Q5_K_S': 33,
-    'Q5_1': 34,
-    'Q5_0': 35,
+    'Q5_K_H': (30, 5.5),
+    'Q5_K_L': (31, 5.5),
+    'Q5_K_M': (32, 5.5),
+    'Q5_K_S': (33, 5.5),
+    'Q5_1': (34, 6.0),
+    'Q5_0': (35, 5.0),
     # Recommended balance
-    'Q4_K_L': 40,
-    'Q4_K_M': 41,
-    'Q4_K_S': 42,
-    'IQ4_NL': 43,
-    'IQ4_XS': 44,
-    'Q4_1': 45,
-    'Q4_0': 46,
+    'Q4_K_L': (40, 4.5),
+    'Q4_K_M': (41, 4.5),
+    'Q4_K_S': (42, 4.5),
+    'IQ4_NL': (43, 4.5),
+    'IQ4_XS': (44, 4.25),
+    'Q4_1': (45, 5.0),
+    'Q4_0': (46, 4.5),
     # Lower quality
-    'Q3_K_XL': 50,
-    'Q3_K_L': 51,
-    'IQ3_M': 52,
-    'Q3_K_M': 53,
-    'IQ3_S': 54,
-    'Q3_K_S': 55,
-    'IQ3_XS': 56,
-    'IQ3_XXS': 57,
+    'Q3_K_XL': (50, 3.9375),
+    'Q3_K_L': (51, 3.875),
+    'IQ3_M': (52, 3.7),
+    'Q3_K_M': (53, 3.875),
+    'IQ3_S': (54, 3.5),
+    'Q3_K_S': (55, 3.5),
+    'IQ3_XS': (56, 3.3),
+    'IQ3_XXS': (57, 3.06),
     # Very low quality
-    'Q2_K_L': 60,
-    'Q2_K': 61,
-    'Q2_K_S': 62,
-    'IQ2_M': 63,
-    'IQ2_S': 64,
-    'IQ2_XS': 65,
-    'IQ2_XXS': 66,
+    'Q2_K_L': (60, 2.625),
+    'Q2_K': (61, 2.625),
+    'Q2_K_S': (62, 2.5),
+    'IQ2_M': (63, 2.7),
+    'IQ2_S': (64, 2.5),
+    'IQ2_XS': (65, 2.31),
+    'IQ2_XXS': (66, 2.0625),
     # Desperate
-    'IQ1_M': 70,
-    'IQ1_S': 71,
-    'Q1_0': 72,
+    'IQ1_M': (70, 1.75),
+    'IQ1_S': (71, 1.5625),
+    'Q1_0': (72, 1.0),
 }
 
 MODEL_PATTERNS = {
@@ -134,7 +145,7 @@ def rate_limited_call(func, max_retries=8, base_delay=5):
 
 def extract_quantization(filename: str) -> str:
     filename_normalized = filename.upper().replace('-', '_')
-    for quant in QUANT_PRIORITY:
+    for quant in QUANT_PRIORITY_BITS:
         if quant in filename_normalized:
             return quant
     return 'UNKNOWN'
@@ -146,36 +157,115 @@ def estimate_memory_gb(file_size_bytes: int) -> float:
 
 def matches_type(repo_id: str, model_type: str) -> bool:
     repo_lower = repo_id.lower()
-    patterns = MODEL_PATTERNS.get(model_type)['patterns']
-    return any(re.search(p, repo_lower) for p in patterns)
+    return any(re.search(p, repo_lower) for p in MODEL_PATTERNS[model_type]['patterns'])
 
 
 def has_gguf_files(siblings: list) -> bool:
     if not siblings:
         return False
-    for sibling in siblings:
-        filename = getattr(sibling, 'rfilename', None)
-        if filename and filename.endswith('.gguf'):
-            return True
-    return False
+    return any(
+        getattr(s, 'rfilename', '').endswith('.gguf')
+        for s in siblings
+    )
+
+
+@cache.memoize(expire=86400 * 10)
+def fetch_config_json(repo_id: str) -> dict:
+    url = f'https://huggingface.co/{repo_id}/resolve/main/config.json'
+    req = urllib.request.Request(url, headers={'User-Agent': 'huggingface-hub'})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+        return {}
+
+
+def arch_params_from_config_json(config: dict, param_count_hint: int | None) -> ModelArchParams:
+    config = config or {}
+
+    def first_match(pattern):
+        for key, value in config.items():
+            if re.fullmatch(pattern, key):
+                try:
+                    return int(value)
+                except (ValueError, TypeError):
+                    pass
+        return None
+
+    num_layers = first_match(r'num_hidden_layers|n_layers?')
+    num_attention_heads = first_match(r'num_attention_heads|n_heads?')
+    num_kv_heads = first_match(r'num_key_value_heads|n_head_kv|num_kv_heads') or num_attention_heads
+    hidden_size = first_match(r'hidden_size|d_model|n_embd|model_dim')
+    context_length = first_match(r'max_position_embeddings|max_seq_len|seq_length|n_positions')
+    head_dim = hidden_size // num_attention_heads if hidden_size and num_attention_heads else None
+    return ModelArchParams(
+        param_count=param_count_hint,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        context_length=context_length,
+    )
+
+
+def arch_params_from_ollama_model_info(model_info: dict) -> ModelArchParams:
+    model_info = model_info or {}
+    TARGETS = {
+        r'.+\.block_count': 'num_layers',
+        r'.+\.head_count_kv': 'num_kv_heads',
+        r'.+\.head_count': 'head_count',
+        r'.+\.embedding_length': 'embedding_length',
+        r'.+\.context_length': 'context_length',
+        r'.+\.parameter_count': 'param_count',
+    }
+    gathered = {}
+    for key, value in model_info.items():
+        for pattern, target in TARGETS.items():
+            if target not in gathered and re.fullmatch(pattern, key):
+                try:
+                    gathered[target] = int(value)
+                except (ValueError, TypeError):
+                    pass
+                break
+
+    head_count = gathered.pop('head_count', None)
+    embedding_length = gathered.pop('embedding_length', None)
+    head_dim = embedding_length // head_count if embedding_length and head_count else None
+    return ModelArchParams(
+        param_count=gathered.get('param_count'),
+        num_layers=gathered.get('num_layers'),
+        num_kv_heads=gathered.get('num_kv_heads'),
+        head_dim=head_dim,
+        context_length=gathered.get('context_length'),
+    )
+
+
+def compute_memory_burden_gb(
+    arch: ModelArchParams, quantization: str, requested_context: int,
+) -> float | None:
+    bits_per_weight = QUANT_PRIORITY_BITS.get(quantization, (0, 16.0))[1]
+    if bits_per_weight is None or arch is None or arch.param_count is None:
+        return None
+    weights_bytes = (arch.param_count * bits_per_weight) / 8.0
+    effective_context = requested_context
+    if arch.context_length is not None:
+        effective_context = min(requested_context, arch.context_length)
+    kv_bytes = 0.0
+    if arch.num_layers is not None and arch.num_kv_heads is not None and arch.head_dim is not None:
+        kv_bytes = 4.0 * arch.num_layers * arch.num_kv_heads * arch.head_dim * effective_context
+    return (weights_bytes + kv_bytes) / (1024.0 ** 3)
 
 
 @cache.memoize(expire=86400 * 10)
 def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tuple[str, int, bool]]:
-    def fetch():
-        return list(api.list_repo_tree(repo_id, recursive=False))
-
     try:
-        files = rate_limited_call(fetch)
+        files = rate_limited_call(lambda: list(api.list_repo_tree(repo_id, recursive=False)))
     except Exception:
         return []
     single_files = []
     chunked_groups = {}
     for f in files:
         filename = getattr(f, 'path', None)
-        if not filename or not filename.endswith('.gguf'):
-            continue
-        if 'mmproj' in filename:
+        if not filename or not filename.endswith('.gguf') or 'mmproj' in filename:
             continue
         size = getattr(f, 'size', None)
         if not size:
@@ -194,11 +284,11 @@ def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tupl
 def select_best_quantization(
     candidates: list[ModelInfo], gpu_memory_gb: float, min_memory: float | None,
 ) -> ModelInfo | None:
-    fitting = [m for m in candidates if (
-        min_memory or 0) <= m.size_gb <= gpu_memory_gb and m.quantization in QUANT_PRIORITY]
+    fitting = [m for m in candidates if (min_memory or 0) <= m.size_gb <= gpu_memory_gb and
+               QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0] is not None]
     if not fitting:
         return None
-    fitting.sort(key=lambda m: QUANT_PRIORITY.get(m.quantization, 99))
+    fitting.sort(key=lambda m: QUANT_PRIORITY_BITS.get(m.quantization, (99, 0))[0])
     return fitting[0]
 
 
@@ -216,8 +306,7 @@ def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
                 limit=limit if limit else None,
             ))
         print(f"  Fetching models with tag '{tag}'")
-        models = rate_limited_call(fetch)
-        all_models.extend(models)
+        all_models.extend(rate_limited_call(fetch))
     seen = set()
     unique = []
     for m in all_models:
@@ -230,7 +319,7 @@ def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
 def discover_models(  # noqa
     api: huggingface_hub.HfApi, gpu_memory_gb: float, model_filter: str,
     limit: int, downloads: int, name_filter: str | None = None,
-    min_memory: float | None = None,
+    min_memory: float | None = None, context_memory: int = 32768,
 ) -> list[ModelInfo]:
     print(f'Fetching {model_filter} models from HuggingFace')
     tags = set()
@@ -239,13 +328,11 @@ def discover_models(  # noqa
             tags |= MODEL_PATTERNS[key]['tags']
     found_models = fetch_models_for_tags(tags, limit, downloads)
     print(f'Retrieved {len(found_models)} candidate models')
-    with_gguf = []
-    for model in found_models:
-        if name_filter and not re.search(name_filter, model.id, re.IGNORECASE):
-            continue
-        siblings = getattr(model, 'siblings', None)
-        if has_gguf_files(siblings):
-            with_gguf.append(model)
+    with_gguf = [
+        m for m in found_models
+        if (not name_filter or re.search(name_filter, m.id, re.IGNORECASE)) and
+        has_gguf_files(getattr(m, 'siblings', None))
+    ]
     print(f'Found {len(with_gguf)} models with GGUF files')
     discovered = {}
     skipped_name_mismatch = 0
@@ -265,6 +352,23 @@ def discover_models(  # noqa
         if not gguf_files:
             skipped_fetch_failed += 1
             continue
+        gguf_meta = getattr(model, 'gguf', {}) or {}
+        try:
+            param_count_hint = int(gguf_meta['total']) if 'total' in gguf_meta else None
+        except (ValueError, TypeError):
+            param_count_hint = None
+        try:
+            hf_context_length = int(gguf_meta['context_length'],
+                                    ) if 'context_length' in gguf_meta else None
+        except (ValueError, TypeError):
+            hf_context_length = None
+        arch = arch_params_from_config_json(fetch_config_json(model.id), param_count_hint)
+        if arch.context_length is None and hf_context_length is not None:
+            arch = ModelArchParams(
+                param_count=arch.param_count, num_layers=arch.num_layers,
+                num_kv_heads=arch.num_kv_heads, head_dim=arch.head_dim,
+                context_length=hf_context_length,
+            )
         candidates = []
         quants = {}
         for filename, size_bytes, is_chunked in gguf_files:
@@ -274,26 +378,23 @@ def discover_models(  # noqa
             if quant == 'UNKNOWN':
                 continue
             mem_gb = estimate_memory_gb(size_bytes)
-            quants.setdefault(quant, {'file': filename, 'size': mem_gb})
-            if mem_gb > quants[quant]['size']:
-                quants[quant]['file'] = filename
-                quants[quant]['size'] = mem_gb
-        for quant in quants:
-            filename = quants[quant]['file']
-            mem_gb = quants[quant]['size']
-            is_chunked = False
+            if quant not in quants or mem_gb > quants[quant]['size']:
+                quants[quant] = {'file': filename, 'size': mem_gb}
+        for quant, info in quants.items():
             candidates.append(ModelInfo(
                 source='huggingface',
                 repo_id=model.id,
-                filename=filename,
-                size_gb=mem_gb,
+                filename=info['file'],
+                size_gb=info['size'],
                 quantization=quant,
                 model_type=model_type,
-                is_chunked=is_chunked,
+                is_chunked=False,
                 downloads=getattr(model, 'downloads', 0) or 0,
                 created=getattr(model, 'created_at', None),
                 modified=getattr(model, 'last_modified', None),
-                context_size=getattr(model, 'gguf', {}).get('context_length'),
+                context_size=arch.context_length,
+                arch_params=arch,
+                memory_burden_gb=compute_memory_burden_gb(arch, quant, context_memory),
             ))
         best = select_best_quantization(candidates, gpu_memory_gb, min_memory)
         if best:
@@ -316,8 +417,7 @@ def format_ollama_tag(filename: str) -> str:
 
 def ollama_api_get(host: str, path: str) -> object:
     url = f'http://{host}{path}'
-    req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(urllib.request.Request(url), timeout=10) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -349,15 +449,15 @@ def infer_model_type_from_details(details: dict, name: str) -> str | None:
 
 def discover_ollama_models(  # noqa
     host: str, name_filter: str | None, gpu_memory_gb: float | None,
+    context_memory: int = 32768,
 ) -> list[ModelInfo]:
     try:
         tags_response = ollama_api_get(host, '/api/tags')
     except (urllib.error.URLError, OSError) as e:
         print(f'Could not reach ollama at {host}: {e}')
         return []
-    raw_models = tags_response.get('models', [])
     models = []
-    for entry in raw_models:
+    for entry in tags_response.get('models', []):
         name = entry.get('name', '')
         if name_filter and not re.search(name_filter, name, re.IGNORECASE):
             continue
@@ -365,9 +465,8 @@ def discover_ollama_models(  # noqa
         size_gb = size_bytes / (1024 ** 3)
         if gpu_memory_gb is not None and size_gb > gpu_memory_gb:
             continue
-        modified_str = entry.get('modified_at', '')
         modified = None
-        if modified_str:
+        if modified_str := entry.get('modified_at', ''):
             try:
                 modified = dateutil.parser.parse(modified_str).astimezone(datetime.timezone.utc)
             except (ValueError, OverflowError):
@@ -387,29 +486,23 @@ def discover_ollama_models(  # noqa
                     break
         if not quantization or quantization == 'UNKNOWN':
             tag_part = name.rsplit(':', 1)[1] if ':' in name else ''
-            tag_part = ''.join(tag_part.upper().split('.GGUF')).split('.')[-1].split('-')[-1]
-            quantization = tag_part.upper() or 'UNKNOWN'
-        model_type = infer_model_type_from_details(details, name)
-        context_size = None
-        for k, v in model_info_block.items():
-            if 'context_length' in k and not context_size:
-                try:
-                    context_size = int(v)
-                    break
-                except (ValueError, TypeError):
-                    pass
+            quantization = ''.join(tag_part.upper().split('.GGUF')).split(
+                '.')[-1].split('-')[-1] or 'UNKNOWN'
+        arch = arch_params_from_ollama_model_info(model_info_block)
         models.append(ModelInfo(
             source='ollama',
             repo_id=name,
             filename=name,
             size_gb=size_gb,
             quantization=quantization,
-            model_type=model_type,
+            model_type=infer_model_type_from_details(details, name),
             is_chunked=False,
             downloads=0,
             created=modified,
             modified=modified,
-            context_size=context_size,
+            context_size=arch.context_length,
+            arch_params=arch,
+            memory_burden_gb=compute_memory_burden_gb(arch, quantization, context_memory),
         ))
     return models
 
@@ -459,13 +552,20 @@ def main():  # noqa
         '--ollama-host', default=os.environ.get('OLLAMA_HOST', '127.0.0.1:11434'),
         help='Ollama server address (default: 127.0.0.1:11434 or OLLAMA_HOST env var)',
     )
+    parser.add_argument(
+        '--context-memory', '-c', type=int, default=32768,
+        help='Context size to use when estimating memory burden (default: 32768)',
+    )
     args = parser.parse_args()
     columns = {
         'repo': {
             'name': 'Repository', 'format': 'rw',
             'func': lambda m, rw: m.repo_id[:rw - 3] + '...' if len(m.repo_id) > rw else m.repo_id},
         'quantization': {'name': 'Quant', 'format': ' <7', 'func': lambda m: m.quantization},
-        'size_gb': {'name': 'GB', 'format': ' 5.1f', 'func': lambda m: m.size_gb},
+        'size_gb': {'name': 'SizGB', 'format': ' 5.1f', 'func': lambda m: m.size_gb},
+        'memory_burden': {
+            'name': 'CtxGB', 'format': ' 5.1f',
+            'func': lambda m: m.memory_burden_gb or 0},
         'context': {
             'name': 'Ctx', 'format': ' >5',
             'func': lambda m: '' if not m.context_size else
@@ -487,6 +587,7 @@ def main():  # noqa
             host=args.ollama_host,
             name_filter=args.regex,
             gpu_memory_gb=args.gpu_memory_gb,
+            context_memory=args.context_memory,
         )
         columns['downloads']['show'] = False
     else:
@@ -494,14 +595,14 @@ def main():  # noqa
         models = discover_models(
             api=api, gpu_memory_gb=args.gpu_memory_gb, model_filter=args.filter,
             limit=args.limit, downloads=args.downloads, name_filter=args.regex,
-            min_memory=args.min,
+            min_memory=args.min, context_memory=args.context_memory,
         )
         if args.before or args.after:
-            filtered = []
             before = dateutil.parser.parse(args.before).astimezone(
                 datetime.timezone.utc) if args.before else None
             after = dateutil.parser.parse(args.after).astimezone(
                 datetime.timezone.utc) if args.after else None
+            filtered = []
             for m in models:
                 mdate = (m.modified if args.modified else m.created) or m.created
                 if mdate and before is not None and mdate > before:
@@ -548,9 +649,7 @@ def main():  # noqa
     else:
         print('# Ollama pull commands:')
         for m in models:
-            # tag = format_ollama_tag(m.filename)
-            tag = m.quantization
-            print(f'ollama pull hf.co/{m.repo_id}:{tag}')
+            print(f'ollama pull hf.co/{m.repo_id}:{m.quantization}')
     print(f'Total: {len(models)} models')
 
 
