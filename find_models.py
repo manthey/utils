@@ -9,6 +9,7 @@
 
 import argparse
 import datetime
+import inspect
 import json
 import math
 import os
@@ -437,13 +438,16 @@ def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
     all_models = []
     for tag in tags:
         def fetch(t=tag):
+            kwargs = {}
+            if 'apps' in inspect.signature(huggingface_hub.list_models).parameters:
+                kwargs['apps'] = 'ollama'
             return list(huggingface_hub.list_models(
                 filter=t,
-                gated=False,
+                # gated=False,
                 expand=['siblings', 'createdAt', 'lastModified', 'gguf'],
                 sort='downloads',
-                apps='ollama',
                 limit=limit if limit else None,
+                **kwargs,
             ))
         print(f"  Fetching models with tag '{tag}'")
         all_models.extend(rate_limited_call(fetch))
@@ -492,6 +496,11 @@ def discover_models(  # noqa
         if not gguf_files:
             skipped_fetch_failed += 1
             continue
+        if context_limit_gb is not None and gguf_files:
+            gguf_files = [f for f in gguf_files if f[1] / 1024**3 <= context_limit_gb]
+            if not gguf_files:
+                skipped_no_fit += 1
+                continue
         gguf_meta = getattr(model, 'gguf', {}) or {}
         gguf_candidate = next((f for f, _, chunked in gguf_files if not chunked), None)
         gguf_meta_parsed = fetch_gguf_metadata_from_repo(
@@ -642,6 +651,8 @@ def discover_ollama_models(  # noqa
         size_bytes = entry.get('size', 0)
         size_gb = size_bytes / (1024 ** 3)
         if gpu_memory_gb is not None and size_gb > gpu_memory_gb:
+            continue
+        if context_limit_gb is not None and size_gb > context_limit_gb:
             continue
         modified = None
         if modified_str := entry.get('modified_at', ''):
