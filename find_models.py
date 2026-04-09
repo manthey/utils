@@ -608,6 +608,23 @@ def infer_model_type_from_details(details: dict, name: str) -> str | None:
     return None
 
 
+def infer_quantization_from_info_block(metadata: dict, size_bytes: int) -> str:
+    try:
+        # Use a small reduction for overhead
+        bits = size_bytes * 8 * 0.98 / metadata['general.parameter_count']
+        closest = None
+        quant = 'UNKNOWN'
+        for key, (_, quantbits) in QUANT_PRIORITY_BITS.items():
+            dist = abs(bits - quantbits)
+            if closest is None or dist < closest:
+                closest = dist
+                quant = key
+        return quant
+    except Exception:
+        raise
+    return 'UNKNOWN'
+
+
 def discover_ollama_models(  # noqa
     host: str, name_filter: str | None, gpu_memory_gb: float | None,
     context_memory: int = 32768, context_limit_gb: float | None = None,
@@ -641,6 +658,8 @@ def discover_ollama_models(  # noqa
         caps = extract_capabilities_from_ollama(show_response)
         model_info_block = show_response.get('model_info', {}) or {}
         quantization = (details.get('quantization_level', '') or '').upper()
+        if not quantization or quantization == 'UNKNOWN':
+            quantization = infer_quantization_from_info_block(model_info_block, size_bytes)
         if not quantization or quantization == 'UNKNOWN':
             for key in model_info_block:
                 if 'quantization' in key.lower() and 'version' not in key.lower():
