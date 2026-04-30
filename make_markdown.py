@@ -4,6 +4,7 @@ import argparse
 import glob
 import os
 import subprocess
+from pathlib import Path
 
 LANGUAGE_MAP = {
     '.css': 'css',
@@ -50,13 +51,13 @@ def expand_paths(paths, exclude_paths):
             found = glob.glob(os.path.join(path, '**'), recursive=True)
         else:
             found = glob.glob(path, recursive=True)
-        total |= {os.path.relpath(p) for p in found}
+        total |= {os.path.relpath(p) if Path(p).is_relative_to(os.curdir) else p for p in found}
     for path in exclude_paths:
         if os.path.isdir(path):
             found = glob.glob(os.path.join(path, '**'), recursive=True)
         else:
             found = glob.glob(path, recursive=True)
-        total -= {os.path.relpath(p) for p in found}
+        total -= {os.path.relpath(p) if Path(p).is_relative_to(os.curdir) else p for p in found}
     return [p for p in sorted(total)
             if os.path.isfile(p) and ((is_git_tracked(p) and not is_binary(p)) or p in paths)]
 
