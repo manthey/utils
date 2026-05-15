@@ -5,6 +5,7 @@
 #     "python-dateutil",
 #     "diskcache",
 #     "huggingface-hub>=0.20.0",
+#     "tqdm",
 # ]
 # ///
 
@@ -26,6 +27,7 @@ from dataclasses import dataclass
 import dateutil.parser
 import diskcache
 import huggingface_hub
+import tqdm
 
 cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.cache')
 cache = diskcache.Cache(cache_path)
@@ -483,9 +485,8 @@ def discover_models(  # noqa
     skipped_name_mismatch = 0
     skipped_no_fit = 0
     skipped_fetch_failed = 0
-    for i, model in enumerate(with_gguf):
-        if (i + 1) % 20 == 0:
-            print(f'  Processing {i + 1}/{len(with_gguf)}')
+    tw, _ = shutil.get_terminal_size()
+    for i, model in tqdm.contrib.tenumerate(with_gguf, ncols=tw):
         model_type = model_filter if model_filter != 'all' else (
             'code' if matches_type(model.id, 'code') else
             'vision' if matches_type(model.id, 'vision') else None
