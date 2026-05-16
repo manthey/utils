@@ -175,7 +175,7 @@ def chat_completion_worker(
     client: OpenAI,
     model_name: str,
     messages: list[dict],
-    temperature: float = 0.1,
+    temperature: float | None = None,
     max_tokens: int = 16384,
     tools: list[dict] | None = None,
     use_stream: bool = True,
@@ -187,9 +187,9 @@ def chat_completion_worker(
         'temperature': temperature,
         'max_tokens': max_tokens,
         'stream': use_stream,
+        'tools': tools,
     }
-    if tools:
-        kwargs['tools'] = tools
+    kwargs = {k: v for k, v in kwargs.items() if v is not None}
     response = client.chat.completions.create(**kwargs)
     content_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
@@ -334,7 +334,6 @@ def test_basic_question(
             },
         ],
         temperature=0.0,
-
     )
     raw_answer = result['content']
     answer = extract_answer_from_reasoning(raw_answer)
@@ -535,6 +534,38 @@ def test_temperature_variation(
             'duration': duration,
         },
         usage=usage,
+    )
+
+
+@register_test('knowledge_recency', 'Knowledge recency')
+def test_knowledge_recenecy(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    system_prompt = (
+        'You are a helpful assistant who never uses metaphors, slang, emojis, '
+        'or decorative characters.  You will answer only the questions asked, '
+        'and not offer to do additional work.')
+    prompt = (
+        'Is there an item to add to .pre-commit-config.yaml to prettify json '
+        'files?  I really only want to prettify selected json files (like '
+        'package.json).')
+    result = chat_completion_with_usage(
+        client,
+        model_name,
+        messages=[
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': prompt},
+        ],
+    )
+    raw_answer = result['content']
+    answer = extract_answer_from_reasoning(raw_answer)
+    passed = 'pretty-format-json' in answer.lower()
+    return TestResult(
+        passed=passed, output=raw_answer,
+        details={'expected_substring': 'pretty-format-json',
+                 'extracted_answer': answer,
+                 'duration': result.get('duration')},
+        usage=result.get('usage'),
     )
 
 
