@@ -11,6 +11,7 @@
 import argparse
 import base64
 import datetime
+import multiprocessing
 import os
 import re
 import struct
@@ -25,6 +26,8 @@ from typing import Any
 import dateutil.parser
 import requests
 from openai import OpenAI
+
+ClientKwargs = {}
 
 
 @dataclass
@@ -168,11 +171,11 @@ def chat_completion_with_usage(*args, **kwargs) -> dict[str, Any]:
     return result
 
 
-def chat_completion(
+def chat_completion_worker(
     client: OpenAI,
     model_name: str,
     messages: list[dict],
-    temperature: float = 0.0,
+    temperature: float = 0.1,
     max_tokens: int = 16384,
     tools: list[dict] | None = None,
     use_stream: bool = True,
@@ -223,6 +226,55 @@ def chat_completion(
     entire_content = ''.join(content_parts)
     return {'content': entire_content, 'tool_calls': tool_calls,
             'usage': usage, 'duration': time.time() - start}
+
+
+def chat_completion_wrapper(
+    queue: multiprocessing.Queue,
+    client_kwargs,
+    model_name: str,
+    messages: list[dict],
+    temperature: float,
+    max_tokens: int,
+    tools: list[dict] | None,
+    use_stream: bool,
+) -> None:
+    client = OpenAI(**client_kwargs)
+    try:
+        queue.put(chat_completion_worker(
+            client, model_name, messages, temperature, max_tokens, tools, use_stream))
+    except BaseException as exc:
+        queue.put(exc)
+
+
+def chat_completion(
+    client: OpenAI,
+    model_name: str,
+    messages: list[dict],
+    temperature: float = 0.1,
+    max_tokens: int = 16384,
+    tools: list[dict] | None = None,
+    use_stream: bool = True,
+) -> dict[str, Any]:
+    timeout = ClientKwargs.get('timeout', 300)
+    queue = multiprocessing.Queue()
+    process = multiprocessing.Process(
+        target=chat_completion_wrapper,
+        args=(queue, ClientKwargs, model_name, messages,
+              temperature, max_tokens, tools, use_stream),
+    )
+    process.start()
+    process.join(timeout=timeout)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+        if process.is_alive():
+            process.kill()
+        msg = 'Timeout exceeded'
+        raise TimeoutError(msg)
+    if not queue.empty():
+        return queue.get()
+    msg = 'No result'
+    raise TimeoutError(msg)
 
 
 def extract_answer_from_reasoning(content: str) -> str:
@@ -317,7 +369,6 @@ def test_coding(
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': prompt},
         ],
-        temperature=0.0,
     )
     raw_answer = result['content']
     answer = extract_answer_from_reasoning(raw_answer)
@@ -371,7 +422,6 @@ def test_vision(
                 'image_url': {
                     'url': f'data:image/png;base64,{generate_red_png_base64()}',
                 }}]}],
-        temperature=0.0,
     )
     raw_answer = result['content']
     answer = extract_answer_from_reasoning(raw_answer)
@@ -416,7 +466,6 @@ def test_tool_use(
                 'content': 'What is the current weather in London?',
             },
         ],
-        temperature=0.0,
         tools=tools,
     )
     if result['tool_calls'] and len(result['tool_calls']) > 0:
@@ -590,7 +639,7 @@ def generate_report(
     if test_results:
         sections.append('## Test Results')
         sections.append('| Test | Result | Duration | Tokens |')
-        sections.append('|---|---|---|---|')
+        sections.append('|---|---|---:|---:|')
         for test_def, result in test_results:
             if result.passed is True:
                 status = 'PASSED'
@@ -659,6 +708,15 @@ def process_model(args, client, model_name, test_names, skip_tests):
     results = [] if args.metadata_only else run_tests(
         client, model_name, args.base_url.rstrip('/'), test_names, skip_tests)
     return generate_report(metadata, results)
+
+
+def restart_command(cmd):
+    if not cmd:
+        return
+    # try
+    # 'pkill -f "[o]llama" || true; nohup ollama serve >/dev/null 2>&1 & sleep 5'
+    # "taskkill /F /IM ollama.exe >NUL & ollama ls >NUL"
+    subprocess.check_call(cmd, shell=True, start_new_session=True)
 
 
 def main():  # noqa
@@ -734,8 +792,7 @@ def main():  # noqa
             models = [m for m in models if pattern.search(m)]
     else:
         models = [args.model]
-    if args.restart:
-        subprocess.check_call(args.restart, shell=True)
+    restart_command(args.restart)
     for model in models:
         out_path = None
         if args.output:
@@ -761,11 +818,12 @@ def main():  # noqa
             sys.exit(1)
         test_results: list[tuple[TestDefinition, TestResult]] = []
         if not args.metadata_only:
-            client = OpenAI(
+            ClientKwargs.update(dict(
                 base_url=f'{ollama_base_url}/v1',
                 api_key='ollama',
                 timeout=args.timeout,
-            )
+            ))
+            client = OpenAI(**ClientKwargs)
             test_names = (
                 [s.strip() for s in args.tests.split(',')]
                 if args.tests
@@ -788,8 +846,7 @@ def main():  # noqa
         else:
             sys.stdout.write(report)
             sys.stdout.write('\n')
-        if args.restart:
-            subprocess.check_call(args.restart, shell=True)
+        restart_command(args.restart)
 
 
 if __name__ == '__main__':
