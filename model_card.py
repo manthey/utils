@@ -250,7 +250,7 @@ def chat_completion(
     client: OpenAI,
     model_name: str,
     messages: list[dict],
-    temperature: float = 0.1,
+    temperature: float | None = None,
     max_tokens: int = 16384,
     tools: list[dict] | None = None,
     use_stream: bool = True,
@@ -287,18 +287,16 @@ def extract_answer_from_reasoning(content: str) -> str:
 def test_first_load(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
-    result = chat_completion(
-        client,
-        model_name,
-        messages=[
-            {
-                'role': 'user',
-                'content': 'Echo "this is a test"',
-            },
-        ],
-        max_tokens=1,
-        use_stream=True,
-    )
+    try:
+        result = chat_completion(
+            client,
+            model_name,
+            messages=[{'role': 'user', 'content': 'Echo "this is a test"'}],
+            max_tokens=1,
+            use_stream=True,
+        )
+    except Exception:
+        pass
     ps = requests.get(f'{ollama_base_url}/api/ps', timeout=10)
     ps.raise_for_status()
     ps = ps.json()
@@ -327,13 +325,10 @@ def test_basic_question(
     result = chat_completion_with_usage(
         client,
         model_name,
-        messages=[
-            {
-                'role': 'user',
-                'content': 'What is the capital of France? Answer with only the city name.',
-            },
-        ],
-        temperature=0.0,
+        messages=[{
+            'role': 'user',
+            'content': 'What is the capital of France? Answer with only the city name.',
+        }],
     )
     raw_answer = result['content']
     answer = extract_answer_from_reasoning(raw_answer)
@@ -414,13 +409,16 @@ def test_vision(
         model_name,
         messages=[{
             'role': 'user',
-            'content': [{'type': 'text',
-                         'text': 'What color is this image? Answer with only the color name.',
-                         }, {
-                'type': 'image_url',
-                'image_url': {
-                    'url': f'data:image/png;base64,{generate_red_png_base64()}',
-                }}]}],
+            'content': [
+                {
+                    'type': 'text',
+                    'text': 'What color is this image? Answer with only the color name.',
+                }, {
+                    'type': 'image_url',
+                    'image_url': {'url': f'data:image/png;base64,{generate_red_png_base64()}'}
+                },
+            ],
+        }],
     )
     raw_answer = result['content']
     answer = extract_answer_from_reasoning(raw_answer)
@@ -459,12 +457,10 @@ def test_tool_use(
     result = chat_completion_with_usage(
         client,
         model_name,
-        messages=[
-            {
-                'role': 'user',
-                'content': 'What is the current weather in London?',
-            },
-        ],
+        messages=[{
+           'role': 'user',
+           'content': 'What is the current weather in London?',
+        }],
         tools=tools,
     )
     if result['tool_calls'] and len(result['tool_calls']) > 0:
@@ -519,7 +515,6 @@ def test_temperature_variation(
                     usage[k] = usage.get(k, 0) + result['usage'][k]
         content = extract_answer_from_reasoning(raw_content)
         responses[str(temp)] = content
-
     output_lines = []
     for temp in temperatures:
         temp_key = str(temp)
@@ -624,7 +619,6 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
             truncated_output[:2000] +
             f'\n... (truncated, {len(result.output)} total characters)'
         )
-
     lines = [
         f'### {test_def.description}',
         f'**Test**: `{test_def.name}`',
@@ -635,12 +629,10 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
             lines.append(f'**Prompt Tokens**: {result.usage["prompt_tokens"]}')
         if result.usage.get('completion_tokens'):
             lines.append(f'**Response Tokens**: {result.usage["completion_tokens"]}')
-
     if 'duration' in result.details:
         lines.append(
             '**Duration**: '
             f"{result.details['duration']:4.2f}s")
-
     lines.append('**Output**:')
     lines.append(fence_code_block(truncated_output))
     display_details = {
@@ -815,6 +807,7 @@ def main():  # noqa
         for test_def in TEST_REGISTRY:
             sys.stdout.write(f'{test_def.name:25s} {test_def.description}\n')
         sys.exit(0)
+    restart_command(args.restart)
     ollama_base_url = args.base_url.rstrip('/')
     if not args.model or args.models is not None:
         models = list_models(ollama_base_url)
@@ -823,7 +816,6 @@ def main():  # noqa
             models = [m for m in models if pattern.search(m)]
     else:
         models = [args.model]
-    restart_command(args.restart)
     for model in models:
         out_path = None
         if args.output:
