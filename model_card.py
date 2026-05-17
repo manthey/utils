@@ -11,6 +11,7 @@
 import argparse
 import base64
 import datetime
+import json
 import multiprocessing
 import os
 import re
@@ -20,7 +21,7 @@ import sys
 import time
 import zlib
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import dateutil.parser
@@ -679,6 +680,38 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
             lines.append(f'- {key}: {value}')
     return '\n'.join(lines)
 
+def result_record(
+    metadata: dict[str, Any],
+    test_results: list[tuple[TestDefinition, TestResult]],
+) -> dict[str, Any]:
+    return {
+        'metadata': metadata,
+        'tests': [
+            {'name': test_def.name, 'description': test_def.description,
+             'result': asdict(result)}
+            for test_def, result in test_results
+        ],
+    }
+
+
+def load_existing_results(path: str | None) -> dict[str, TestResult]:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        match = re.search(r'\n## Result JSON\n```json\n(.*?)\n```\s*$', text, re.S)
+        record = json.loads(match.group(1)) if match else {}
+    except Exception:
+        return {}
+    results = {}
+    for entry in record.get('tests', []):
+        data = entry.get('result') or {}
+        if entry.get('name'):
+            results[entry['name']] = TestResult(
+                passed=data.get('passed'), output=data.get('output', ''),
+                details=data.get('details') or {}, usage=data.get('usage'))
+    return results
 
 def generate_report(
     metadata: dict[str, Any],
@@ -710,6 +743,12 @@ def generate_report(
             )
         for test_def, result in test_results:
             sections.append(format_test_result(test_def, result))
+    sections.extend([
+        '## Result JSON',
+        '```json',
+        json.dumps(result_record(metadata, test_results), indent=2, default=str),
+        '```',
+    ])
     return '\n'.join(sections)
 
 
@@ -810,7 +849,7 @@ def main():  # noqa
         help='List available tests and exit',
     )
     parser.add_argument(
-        '--metadata-only', '-m', action='store_true',
+        '--metadata-only', action='store_true',
         help='Collect metadata only, skip all tests',
     )
     parser.add_argument(
@@ -820,6 +859,10 @@ def main():  # noqa
     parser.add_argument(
         '--skip', '-s', action='store_true',
         help='Skip checking a model if the output file already exists.',
+    )
+    parser.add_argument(
+        '--missing-tests', '-m', action='store_true',
+        help='Read an existing model card and run only missing tests plus first_load.',
     )
     args = parser.parse_args()
     if args.list_tests:
@@ -876,9 +919,36 @@ def main():  # noqa
                 if args.skip_tests
                 else None
             )
-            test_results = run_tests(
-                client, model, ollama_base_url, test_names, skip_tests,
-            )
+            if args.missing_tests:
+                existing_results = load_existing_results(out_path)
+                selected_names = [
+                    test_def.name for test_def in TEST_REGISTRY
+                    if (test_names is None or test_def.name in test_names)
+                    and (skip_tests is None or test_def.name not in skip_tests)
+                ]
+                if not len(selected_names):
+                    continue
+                if (
+                    'first_load' not in selected_names and
+                    (skip_tests is None or 'first_load' not in skip_tests)
+                ):
+                    selected_names.insert(0, 'first_load')
+                run_names = [
+                    name for name in selected_names
+                    if name == 'first_load' or name not in existing_results
+                ]
+                new_results = run_tests(client, model, ollama_base_url, run_names, None)
+                new_by_name = {test_def.name: result for test_def, result in new_results}
+                test_results = [
+                    (test_def, new_by_name.get(test_def.name, existing_results[test_def.name]))
+                    for test_def in TEST_REGISTRY
+                    if test_def.name in selected_names
+                    and (test_def.name in new_by_name or test_def.name in existing_results)
+                ]
+            else:
+                test_results = run_tests(
+                    client, model, ollama_base_url, test_names, skip_tests,
+                )
         report = generate_report(metadata, test_results)
         if args.output:
             with open(out_path, 'w') as f:
