@@ -548,7 +548,7 @@ def test_knowledge_recenecy(
         client,
         model_name,
         messages=[
-            {'role': 'system', 'content': system_prompt},
+            {'role': 'system','content': system_prompt},
             {'role': 'user', 'content': prompt},
         ],
     )
@@ -560,6 +560,39 @@ def test_knowledge_recenecy(
         details={'expected_substring': 'pretty-format-json',
                  'extracted_answer': answer,
                  'duration': result.get('duration')},
+        usage=result.get('usage'),
+    )
+
+
+@register_test('storytelling', 'Storytelling')
+def test_basic_question(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    system_prompt = (
+        'You are a creative storytelling agent.  Your stories are novel and '
+        'detailed, avoiding tropes and emojis and using full sophisticated '
+        'English.')
+    prompt = (
+        'Tell a detailed story, around 2000 words, told as if it is a '
+        'journal of a diplomat travelling between outposts or settlements '
+        'where her journal is mostly focused on how coffee, tea, or other '
+        'non-intoxicating drinks are served and only slightly about building '
+        'a coalition for environmental policy.  There should be a gradual '
+        'reveal that common culture results in success.')
+    result = chat_completion_with_usage(
+        client,
+        model_name,
+        messages=[
+            {'role': 'system','content': system_prompt},
+            {'role': 'user', 'content': prompt},
+        ],
+    )
+    raw_answer = result['content']
+    answer = extract_answer_from_reasoning(raw_answer)
+    passed = 'espresso' in answer.lower() and 1000 < len(answer.split()) < 3000
+    return TestResult(
+        passed=passed, output=raw_answer,
+        details={'duration': result.get('duration')},
         usage=result.get('usage'),
     )
 
@@ -614,9 +647,9 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
     else:
         status = 'INCONCLUSIVE'
     truncated_output = result.output
-    if len(truncated_output) > 2000:
+    if len(truncated_output) > 1000:
         truncated_output = (
-            truncated_output[:2000] +
+            truncated_output[:1000] +
             f'\n... (truncated, {len(result.output)} total characters)'
         )
     lines = [
