@@ -431,7 +431,7 @@ def test_vision(
     )
 
 
-@register_test('tool_use', 'Tool calling')
+@register_test('tool_use', 'Tool use')
 def test_tool_use(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -777,23 +777,17 @@ def restart_command(cmd):
 
 def main():  # noqa
     parser = argparse.ArgumentParser(
-        description='Generate a model card for an Ollama model.',
-        epilog=(
-            'To add custom tests, create a Python file defining functions '
-            'decorated with @register_test(name, description) that accept '
-            '(client, model_name, ollama_base_url) and return '
-            'TestResult(passed, output, details).'))
+        description='Generate a model card for an Ollama model.')
     parser.add_argument(
         'model', nargs='?', help='Ollama model name (e.g. llama3.2:latest)',
     )
     parser.add_argument(
         '--models', '--model-regex',
-        default=None,
         help='If specified, run on all models that match this regex. Use an '
         'empty string to match all of them.',
     )
     parser.add_argument(
-        '--restart', default=None, help='Shell command to run between models',
+        '--restart', help='Shell command to run between models',
     )
     parser.add_argument(
         '--base-url',
@@ -801,38 +795,30 @@ def main():  # noqa
         help='Ollama server base URL (default: http://localhost:11434)',
     )
     parser.add_argument(
-        '-o', '--output', default=None, help='Output file path (default: stdout) or directory',
+        '-o', '--output', help='Output file path (default: stdout) or directory',
     )
     parser.add_argument(
-        '-t',
-        '--tests',
-        default=None,
+        '-t', '--tests',
         help='Comma-separated list of test names to run (default: all)',
     )
     parser.add_argument(
-        '--skip-tests',
-        default=None,
+        '--skip-tests', '-x',
         help='Comma-separated list of test names to skip',
     )
     parser.add_argument(
-        '--list-tests',
-        action='store_true',
+        '--list-tests', '-l', action='store_true',
         help='List available tests and exit',
     )
     parser.add_argument(
-        '--metadata-only',
-        action='store_true',
+        '--metadata-only', '-m', action='store_true',
         help='Collect metadata only, skip all tests',
     )
     parser.add_argument(
-        '--timeout',
-        type=float,
-        default=300,
+        '--timeout', type=float, default=300,
         help='Per-request timeout in seconds (default: 300)',
     )
     parser.add_argument(
-        '--skip',
-        action='store_true',
+        '--skip', '-s', action='store_true',
         help='Skip checking a model if the output file already exists.',
     )
     args = parser.parse_args()
