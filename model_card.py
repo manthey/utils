@@ -926,8 +926,6 @@ def main():  # noqa
                     if (test_names is None or test_def.name in test_names)
                     and (skip_tests is None or test_def.name not in skip_tests)
                 ]
-                if not len(selected_names):
-                    continue
                 if (
                     'first_load' not in selected_names and
                     (skip_tests is None or 'first_load' not in skip_tests)
@@ -937,10 +935,12 @@ def main():  # noqa
                     name for name in selected_names
                     if name == 'first_load' or name not in existing_results
                 ]
+                if len(run_names) <= 1:
+                    continue
                 new_results = run_tests(client, model, ollama_base_url, run_names, None)
                 new_by_name = {test_def.name: result for test_def, result in new_results}
-                test_results = [
-                    (test_def, new_by_name.get(test_def.name, existing_results[test_def.name]))
+                test_results = [(test_def, new_by_name.get(
+                    test_def.name, existing_results.get(test_def.name)))
                     for test_def in TEST_REGISTRY
                     if test_def.name in selected_names
                     and (test_def.name in new_by_name or test_def.name in existing_results)
