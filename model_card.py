@@ -43,16 +43,17 @@ class TestResult:
 class TestDefinition:
     name: str
     description: str
+    skip: bool
     run: Callable[[OpenAI, str, str], TestResult]
 
 
 TEST_REGISTRY: list[TestDefinition] = []
 
 
-def register_test(name: str, description: str):
+def register_test(name: str, description: str, skip: bool = False):
     def decorator(func: Callable[[OpenAI, str, str], TestResult]) -> Callable:
         TEST_REGISTRY.append(
-            TestDefinition(name=name, description=description, run=func),
+            TestDefinition(name=name, description=description, run=func, skip=skip),
         )
         return func
 
@@ -459,8 +460,8 @@ def test_tool_use(
         client,
         model_name,
         messages=[{
-           'role': 'user',
-           'content': 'What is the current weather in London?',
+            'role': 'user',
+            'content': 'What is the current weather in London?',
         }],
         tools=tools,
     )
@@ -549,7 +550,7 @@ def test_knowledge_recenecy(
         client,
         model_name,
         messages=[
-            {'role': 'system','content': system_prompt},
+            {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': prompt},
         ],
     )
@@ -565,7 +566,7 @@ def test_knowledge_recenecy(
     )
 
 
-@register_test('storytelling', 'Storytelling')
+@register_test('storytelling', 'Storytelling', skip=True)
 def test_basic_question(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -584,7 +585,7 @@ def test_basic_question(
         client,
         model_name,
         messages=[
-            {'role': 'system','content': system_prompt},
+            {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': prompt},
         ],
     )
@@ -680,6 +681,7 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
             lines.append(f'- {key}: {value}')
     return '\n'.join(lines)
 
+
 def result_record(
     metadata: dict[str, Any],
     test_results: list[tuple[TestDefinition, TestResult]],
@@ -713,6 +715,7 @@ def load_existing_results(path: str | None) -> dict[str, TestResult]:
                 details=data.get('details') or {}, usage=data.get('usage'))
     return results
 
+
 def generate_report(
     metadata: dict[str, Any],
     test_results: list[tuple[TestDefinition, TestResult]],
@@ -730,6 +733,8 @@ def generate_report(
         sections.append('| Test | Result | Duration | Tokens |')
         sections.append('|---|---|---:|---:|')
         for test_def, result in test_results:
+            if result is None:
+                continue
             if result.passed is True:
                 status = 'PASSED'
             elif result.passed is False:
@@ -742,6 +747,8 @@ def generate_report(
                 f'{result.usage["completion_tokens"] if result.usage else ""} |',
             )
         for test_def, result in test_results:
+            if result is None:
+                continue
             sections.append(format_test_result(test_def, result))
     sections.extend([
         '## Result JSON',
@@ -757,13 +764,10 @@ def run_tests(
     model_name: str,
     ollama_base_url: str,
     test_names: list[str] | None,
-    skip_tests: list[str] | None,
 ) -> list[tuple[TestDefinition, TestResult]]:
     results = []
     for test_def in TEST_REGISTRY:
         if test_names is not None and test_def.name not in test_names:
-            continue
-        if skip_tests is not None and test_def.name in skip_tests:
             continue
         sys.stderr.write(f'Running test: {test_def.name} ... ')
         sys.stderr.flush()
@@ -866,8 +870,8 @@ def main():  # noqa
     )
     args = parser.parse_args()
     if args.list_tests:
-        for test_def in TEST_REGISTRY:
-            sys.stdout.write(f'{test_def.name:25s} {test_def.description}\n')
+        for t in TEST_REGISTRY:
+            sys.stdout.write(f'{t.name:25s} {t.description}{" (skip)" if t.skip else ""}\n')
         sys.exit(0)
     restart_command(args.restart)
     ollama_base_url = args.base_url.rstrip('/')
@@ -909,46 +913,27 @@ def main():  # noqa
                 timeout=args.timeout,
             ))
             client = OpenAI(**ClientKwargs)
-            test_names = (
-                [s.strip() for s in args.tests.split(',')]
-                if args.tests
-                else None
-            )
-            skip_tests = (
-                [s.strip() for s in args.skip_tests.split(',')]
-                if args.skip_tests
-                else None
-            )
+            sel_tests = set(args.tests.split(',')) if args.tests else set()
+            if 'all' in sel_tests:
+                sel_tests = {t.name for t in TEST_REGISTRY}
+            if 'default' in sel_tests or not args.tests:
+                sel_tests |= {t.name for t in TEST_REGISTRY if not t.skip}
+            if args.skip_tests:
+                sel_tests -= set(args.skip_tests.split(','))
+            existing_results = load_existing_results(out_path)
             if args.missing_tests:
-                existing_results = load_existing_results(out_path)
-                selected_names = [
-                    test_def.name for test_def in TEST_REGISTRY
-                    if (test_names is None or test_def.name in test_names)
-                    and (skip_tests is None or test_def.name not in skip_tests)
-                ]
-                if (
-                    'first_load' not in selected_names and
-                    (skip_tests is None or 'first_load' not in skip_tests)
-                ):
-                    selected_names.insert(0, 'first_load')
-                run_names = [
-                    name for name in selected_names
-                    if name == 'first_load' or name not in existing_results
-                ]
-                if len(run_names) <= 1:
-                    continue
-                new_results = run_tests(client, model, ollama_base_url, run_names, None)
-                new_by_name = {test_def.name: result for test_def, result in new_results}
-                test_results = [(test_def, new_by_name.get(
-                    test_def.name, existing_results.get(test_def.name)))
-                    for test_def in TEST_REGISTRY
-                    if test_def.name in selected_names
-                    and (test_def.name in new_by_name or test_def.name in existing_results)
-                ]
-            else:
-                test_results = run_tests(
-                    client, model, ollama_base_url, test_names, skip_tests,
-                )
+                sel_tests -= set(existing_results)
+            sel_tests.add('first_load')
+            run_names = [t.name for t in TEST_REGISTRY if t.name in sel_tests]
+            if len(run_names) <= 1:
+                continue
+            new_results = run_tests(client, model, ollama_base_url, run_names)
+            new_by_name = {test_def.name: result for test_def, result in new_results}
+            test_results = [(test_def, new_by_name.get(
+                test_def.name, existing_results.get(test_def.name)))
+                for test_def in TEST_REGISTRY
+            ]
+            test_results = [r for r in test_results if r[1] is not None]
         report = generate_report(metadata, test_results)
         if args.output:
             with open(out_path, 'w') as f:
