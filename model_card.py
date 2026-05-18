@@ -383,6 +383,50 @@ def test_coding(
     )
 
 
+@register_test('java_simple', 'Basic java question')
+def test_coding(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    system_prompt = (
+        'You are a helpful assistant who never uses metaphors, slang, emojis, '
+        'or decorative characters. You will answer only the questions asked, '
+        'and not offer to do additional work. Your code is impeccably correct '
+        'and carefully considered.')
+    prompt = (
+        'In java I have a `java.util.LinkedHashMap`. What is the most '
+        'efficient, compact way to get the 0-based index of a key within the '
+        '`LinkedHashMap`?  Just show code to get the position, no '
+        'commentary, and no need to show surrounding code.  That is, the '
+        '`LinkedHashMap` might be `<string, string>`, and the keys could be '
+        'in order alpha, beta, gamma, delta, epsilon, then I want, given a '
+        'string, get the position, so delta would be 3.')
+    result = chat_completion_with_usage(
+        client,
+        model_name,
+        messages=[
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': prompt},
+        ],
+    )
+    raw_answer = result['content']
+    answer = extract_answer_from_reasoning(raw_answer)
+    has_arraylist = 'new ArrayList' in answer
+    has_keyset = '.keySet()' in answer
+    has_indexof = '.indexOf' in answer
+    passed = has_arraylist and has_keyset and has_indexof
+    return TestResult(
+        passed=passed,
+        output=raw_answer,
+        details={
+            'has_arraylist': has_arraylist,
+            'has_keyset': has_keyset,
+            'has_indexof': has_indexof,
+            'duration': result.get('duration'),
+        },
+        usage=result.get('usage'),
+    )
+
+
 @register_test('embedding', 'Embedding generation support')
 def test_embedding(
     client: OpenAI, model_name: str, ollama_base_url: str,
@@ -799,14 +843,6 @@ def safe_filename(model_name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', model_name)
     name = name.rstrip(' .')
     return name or 'model'
-
-
-def process_model(args, client, model_name, test_names, skip_tests):
-    sys.stderr.write(f'Fetching metadata for {model_name}\n')
-    metadata = get_model_metadata(args.base_url.rstrip('/'), model_name)
-    results = [] if args.metadata_only else run_tests(
-        client, model_name, args.base_url.rstrip('/'), test_names, skip_tests)
-    return generate_report(metadata, results)
 
 
 def restart_command(cmd):
