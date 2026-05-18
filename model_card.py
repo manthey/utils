@@ -334,7 +334,7 @@ def chat_test(
                'duration': result.get('duration')}
     passed = True
     for exp in test.get('present', []):
-        found = re.match(exp, answer)
+        found = re.search(exp, answer)
         details[f'{exp} present'] = bool(found)
         passed = passed and bool(found)
     return TestResult(
@@ -429,10 +429,8 @@ def test_embedding(
 def test_vision(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
-    result = chat_completion_with_usage(
-        client,
-        model_name,
-        messages=[{
+    return chat_test(client, model_name, {
+        'chat': {'messages': [{
             'role': 'user',
             'content': [
                 {
@@ -440,20 +438,12 @@ def test_vision(
                     'text': 'What color is this image? Answer with only the color name.',
                 }, {
                     'type': 'image_url',
-                    'image_url': {'url': f'data:image/png;base64,{generate_red_png_base64()}'}
+                    'image_url': {'url': f'data:image/png;base64,{generate_red_png_base64()}'},
                 },
             ],
-        }],
-    )
-    raw_answer = result['content']
-    answer = extract_answer_from_reasoning(raw_answer)
-    passed = 'red' in answer.lower()
-    return TestResult(
-        passed=passed, output=raw_answer,
-        details={'expected_color': 'red', 'extracted_answer': answer,
-                 'duration': result.get('duration')},
-        usage=result.get('usage'),
-    )
+        }]},
+        'present': [r'(?i)red'],
+    })
 
 
 @register_test('tool_use', 'Tool use')
@@ -569,24 +559,13 @@ def test_knowledge_recenecy(
         'Is there an item to add to .pre-commit-config.yaml to prettify json '
         'files?  I really only want to prettify selected json files (like '
         'package.json).')
-    result = chat_completion_with_usage(
-        client,
-        model_name,
-        messages=[
+    return chat_test(client, model_name, {
+        'chat': {'messages': [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': prompt},
-        ],
-    )
-    raw_answer = result['content']
-    answer = extract_answer_from_reasoning(raw_answer)
-    passed = 'pretty-format-json' in answer.lower()
-    return TestResult(
-        passed=passed, output=raw_answer,
-        details={'expected_substring': 'pretty-format-json',
-                 'extracted_answer': answer,
-                 'duration': result.get('duration')},
-        usage=result.get('usage'),
-    )
+        ]},
+        'present': [r'pretty-format-json'],
+    })
 
 
 @register_test('storytelling', 'Storytelling', skip=True)
