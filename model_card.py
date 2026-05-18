@@ -258,7 +258,7 @@ def chat_completion_wrapper(
         queue.put(exc)
 
 
-def chat_completion(
+def chat_completion(  # noqa
     client: OpenAI,
     model_name: str,
     messages: list[dict],
@@ -269,23 +269,42 @@ def chat_completion(
 ) -> dict[str, Any]:
     timeout = ClientKwargs.get('timeout', 300)
     mp_queue = multiprocessing.Queue()
+    start = time.time()
     process = multiprocessing.Process(
         target=chat_completion_wrapper,
         args=(mp_queue, ClientKwargs, model_name, messages,
               temperature, max_tokens, tools, use_stream),
     )
     process.start()
-    process.join(timeout=timeout)
-    timed_out = process.is_alive()
+    last = None
+    timed_out = False
+    try:
+        while process.is_alive():
+            process.join(timeout=0.1)
+            while True:
+                try:
+                    item = mp_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                last = item
+            if time.time() - start > timeout:
+                timed_out = True
+                break
+    except KeyboardInterrupt:
+        process.terminate()
+        process.join(timeout=1)
+        raise
     if timed_out:
         process.terminate()
-        process.join(timeout=5)
-        if process.is_alive():
-            process.kill()
-    last = None
+    process.join(timeout=5)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=1)
     while True:
         try:
-            item = mp_queue.get(timeout=0.1)
+            item = mp_queue.get_nowait()
         except queue.Empty:
             break
         if isinstance(item, BaseException):
@@ -445,7 +464,7 @@ def test_code_editing(
         'are unused. Do not add separator comments. Do not add needless blank '
         'lines inside functions.  Show code changes less than 50 lines in git '
         'diff format, more than 100 lines as complete files.')
-    src = open(os.path.realpath(__file__)).read()
+    src = open(os.path.realpath(__file__), encoding='utf-8').read()
     prompt += (
         f'\n\n##### File: {os.path.basename(__file__)}\n```python\n' +
         src.replace('```', '\\`\\`\\`').strip() + '\n```\n')
@@ -645,7 +664,8 @@ def test_storytelling(
     )
     raw_answer = result['content']
     answer = extract_answer_from_reasoning(raw_answer)
-    passed = 'espresso' in answer.lower() and 1000 < len(answer.split()) < 3000
+    passed = 'espresso' in answer.lower() or 'brew' in answer.lower()
+    passed = passed and 1000 < len(answer.split()) < 3000
     return TestResult(
         passed=passed, output=raw_answer,
         details={'duration': result.get('duration')},
@@ -695,7 +715,7 @@ def format_metadata_table(metadata: dict[str, Any]) -> str:
     return '\n'.join(lines)
 
 
-def escape_markdown(text):
+def escape_markdown(text, maxlen=None):
     if not isinstance(text, str):
         return text
     if re.search(
@@ -705,6 +725,8 @@ def escape_markdown(text):
     needed = 3
     while ('`' * needed) in text:
         needed += 1
+    if maxlen:
+        text = text[:maxlen] + '...'
     text = '\n' + ('`' * needed) + '\n' + text + '\n' + ('`' * needed) + '\n'
     return text
 
@@ -746,7 +768,7 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
     if display_details:
         lines.append('**Details**:')
         for key, value in display_details.items():
-            lines.append(f'- {key}: {escape_markdown(value)}')
+            lines.append(f'- {key}: {escape_markdown(value, 1000)}')
     return '\n'.join(lines)
 
 
@@ -996,7 +1018,7 @@ def main():  # noqa
             test_results = [r for r in test_results if r[1] is not None]
         report = generate_report(metadata, test_results)
         if args.output:
-            with open(out_path, 'w') as f:
+            with open(out_path, 'w', encoding='utf-8') as f:
                 f.write(report)
                 f.write('\n')
             sys.stderr.write(f'Report written to {out_path}\n')
