@@ -14,6 +14,7 @@ import datetime
 import json
 import multiprocessing
 import os
+import queue
 import re
 import struct
 import subprocess
@@ -167,13 +168,16 @@ def fence_code_block(text: str) -> str:
 
 def chat_completion_with_usage(*args, **kwargs) -> dict[str, Any]:
     result = chat_completion(*args, **kwargs)
-    if not result.get('usage') and 'use_stream' not in kwargs:
-        with_usage = chat_completion(*args, use_stream=False, **kwargs)
-        result['usage'] = with_usage.get('usage')
+    if not result.get('usage') and not result.get('timeout') and 'use_stream' not in kwargs:
+        try:
+            with_usage = chat_completion(*args, use_stream=False, **kwargs)
+            result['usage'] = with_usage.get('usage')
+        except Exception:
+            pass
     return result
 
 
-def chat_completion_worker(
+def chat_completion_worker(  # noqa
     client: OpenAI,
     model_name: str,
     messages: list[dict],
@@ -181,6 +185,7 @@ def chat_completion_worker(
     max_tokens: int = 16384,
     tools: list[dict] | None = None,
     use_stream: bool = True,
+    queue=None,
 ) -> dict[str, Any]:
     start = time.time()
     kwargs: dict[str, Any] = {
@@ -196,6 +201,11 @@ def chat_completion_worker(
     content_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     usage = None
+
+    def snapshot() -> dict[str, Any]:
+        return {'content': ''.join(content_parts), 'tool_calls': tool_calls,
+                'usage': usage, 'duration': time.time() - start}
+
     for chunk in (response if use_stream else [response]):
         if use_stream:
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -225,9 +235,9 @@ def chat_completion_worker(
                 'completion_tokens': chunk.usage.completion_tokens,
                 'total_tokens': chunk.usage.total_tokens,
             }
-    entire_content = ''.join(content_parts)
-    return {'content': entire_content, 'tool_calls': tool_calls,
-            'usage': usage, 'duration': time.time() - start}
+        if queue is not None and use_stream:
+            queue.put(snapshot())
+    return snapshot()
 
 
 def chat_completion_wrapper(
@@ -243,7 +253,7 @@ def chat_completion_wrapper(
     client = OpenAI(**client_kwargs)
     try:
         queue.put(chat_completion_worker(
-            client, model_name, messages, temperature, max_tokens, tools, use_stream))
+            client, model_name, messages, temperature, max_tokens, tools, use_stream, queue))
     except BaseException as exc:
         queue.put(exc)
 
@@ -258,25 +268,35 @@ def chat_completion(
     use_stream: bool = True,
 ) -> dict[str, Any]:
     timeout = ClientKwargs.get('timeout', 300)
-    queue = multiprocessing.Queue()
+    mp_queue = multiprocessing.Queue()
     process = multiprocessing.Process(
         target=chat_completion_wrapper,
-        args=(queue, ClientKwargs, model_name, messages,
+        args=(mp_queue, ClientKwargs, model_name, messages,
               temperature, max_tokens, tools, use_stream),
     )
     process.start()
     process.join(timeout=timeout)
-    if process.is_alive():
+    timed_out = process.is_alive()
+    if timed_out:
         process.terminate()
         process.join(timeout=5)
         if process.is_alive():
             process.kill()
-        msg = 'Timeout exceeded'
+    last = None
+    while True:
+        try:
+            item = mp_queue.get(timeout=0.1)
+        except queue.Empty:
+            break
+        if isinstance(item, BaseException):
+            raise item
+        last = item
+    if last is None:
+        msg = 'Timeout exceeded' if timed_out else 'No result'
         raise TimeoutError(msg)
-    if not queue.empty():
-        return queue.get()
-    msg = 'No result'
-    raise TimeoutError(msg)
+    if timed_out:
+        last['timeout'] = True
+    return last
 
 
 def extract_answer_from_reasoning(content: str) -> str:
