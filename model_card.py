@@ -320,27 +320,40 @@ def test_first_load(
     )
 
 
+def chat_test(
+    client: OpenAI, model_name: str,
+        test):
+    result = chat_completion_with_usage(
+        client,
+        model_name,
+        **test['chat'],
+    )
+    raw_answer = result['content']
+    answer = extract_answer_from_reasoning(raw_answer)
+    details = {'extracted_answer': answer,
+               'duration': result.get('duration')}
+    passed = True
+    for exp in test.get('present', []):
+        found = re.match(exp, answer)
+        details[f'{exp} present'] = bool(found)
+        passed = passed and bool(found)
+    return TestResult(
+        passed=passed, output=raw_answer, details=details,
+        usage=result.get('usage'),
+    )
+
+
 @register_test('basic_question', 'Basic question answering')
 def test_basic_question(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
-    result = chat_completion_with_usage(
-        client,
-        model_name,
-        messages=[{
+    return chat_test(client, model_name, {
+        'chat': {'messages': [{
             'role': 'user',
             'content': 'What is the capital of France? Answer with only the city name.',
-        }],
-    )
-    raw_answer = result['content']
-    answer = extract_answer_from_reasoning(raw_answer)
-    passed = 'paris' in answer.lower()
-    return TestResult(
-        passed=passed, output=raw_answer,
-        details={'expected_substring': 'Paris', 'extracted_answer': answer,
-                 'duration': result.get('duration')},
-        usage=result.get('usage'),
-    )
+        }]},
+        'present': [r'(?i)paris'],
+    })
 
 
 @register_test('coding', 'Basic code generation')
@@ -358,33 +371,17 @@ def test_coding(
         'and returns the nth Fibonacci number (0-indexed, so fibonacci(0)=0, '
         'fibonacci(1)=1, fibonacci(6)=8). Use iteration, not recursion. '
         'Return only the function with no explanation.')
-    result = chat_completion_with_usage(
-        client,
-        model_name,
-        messages=[
+    return chat_test(client, model_name, {
+        'chat': {'messages': [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': prompt},
-        ],
-    )
-    raw_answer = result['content']
-    answer = extract_answer_from_reasoning(raw_answer)
-    has_function_def = 'def fibonacci' in answer.lower()
-    has_return = 'return' in answer.lower()
-    passed = has_function_def and has_return
-    return TestResult(
-        passed=passed,
-        output=raw_answer,
-        details={
-            'has_function_def': has_function_def,
-            'has_return': has_return,
-            'duration': result.get('duration'),
-        },
-        usage=result.get('usage'),
-    )
+        ]},
+        'present': [r'def fibonacci', r'return'],
+    })
 
 
 @register_test('java_simple', 'Basic java question')
-def test_coding(
+def test_java_simple(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
     system_prompt = (
@@ -400,31 +397,13 @@ def test_coding(
         '`LinkedHashMap` might be `<string, string>`, and the keys could be '
         'in order alpha, beta, gamma, delta, epsilon, then I want, given a '
         'string, get the position, so delta would be 3.')
-    result = chat_completion_with_usage(
-        client,
-        model_name,
-        messages=[
+    return chat_test(client, model_name, {
+        'chat': {'messages': [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': prompt},
-        ],
-    )
-    raw_answer = result['content']
-    answer = extract_answer_from_reasoning(raw_answer)
-    has_arraylist = 'new ArrayList' in answer
-    has_keyset = '.keySet()' in answer
-    has_indexof = '.indexOf' in answer
-    passed = has_arraylist and has_keyset and has_indexof
-    return TestResult(
-        passed=passed,
-        output=raw_answer,
-        details={
-            'has_arraylist': has_arraylist,
-            'has_keyset': has_keyset,
-            'has_indexof': has_indexof,
-            'duration': result.get('duration'),
-        },
-        usage=result.get('usage'),
-    )
+        ]},
+        'present': [r'new ArrayList', r'keySet', r'indexOf'],
+    })
 
 
 @register_test('embedding', 'Embedding generation support')
@@ -611,7 +590,7 @@ def test_knowledge_recenecy(
 
 
 @register_test('storytelling', 'Storytelling', skip=True)
-def test_basic_question(
+def test_storytelling(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
     system_prompt = (
