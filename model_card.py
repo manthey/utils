@@ -2,9 +2,9 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "openai>=1.0.0",
+#     "openai",
 #     "python-dateutil",
-#     "requests>=2.28.0",
+#     "requests",
 # ]
 # ///
 
@@ -406,6 +406,38 @@ def test_java_simple(
     })
 
 
+@register_test('code_editing', 'Code editing')
+def test_code_editing(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    system_prompt = (
+        'You are a helpful assistant who never uses metaphors, slang, emojis, '
+        'or decorative characters. You will answer only the questions asked, '
+        'and not offer to do additional work. Your code is impeccably correct '
+        'and carefully considered, using clear variable names and few to no '
+        'comments.')
+    prompt = (
+        'Below is a program to test llm models and generate model cards. '
+        'Modify the `chat_test` method to fail any test that ever generates '
+        'an emoji. Remember, more compact code with clear variables and few '
+        'to no comments is preferred. Never use emojis, slang, or metaphors. '
+        'Do not prefix variables or functions with underscores unless they '
+        'are unused. Do not add separator comments. Do not add needless blank '
+        'lines inside functions.  Show code changes less than 50 lines in git '
+        'diff format, more than 100 lines as complete files.')
+    src = open(os.path.realpath(__file__)).read()
+    prompt += (
+        f'\n\n##### File: {os.path.basename(__file__)}\n```python\n' +
+        src.replace('```', '\\`\\`\\`').strip() + '\n```\n')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': prompt},
+        ]},
+        'present': [r'diff', r'@@', r'\n\+'],
+    })
+
+
 @register_test('embedding', 'Embedding generation support')
 def test_embedding(
     client: OpenAI, model_name: str, ollama_base_url: str,
@@ -643,6 +675,20 @@ def format_metadata_table(metadata: dict[str, Any]) -> str:
     return '\n'.join(lines)
 
 
+def escape_markdown(text):
+    if not isinstance(text, str):
+        return text
+    if re.search(
+            r'(?:[\*_`\[\]()]|[#\-=]+(?=\s|$)|[>+]|(?:\r?\n){2,}|\>\s+.*|[`]{1,3}|[\\]{1,2}|\!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\))',  # noqa
+            text, re.VERBOSE | re.MULTILINE) is None:
+        return text
+    needed = 3
+    while ('`' * needed) in text:
+        needed += 1
+    text = '\n' + ('`' * needed) + '\n' + text + '\n' + ('`' * needed) + '\n'
+    return text
+
+
 def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
     if result.passed is True:
         status = 'PASSED'
@@ -680,7 +726,7 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
     if display_details:
         lines.append('**Details**:')
         for key, value in display_details.items():
-            lines.append(f'- {key}: {value}')
+            lines.append(f'- {key}: {escape_markdown(value)}')
     return '\n'.join(lines)
 
 
