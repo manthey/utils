@@ -37,6 +37,7 @@ ClientKwargs = {}
 class TestResult:
     passed: bool | None
     output: str
+    metadata: dict[str, Any] = field(default_factory=dict)
     details: dict[str, Any] = field(default_factory=dict)
     usage: dict[str, int] | None = None
 
@@ -350,12 +351,15 @@ def test_first_load(
         found = ps['models'][0]
     return TestResult(
         passed=True, output=ps,
-        details={
+        metadata={
             'size': found['size'],
             'size_vram': found['size_vram'],
             'vram_percentage': round(100 * found['size_vram'] / found['size'], 2),
             'context_length': found['context_length'],
-            'duration': result.get('duration')},
+        },
+        details={
+            'duration': result.get('duration'),
+        },
         usage=result.get('usage'),
     )
 
@@ -518,7 +522,12 @@ def test_embedding(
     return TestResult(
         passed=passed,
         output=f'Generated embedding with {dimensions} dimensions',
-        details={'dimensions': dimensions, 'has_nonzero_values': has_nonzero},
+        metadata={
+            'embedding_dimensions': dimensions,
+        },
+        details={
+            'has_nonzero_values': has_nonzero,
+        },
     )
 
 
@@ -811,7 +820,7 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
     lines.append(fence_code_block(truncated_output))
     display_details = {
         k: v
-        for k, v in result.details.items()
+        for k, v in (list(result.metadata.items()) + list(result.details.items()))
         if k != 'duration' and v is not None
     }
     if display_details:
@@ -851,6 +860,7 @@ def load_existing_results(path: str | None) -> dict[str, TestResult]:
         if entry.get('name'):
             results[entry['name']] = TestResult(
                 passed=data.get('passed'), output=data.get('output', ''),
+                metadata=data.get('metadata') or {},
                 details=data.get('details') or {}, usage=data.get('usage'))
     return results
 
@@ -867,6 +877,7 @@ def generate_report(
         '## Metadata',
         format_metadata_table(metadata),
     ]
+    next_metadata = len(sections)
     if test_results:
         sections.append('## Test Results')
         sections.append('| Test | Result | Duration | Tokens |')
@@ -889,6 +900,14 @@ def generate_report(
             if result is None:
                 continue
             sections.append(format_test_result(test_def, result))
+            if result.metadata:
+                for k, v in result.metadata.items():
+                    k_str = str(k).replace('_', ' ').title()
+                    v_str = (f'{v:,}' if (isinstance(v, int) or
+                             (isinstance(v, float) and v.is_integer()))
+                             else v)
+                    sections[next_metadata:next_metadata] = [f'| {k_str} | {v_str} |']
+                    next_metadata += 1
     sections.extend([
         '## Result JSON',
         '```json',
