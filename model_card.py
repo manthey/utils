@@ -16,6 +16,7 @@ import multiprocessing
 import os
 import queue
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -846,7 +847,7 @@ def generate_report(
         json.dumps(result_record(metadata, test_results), indent=2, default=str),
         '```',
     ])
-    return '\n'.join(sections)
+    return '\n'.join(sections) + '\n'
 
 
 def run_tests(
@@ -854,6 +855,7 @@ def run_tests(
     model_name: str,
     ollama_base_url: str,
     test_names: list[str] | None,
+    save_progress: Callable[[list[tuple[TestDefinition, TestResult]]], None] | None = None,
 ) -> list[tuple[TestDefinition, TestResult]]:
     results = []
     for test_def in TEST_REGISTRY:
@@ -876,6 +878,8 @@ def run_tests(
         else:
             sys.stderr.write(f'INCONCLUSIVE ({elapsed:4.2f}s)\n')
         results.append((test_def, result))
+        if save_progress:
+            save_progress(results)
     return results
 
 
@@ -898,6 +902,31 @@ def restart_command(cmd):
     # 'pkill -f "[o]llama" || true; nohup ollama serve >/dev/null 2>&1 & sleep 5'
     # "taskkill /F /IM ollama.exe >NUL & ollama ls >NUL"
     subprocess.check_call(cmd, shell=True, start_new_session=True)
+
+
+def write_text_atomic(path: str, text: str) -> None:
+    temp_path = f'{path}.tmp'
+    interrupted = False
+    old_handler = signal.getsignal(signal.SIGINT)
+    def handle_sigint(signum, frame):
+        nonlocal interrupted
+        interrupted = True
+    try:
+        signal.signal(signal.SIGINT, handle_sigint)
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            f.write(text)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, path)
+    except BaseException:
+        if os.path.exists(temp_path):
+            os.unlink(temp_path)
+        raise
+    finally:
+        signal.signal(signal.SIGINT, old_handler)
+    if interrupted:
+        raise KeyboardInterrupt
 
 
 def main():  # noqa
@@ -1009,7 +1038,16 @@ def main():  # noqa
             run_names = [t.name for t in TEST_REGISTRY if t.name in sel_tests]
             if len(run_names) <= 1:
                 continue
-            new_results = run_tests(client, model, ollama_base_url, run_names)
+
+            def save_progress(new_results):
+                if not out_path:
+                    return
+                new_by_name = {test_def.name: result for test_def, result in new_results}
+                merged = [(test_def, new_by_name.get(
+                    test_def.name, existing_results.get(test_def.name))) for test_def in TEST_REGISTRY]
+                write_text_atomic(out_path, generate_report(metadata, [r for r in merged if r[1] is not None]))
+
+            new_results = run_tests(client, model, ollama_base_url, run_names, save_progress)
             new_by_name = {test_def.name: result for test_def, result in new_results}
             test_results = [(test_def, new_by_name.get(
                 test_def.name, existing_results.get(test_def.name)))
@@ -1018,13 +1056,10 @@ def main():  # noqa
             test_results = [r for r in test_results if r[1] is not None]
         report = generate_report(metadata, test_results)
         if args.output:
-            with open(out_path, 'w', encoding='utf-8') as f:
-                f.write(report)
-                f.write('\n')
+            write_text_atomic(out_path, report)
             sys.stderr.write(f'Report written to {out_path}\n')
         else:
             sys.stdout.write(report)
-            sys.stdout.write('\n')
         restart_command(args.restart)
 
 
