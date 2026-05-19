@@ -39,6 +39,7 @@ class TestResult:
     output: str
     metadata: dict[str, Any] = field(default_factory=dict)
     details: dict[str, Any] = field(default_factory=dict)
+    version: int = 0
     usage: dict[str, int] | None = None
 
 
@@ -47,17 +48,19 @@ class TestDefinition:
     name: str
     description: str
     skip: bool
+    version: int
     run: Callable[[OpenAI, str, str], TestResult]
 
 
 TEST_REGISTRY: list[TestDefinition] = []
 
 
-def register_test(name: str, description: str, skip: bool = False):
+def register_test(name: str, description: str, skip: bool = False, version: int = 0):
     def decorator(func: Callable[[OpenAI, str, str], TestResult]) -> Callable:
-        TEST_REGISTRY.append(
-            TestDefinition(name=name, description=description, run=func, skip=skip),
-        )
+        func._version = version
+        TEST_REGISTRY.append(TestDefinition(
+            name=name, description=description, run=func, skip=skip, version=version,
+        ))
         return func
 
     return decorator
@@ -507,7 +510,7 @@ def test_java_simple(
     })
 
 
-@register_test('embedding', 'Embedding generation support')
+@register_test('embedding', 'Embedding generation support', version=1)
 def test_embedding(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -859,7 +862,8 @@ def load_existing_results(path: str | None) -> dict[str, TestResult]:
         data = entry.get('result') or {}
         if entry.get('name'):
             results[entry['name']] = TestResult(
-                passed=data.get('passed'), output=data.get('output', ''),
+                version=data.get('version', 0), passed=data.get('passed'),
+                output=data.get('output', ''),
                 metadata=data.get('metadata') or {},
                 details=data.get('details') or {}, usage=data.get('usage'))
     return results
@@ -935,6 +939,7 @@ def run_tests(
             result = test_def.run(client, model_name, ollama_base_url)
         except Exception as exc:
             result = TestResult(passed=False, output=f'Error: {exc}')
+        result.version = test_def.version
         elapsed = time.time() - start
         if not result.details.get('duration', 0):
             result.details['duration'] = elapsed
@@ -1102,7 +1107,10 @@ def main():  # noqa
                 sel_tests -= set(args.skip_tests.split(','))
             existing_results = load_existing_results(out_path)
             if args.missing_tests:
-                sel_tests -= set(existing_results)
+                known = {t.name: t for t in TEST_REGISTRY}
+                sel_tests -= {name for name, r in existing_results.items()
+                              if name not in known or
+                              r.version == known[name].version}
             sel_tests.add('first_load')
             run_names = [t.name for t in TEST_REGISTRY if t.name in sel_tests]
             if len(run_names) <= 1:
