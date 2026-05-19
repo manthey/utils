@@ -41,7 +41,9 @@ autocmd BufNewFile,BufRead *.styl set filetype=stylus
 autocmd BufNewFile,BufRead *.md setlocal spell spelllang=en_us
 
 " disable trying to connect to an X server
-set clipboard=exclude:.*
+if has('clipboard')
+  set clipboard=exclude:.*
+endif
 
 " type zg when over a 'misspelled' word to add it to the spellfile dictionary
 "      z= to show spelling suggestions.
@@ -75,10 +77,12 @@ hi QuickFixLine term=reverse ctermfg=0 ctermbg=3 guibg=Yellow
 hi MatchParen term=reverse ctermfg=0 ctermbg=3 guibg=Yellow
 hi ToolbarLine term=underline ctermfg=0 ctermbg=3 guibg=Yellow
 hi SignColumn term=standout ctermfg=4 ctermbg=7 guifg=DarkBlue guibg=Grey
+hi OllamaSuggestion ctermfg=5
 
 " We use to need pathogen, but modern vim doesn't.  In modern vim, git clone
-" plugins in ~/.vim/pack/vendor/start (%USERPROFILE%\vimfiles\pack\plugins\start
-" on Windows).  Git clone these (and more below) in that directory:
+" plugins in ~/.vim/pack/plugins/start
+" (%USERPROFILE%\vimfiles\pack\plugins\start on Windows).  Git clone these (and
+" more below) in that directory:
 "  https://github.com/scrooloose/syntastic
 "  https://github.com/Stormherz/tablify
 "  https://github.com/leafgarland/typescript-vim
@@ -88,6 +92,9 @@ hi SignColumn term=standout ctermfg=4 ctermbg=7 guifg=DarkBlue guibg=Grey
 "  https://github.com/digitaltoad/vim-pug
 "  https://github.com/posva/vim-vue
 "  https://github.com/Quramy/vison
+" Some can be installed in ~/.vim/pack/plugins/opt
+"  https://github.com/gergap/vim-ollama
+" and then enabled via
 " pip install flake8
 
 " syntastic block start
@@ -260,8 +267,11 @@ set ttymouse=
 "  https://github.com/prabirshrestha/asyncomplete-lsp.vim
 "  https://github.com/prabirshrestha/asyncomplete.vim
 " pip install python-lsp-server[all]
+" nvm use 24
 " npm install -g bash-language-server
 " npm install -g typescript typescript-language-server
+" # Then, `which typescript-language-server` and put the path in the statements
+" # below.
 " Linux:
 "  sudo apt-get install openjdk-17-jdk
 "  mkdir -p ~/.local/share/langservers
@@ -282,23 +292,34 @@ if executable('pylsp')
         \ 'whitelist': ['python'],
         \ })
 endif
-if executable('/home/manthey/.nvm/versions/node/v22.13.1/bin/typescript-language-server')
+let s:lsptmp = (exists('$TMPDIR') ? $TMPDIR : (exists('$TEMP') ? $TEMP : '/tmp')) . '/vim-lsp'
+if !isdirectory(s:lsptmp)
+    call mkdir(s:lsptmp, 'p')
+endif
+if executable('/home/manthey/.nvm/versions/node/v24.11.1/bin/typescript-language-server')
   au User lsp_setup call lsp#register_server({
         \ 'name': 'tsserver',
         \ 'cmd': {server_info->[
-        \   '/home/manthey/.nvm/versions/node/v22.13.1/bin/node',
-        \   '/home/manthey/.nvm/versions/node/v22.13.1/bin/typescript-language-server',
+        \   '/home/manthey/.nvm/versions/node/v24.11.1/bin/node',
+        \   '/home/manthey/.nvm/versions/node/v24.11.1/bin/typescript-language-server',
         \   '--stdio'
         \ ]},
-        \ 'whitelist': ['javascript', 'typescript'],
+        \ 'allowlist': ['javascript', 'javascriptreact', 'typescript', 'typescriptreact'],
+        \ 'initialization_options': {
+        \     'tsserver': {
+        \         'useInMemoryCancellationTokens': v:true,
+        \         'disableAutomaticTypingAcquisition': v:true
+        \     }
+        \ },
+        \ 'env': {'TMPDIR': s:lsptmp}
         \ })
 endif
-if executable('/home/manthey/.nvm/versions/node/v22.13.1/bin/bash-language-server')
+if executable('/home/manthey/.nvm/versions/node/v24.11.1/bin/bash-language-server')
   au User lsp_setup call lsp#register_server({
         \ 'name': 'bashls',
         \ 'cmd': {server_info->[
-        \   '/home/manthey/.nvm/versions/node/v22.13.1/bin/node',
-        \   '/home/manthey/.nvm/versions/node/v22.13.1/bin/bash-language-server',
+        \   '/home/manthey/.nvm/versions/node/v24.11.1/bin/node',
+        \   '/home/manthey/.nvm/versions/node/v24.11.1/bin/bash-language-server',
         \   'start'
         \ ]},
         \ 'whitelist': ['sh', 'bash'],
@@ -332,6 +353,7 @@ if executable('java')
             \ })
     endif
 endif
+
 let g:lsp_diagnostics_enabled = 0
 let g:lsp_diagnostics_virtual_text_enabled = 0
 let g:lsp_diagnostics_signs_enabled = 0
@@ -351,11 +373,8 @@ inoremap <expr> <Down> pumvisible() ? (complete_info().selected != -1 ? "\<C-n>"
 inoremap <expr> <Up> pumvisible() ? (complete_info().selected != -1 ? "\<C-p>" : "\<C-e>\<Up>") : "\<Up>"
 inoremap <expr> <Left> pumvisible() ? "\<C-e>\<Left>" : "\<Left>"
 inoremap <expr> <Right> pumvisible() ? "\<C-e>\<Right>" : "\<Right>"
+inoremap <expr> <Esc> pumvisible() ? "\<C-e>" : "\<Esc>"
 
-" noremap <expr> <Down>   pumvisible() && complete_info().selected != -1 ? "\<C-n>" : "\<Down>"
-" inoremap <expr> <Up>    pumvisible() && complete_info().selected != -1 ? "\<C-p>" : "\<Up>"
-" inoremap <expr> <Left>  pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Left>" : "\<Left>"
-" inoremap <expr> <Right> pumvisible() && complete_info().selected != -1 ? "\<C-e>\<Right>" : "\<Right>"
 highlight Pmenu      ctermfg=LightGray ctermbg=DarkBlue
 highlight PmenuSel   ctermfg=Black ctermbg=Yellow
 highlight PmenuSbar  ctermfg=NONE  ctermbg=DarkBlue
@@ -368,3 +387,53 @@ highlight link markdownHeadingDelimiter Normal
 
 set completeopt=menuone,noinsert,noselect
 set shortmess+=c
+
+function! SetBackupcopyForSamba()
+    if has('unix')
+        " Use fstat on the directory before reading the buffer
+        let l:fs = substitute(system('stat -f -c %T ' . shellescape(expand('<afile>:p:h'))), '\n', '', '')
+        if l:fs =~? 'cifs\|smbfs'
+            setlocal backupcopy=yes
+        endif
+    elseif has('win32') || has('win64')
+        if expand('<afile>:p') =~ '^\\\\'
+            setlocal backupcopy=yes
+        endif
+    endif
+endfunction
+
+augroup SambaBackupcopy
+    autocmd!
+    " This runs *before* reading a buffer
+    autocmd BufReadPre * call SetBackupcopyForSamba()
+augroup END
+
+function! SetBackupcopyByPath()
+    let l:fp = expand('%:p')
+    let l:is_samba = 0
+    for prefix in ['/mnt/']
+        if l:fp[:len(prefix)-1] == prefix
+            let l:is_samba = 1
+            break
+        endif
+    endfor
+    if l:is_samba
+        setlocal backupcopy=yes
+    else
+        setlocal backupcopy=auto
+    endif
+endfunction
+
+" Run for each buffer when reading
+augroup BackupcopyByPath
+    autocmd!
+    autocmd BufReadPre * call SetBackupcopyByPath()
+augroup END
+
+function! LoadOllama()
+    packadd vim-ollama
+    doautocmd ollama VimEnter
+    doautocmd ollama ColorScheme
+    " runtime plugin/ollama.vim
+endfunction
+command! LoadOllama call LoadOllama()
