@@ -420,29 +420,28 @@ def test_coding(
     })
 
 
-@register_test('java_simple', 'Basic java question')
-def test_java_simple(
+@register_test('python_yaml', 'Python yaml library use')
+def test_code_python_yaml(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
     system_prompt = (
         'You are a helpful assistant who never uses metaphors, slang, emojis, '
         'or decorative characters. You will answer only the questions asked, '
         'and not offer to do additional work. Your code is impeccably correct '
-        'and carefully considered.')
+        'and carefully considered, using clear variable names and few to no '
+        'comments.')
     prompt = (
-        'In java I have a `java.util.LinkedHashMap`. What is the most '
-        'efficient, compact way to get the 0-based index of a key within the '
-        '`LinkedHashMap`?  Just show code to get the position, no '
-        'commentary, and no need to show surrounding code.  That is, the '
-        '`LinkedHashMap` might be `<string, string>`, and the keys could be '
-        'in order alpha, beta, gamma, delta, epsilon, then I want, given a '
-        'string, get the position, so delta would be 3.')
+        'Write a Python program that uses pep 723 and argparse to take a yaml '
+        'or json input file (as the first command line parameter), and '
+        'output either yaml or json, either as compact as possible or nicely '
+        'formatted; for instance, if outputting yaml, the compact form could '
+        'deduplicate repeated data, but the nice formatting would not.')
     return chat_test(client, model_name, {
         'chat': {'messages': [
             {'role': 'system', 'content': system_prompt},
             {'role': 'user', 'content': prompt},
         ]},
-        'present': [r'new ArrayList', r'keySet', r'indexOf'],
+        'present': [r'argparse', r'(?i)pyyaml', r'import yaml', r'safe_load', r'/// script'],
     })
 
 
@@ -475,6 +474,32 @@ def test_code_editing(
             {'role': 'user', 'content': prompt},
         ]},
         'present': [r'diff', r'@@', r'\n\+'],
+    })
+
+
+@register_test('java_simple', 'Basic java question')
+def test_java_simple(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    system_prompt = (
+        'You are a helpful assistant who never uses metaphors, slang, emojis, '
+        'or decorative characters. You will answer only the questions asked, '
+        'and not offer to do additional work. Your code is impeccably correct '
+        'and carefully considered.')
+    prompt = (
+        'In java I have a `java.util.LinkedHashMap`. What is the most '
+        'efficient, compact way to get the 0-based index of a key within the '
+        '`LinkedHashMap`?  Just show code to get the position, no '
+        'commentary, and no need to show surrounding code.  That is, the '
+        '`LinkedHashMap` might be `<string, string>`, and the keys could be '
+        'in order alpha, beta, gamma, delta, epsilon, then I want, given a '
+        'string, get the position, so delta would be 3.')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': prompt},
+        ]},
+        'present': [r'new ArrayList', r'keySet', r'indexOf'],
     })
 
 
@@ -515,6 +540,29 @@ def test_vision(
             ],
         }]},
         'present': [r'(?i)red'],
+    })
+
+
+@register_test('histology', 'Histology image understanding')
+def test_histology(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    img = base64.b64encode(open(os.path.join(os.path.dirname(
+        __file__), 'model_card_test_image.png'), 'rb').read()).decode('utf-8')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [{
+            'role': 'user',
+            'content': [
+                {
+                    'type': 'text',
+                    'text': 'Describe the biology visible in this image.',
+                }, {
+                    'type': 'image_url',
+                    'image_url': {'url': f'data:image/png;base64,{img}'},
+                },
+            ],
+        }]},
+        'present': [r'(?i)cell', r'(?i)nuclei'],
     })
 
 
@@ -908,9 +956,11 @@ def write_text_atomic(path: str, text: str) -> None:
     temp_path = f'{path}.tmp'
     interrupted = False
     old_handler = signal.getsignal(signal.SIGINT)
+
     def handle_sigint(signum, frame):
         nonlocal interrupted
         interrupted = True
+
     try:
         signal.signal(signal.SIGINT, handle_sigint)
         with open(temp_path, 'w', encoding='utf-8') as f:
@@ -1039,15 +1089,20 @@ def main():  # noqa
             if len(run_names) <= 1:
                 continue
 
-            def save_progress(new_results):
-                if not out_path:
-                    return
-                new_by_name = {test_def.name: result for test_def, result in new_results}
-                merged = [(test_def, new_by_name.get(
-                    test_def.name, existing_results.get(test_def.name))) for test_def in TEST_REGISTRY]
-                write_text_atomic(out_path, generate_report(metadata, [r for r in merged if r[1] is not None]))
+            def save_func(out_path, metadata, existing_results):
+                def save_progress(results):
+                    if not out_path:
+                        return
+                    new_by_name = {test_def.name: result for test_def, result in results}
+                    merged = [(test_def, new_by_name.get(
+                        test_def.name, existing_results.get(test_def.name)))
+                        for test_def in TEST_REGISTRY]
+                    write_text_atomic(out_path, generate_report(
+                        metadata, [r for r in merged if r[1] is not None]))
+                return save_progress
 
-            new_results = run_tests(client, model, ollama_base_url, run_names, save_progress)
+            new_results = run_tests(client, model, ollama_base_url, run_names, save_func(
+                out_path, metadata, existing_results))
             new_by_name = {test_def.name: result for test_def, result in new_results}
             test_results = [(test_def, new_by_name.get(
                 test_def.name, existing_results.get(test_def.name)))
