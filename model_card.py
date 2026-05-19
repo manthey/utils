@@ -734,7 +734,7 @@ def test_storytelling(
     )
 
 
-def format_metadata_table(metadata: dict[str, Any]) -> str:
+def get_metadata_table(metadata: dict[str, Any]) -> list[tuple[str, Any]]:
     parameter_count_display = (
         f"{metadata['parameter_count']:,}"
         if metadata['parameter_count']
@@ -762,7 +762,7 @@ def format_metadata_table(metadata: dict[str, Any]) -> str:
         ('Format', metadata['format']),
         ('Parameter Size', metadata['parameter_size']),
         ('Parameter Count', parameter_count_display),
-        ('Context Length', context_length_display),
+        ('Model Context Length', context_length_display),
         ('Quantization', metadata['quantization']),
         ('Vision (metadata)', 'yes' if metadata['has_vision'] else 'no'),
         ('Tool Use (metadata)', 'yes' if metadata['has_tool'] else 'no'),
@@ -770,6 +770,11 @@ def format_metadata_table(metadata: dict[str, Any]) -> str:
         ('Embedding (metadata)', 'yes' if metadata['has_embedding'] else 'no'),
         ('Modified', mod_str),
     ]
+    return rows
+
+
+def format_metadata_table(metadata: dict[str, Any]) -> str:
+    rows = get_metadata_table(metadata)
     lines = ['| Property | Value |', '|---|---|']
     for prop, value in rows:
         lines.append(f'| {prop} | {value} |')
@@ -866,7 +871,7 @@ def load_existing_results(path: str | None) -> dict[str, TestResult]:
                 output=data.get('output', ''),
                 metadata=data.get('metadata') or {},
                 details=data.get('details') or {}, usage=data.get('usage'))
-    return results
+    return record.get('metadata'), results
 
 
 def generate_report(
@@ -1003,14 +1008,78 @@ def write_text_atomic(path: str, text: str) -> None:
         raise KeyboardInterrupt
 
 
+def add_to_summary(summary, model, metadata, test_results):
+    if 'models' not in summary:
+        summary['models'] = {}
+        summary['columns'] = []
+        summary['tests'] = []
+    if model in summary['models']:
+        return
+    meta_col = {k: v for (k, v) in get_metadata_table(metadata)}
+    for col in meta_col:
+        if col not in summary['columns']:
+            summary['columns'].append(col)
+    summary['models'][model] = {'metadata': meta_col, 'tests': {}}
+    for test_name, result in test_results.items():
+        if test_name not in summary['tests']:
+            summary['tests'].append(test_name)
+        if result.metadata:
+            for k, v in result.metadata.items():
+                k_str = str(k).replace('_', ' ').title()
+                v_str = (f'{v:,}' if (isinstance(v, int) or
+                         (isinstance(v, float) and v.is_integer()))
+                         else v)
+                if k_str not in summary['columns']:
+                    summary['columns'].append(k_str)
+                summary['models'][model]['metadata'][k_str] = v_str
+        summary['models'][model]['tests'][test_name] = {
+            'status': 'PASSED' if result.passed is True else (
+                'FAILED' if result.passed is False else 'INCONCLUSIVE'),
+            'duration': f'{result.details.get("duration") or 0:4.2f}s',
+            'tokens': result.usage['completion_tokens'] if result.usage else '',
+        }
+
+
+def create_summary(summary_path, output_dir, summary):
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+        '%Y-%m-%d %H:%M:%S UTC')
+    sections = [
+        '# Model Card Summary',
+        f'Generated: {timestamp}',
+        '',
+    ]
+    known = {t.name: t.description for t in TEST_REGISTRY}
+    cols = summary['columns']
+    for t in summary['tests']:
+        cols += [f'{known.get(t, t)}', 'Duration', 'Tokens']
+    sections.append('| ' + ' | '.join(cols) + ' |')
+    sections.append('|' + '---|' * len(cols))
+    for model in summary['models'].values():
+        row = [model['metadata'].get(col, '') for col in summary['columns']]
+        for t in summary['tests']:
+            if t in model['tests']:
+                tval = model['tests'][t]
+                row.extend([tval['status'], tval['duration'], tval['tokens']])
+            else:
+                row.extend(['', '', ''])
+        sections.append('| ' + ' | '.join([str(r) for r in row]) + ' |')
+    record = '\n'.join(sections) + '\n'
+    out_path = (summary_path if os.path.dirname(summary_path) or
+                not os.path.isdir(output_dir) else os.path.join(output_dir, summary_path))
+    with open(out_path, 'w', encoding='utf-8') as f:
+        f.write(record)
+
+
 def main():  # noqa
     parser = argparse.ArgumentParser(
         description='Generate a model card for an Ollama model.')
     parser.add_argument(
-        'model', nargs='?', help='Ollama model name (e.g. llama3.2:latest)',
+        'model', nargs='?',
+        help='Exact model name (e.g. llama3.2:latest).  Use --models for '
+        'filtering by regex.',
     )
     parser.add_argument(
-        '--models', '--model-regex',
+        '--models',
         help='If specified, run on all models that match this regex. Use an '
         'empty string to match all of them.',
     )
@@ -1027,10 +1096,12 @@ def main():  # noqa
     )
     parser.add_argument(
         '-t', '--tests',
-        help='Comma-separated list of test names to run (default: all)',
+        help='Comma-separated list of test names to run.  Defaults to all '
+        'tests not marked "skip".  Add "all" to include all tests, "default" '
+        'to include the non-skip tests.',
     )
     parser.add_argument(
-        '--skip-tests', '-x',
+        '-x', '--skip-tests',
         help='Comma-separated list of test names to skip',
     )
     parser.add_argument(
@@ -1053,6 +1124,17 @@ def main():  # noqa
         '--missing-tests', '-m', action='store_true',
         help='Read an existing model card and run only missing tests plus first_load.',
     )
+    parser.add_argument(
+        '--summary',
+        help='If specified, the name of a summary file to write.  If this '
+        'does not include a directory, it will be written in the --output '
+        'directory.  Use --collect to collect model cards in the output '
+        'directory that were not processed in this run.',
+    )
+    parser.add_argument(
+        '--collect', action='store_true',
+        help='Collect older model cards for the summary.',
+    )
     args = parser.parse_args()
     if args.list_tests:
         for t in TEST_REGISTRY:
@@ -1067,6 +1149,7 @@ def main():  # noqa
             models = [m for m in models if pattern.search(m)]
     else:
         models = [args.model]
+    summary = {}
     for model in models:
         out_path = None
         if args.output:
@@ -1105,7 +1188,7 @@ def main():  # noqa
                 sel_tests |= {t.name for t in TEST_REGISTRY if not t.skip}
             if args.skip_tests:
                 sel_tests -= set(args.skip_tests.split(','))
-            existing_results = load_existing_results(out_path)
+            _, existing_results = load_existing_results(out_path)
             if args.missing_tests:
                 known = {t.name: t for t in TEST_REGISTRY}
                 sel_tests -= {name for name, r in existing_results.items()
@@ -1142,7 +1225,18 @@ def main():  # noqa
             sys.stderr.write(f'Report written to {out_path}\n')
         else:
             sys.stdout.write(report)
+        add_to_summary(summary, model, metadata, test_results)
         restart_command(args.restart)
+    if args.summary and args.collect and os.path.isdir(args.output):
+        for filename in os.listdir(args.output):
+            path = os.path.join(args.output, filename)
+            try:
+                metadata, results = load_existing_results(path)
+                add_to_summary(summary, metadata['name'], metadata, results)
+            except Exception:
+                pass
+    if args.summary:
+        create_summary(args.summary, args.output, summary)
 
 
 if __name__ == '__main__':
