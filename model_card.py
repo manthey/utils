@@ -1015,7 +1015,7 @@ def add_to_summary(summary, model, metadata, test_results):
         summary['tests'] = []
     if model in summary['models']:
         return
-    meta_col = {k: v for (k, v) in get_metadata_table(metadata)}
+    meta_col = dict(get_metadata_table(metadata))
     for col in meta_col:
         if col not in summary['columns']:
             summary['columns'].append(col)
@@ -1056,12 +1056,10 @@ def create_summary(summary_path, output_dir, summary):
     sections.append('|' + '---|' * len(cols))
     for model in summary['models'].values():
         row = [model['metadata'].get(col, '') for col in summary['columns']]
+        print(model['tests'], summary['tests'])  # ##DWM::
         for t in summary['tests']:
-            if t in model['tests']:
-                tval = model['tests'][t]
-                row.extend([tval['status'], tval['duration'], tval['tokens']])
-            else:
-                row.extend(['', '', ''])
+            tval = model['tests'].get(t, {})
+            row.extend([tval.get('status', ''), tval.get('duration', ''), tval.get('tokens', '')])
         sections.append('| ' + ' | '.join([str(r) for r in row]) + ' |')
     record = '\n'.join(sections) + '\n'
     out_path = (summary_path if os.path.dirname(summary_path) or
@@ -1225,7 +1223,7 @@ def main():  # noqa
             sys.stderr.write(f'Report written to {out_path}\n')
         else:
             sys.stdout.write(report)
-        add_to_summary(summary, model, metadata, test_results)
+        add_to_summary(summary, model, metadata, {t.name: r for t, r in test_results})
         restart_command(args.restart)
     if args.summary and args.collect and os.path.isdir(args.output):
         for filename in os.listdir(args.output):
