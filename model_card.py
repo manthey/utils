@@ -342,7 +342,12 @@ def test_first_load(
             use_stream=True,
         )
     except Exception:
-        pass
+        try:
+            start = time.time()
+            client.embeddings.create(model=model_name, input='Echo "this is a test"')
+            result = {'duration': time.time() - start}
+        except Exception:
+            pass
     ps = requests.get(f'{ollama_base_url}/api/ps', timeout=10)
     ps.raise_for_status()
     ps = ps.json()
