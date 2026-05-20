@@ -854,14 +854,14 @@ def result_record(
 
 def load_existing_results(path: str | None) -> dict[str, TestResult]:
     if not path or not os.path.exists(path):
-        return {}
+        return {}, {}
     try:
         with open(path, encoding='utf-8') as f:
             text = f.read()
         match = re.search(r'\n## Result JSON\n```json\n(.*?)\n```\s*$', text, re.S)
         record = json.loads(match.group(1)) if match else {}
     except Exception:
-        return {}
+        return {}, {}
     results = {}
     for entry in record.get('tests', []):
         data = entry.get('result') or {}
@@ -1049,17 +1049,16 @@ def create_summary(summary_path, output_dir, summary):
         '',
     ]
     known = {t.name: t.description for t in TEST_REGISTRY}
-    cols = summary['columns']
+    cols = list(summary['columns'])
     for t in summary['tests']:
         cols += [f'{known.get(t, t)}', 'Duration', 'Tokens']
     sections.append('| ' + ' | '.join(cols) + ' |')
     sections.append('|' + '---|' * len(cols))
     for model in summary['models'].values():
         row = [model['metadata'].get(col, '') for col in summary['columns']]
-        print(model['tests'], summary['tests'])  # ##DWM::
         for t in summary['tests']:
             tval = model['tests'].get(t, {})
-            row.extend([tval.get('status', ''), tval.get('duration', ''), tval.get('tokens', '')])
+            row += [tval.get('status', ''), tval.get('duration', ''), tval.get('tokens', '')]
         sections.append('| ' + ' | '.join([str(r) for r in row]) + ' |')
     record = '\n'.join(sections) + '\n'
     out_path = (summary_path if os.path.dirname(summary_path) or
