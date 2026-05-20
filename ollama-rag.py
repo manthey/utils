@@ -68,6 +68,8 @@ os.environ['CHROMA_TELEMETRY'] = 'False'
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+chat_logger = logging.getLogger(__name__ + '_chat_log')
+chat_logger.addHandler(logging.NullHandler())
 
 EXTENSION_TO_LANGUAGE = {
     '.py': 'python', '.java': 'java', '.ts': 'typescript', '.tsx': 'typescript',
@@ -1251,11 +1253,11 @@ def apply_rag_params(
 
 
 @app.post('/v1/chat/completions')
-async def chat_completions(request: fastapi.Request):
+async def chat_completions(request: fastapi.Request):  # noqa
     body = await request.json()
-    client_wants_stream = body.get('stream', False)
+    stream = body.get('stream', False)
     query = extract_query_text(body.get('messages', []))
-    logger.debug('query: %s, stream: %s', query, client_wants_stream)
+    logger.debug('query: %s, stream: %s', query, stream)
     ollama_base_url = config.ollama_base_url
     rag_params = extract_rag_params(body)
     if rag_params:
@@ -1266,20 +1268,40 @@ async def chat_completions(request: fastapi.Request):
             context = await asyncio.to_thread(
                 retrieve_context, query, path_pattern=path_pattern, top_k_override=top_k_override)
             logger.info('context length: %d', len(context))
-            logger.debug('context:\n%s', context)
-            body = inject_context(body, context)
+            if len(context):
+                logger.debug('context:\n%s', context)
+                body = inject_context(body, context)
         except Exception:
             logger.exception('retrieval failed, proceeding without context')
-    body['stream'] = client_wants_stream
-    if client_wants_stream:
+    body['stream'] = stream
+    log_chat = chat_logger.getEffectiveLevel() <= logging.INFO
+    if log_chat:
+        chat_logger.info('request: %s', json.dumps(body))
+    if stream:
         async def generate():
-            async with httpx.AsyncClient(timeout=None) as client, client.stream(
-                'POST', f'{ollama_base_url}/v1/chat/completions',
-                json=body, headers={'Content-Type': 'application/json'},
-            ) as response:
-                logger.debug('stream status: %d', response.status_code)
-                async for chunk in response.aiter_bytes():
-                    yield chunk
+            response_chunks = []
+            completed = False
+            try:
+                async with httpx.AsyncClient(timeout=None) as client, client.stream(
+                    'POST', f'{ollama_base_url}/v1/chat/completions',
+                    json=body, headers={'Content-Type': 'application/json'},
+                ) as response:
+                    logger.debug('stream status: %d', response.status_code)
+                    async for chunk in response.aiter_bytes():
+                        try:
+                            if log_chat:
+                                response_chunks.append(json.loads(chunk.decode(
+                                    'utf-8').split('data:', 1)[-1].strip())
+                                    .get('choices', [{}])[0].get('delta', {}).get('content', ''))
+                        except Exception:
+                            pass
+                        yield chunk
+                completed = True
+            finally:
+                if log_chat:
+                    chat_logger.info(
+                        '%sstreaming response: %s', '' if completed else 'partial ',
+                        json.dumps({'content': ''.join(response_chunks)}))
         return fastapi.responses.StreamingResponse(generate(), media_type='text/event-stream')
 
     def fetch():
@@ -1295,6 +1317,14 @@ async def chat_completions(request: fastapi.Request):
             return response.content, response.status_code, dict(response.headers)
 
     content, status_code, headers = await asyncio.to_thread(fetch)
+    try:
+        if log_chat:
+            content = (json.loads(content.decode(
+                'utf-8').split('data:', 1)[-1].strip())
+                .get('choices', [{}])[0].get('delta', {}).get('content', ''))
+            chat_logger.info('response: %s', json.dumps({'content': content}))
+    except Exception:
+        pass
     return fastapi.responses.Response(
         content=content, status_code=status_code,
         headers=strip_hop_by_hop_headers(headers),
@@ -1379,6 +1409,14 @@ def cmd_serve(args):
 
     config = args
     source_configs = build_source_configs(args)
+    if args.completion_log:
+        log_file = os.path.join(args.completion_log, 'rag_chat.log')
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 ** 2, backupCount=5)
+        chat_logger.addHandler(handler)
+        chat_logger.setLevel(logging.INFO)
+    else:
+        chat_logger.setLevel(logging.ERROR)
     if source_configs:
         paths_str = ', '.join(src.source_path for src in source_configs)
         logger.info('configured %d source%s: %s', len(source_configs),
@@ -1512,6 +1550,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='Path for the MCP streamable-HTTP endpoint; default is /mcp. An '
         'empty string disabled the endpoint',
     )
+    serve.add_argument(
+        '--completion-log', '--chat-log',
+        help='Folder for storing rotated completion logs with the queries '
+        'and responses that come through the completion endpoint.')
     clear.add_argument(
         '--purge-inactive', action='store_true',
         help='Remove inactive chunks and deleted-file entries without destroying active data',
