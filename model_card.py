@@ -997,7 +997,14 @@ def write_text_atomic(path: str, text: str) -> None:
             f.write('\n')
             f.flush()
             os.fsync(f.fileno())
-        os.replace(temp_path, path)
+        for retries in range(5, -1, -1):
+            try:
+                os.replace(temp_path, path)
+                break
+            except PermissionError:
+                if not retries:
+                    raise
+                time.sleep(5)
     except BaseException:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
