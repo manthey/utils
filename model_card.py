@@ -583,6 +583,29 @@ def test_histology(
     })
 
 
+@register_test('photo', 'Photo understanding', version=1)
+def test_photo(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    img = base64.b64encode(open(os.path.join(os.path.dirname(
+        __file__), 'model_card_test_image2.png'), 'rb').read()).decode('utf-8')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [{
+            'role': 'user',
+            'content': [
+                {
+                    'type': 'text',
+                    'text': 'Describe what is in this photograph.  What color are the eyes?',
+                }, {
+                    'type': 'image_url',
+                    'image_url': {'url': f'data:image/png;base64,{img}'},
+                },
+            ],
+        }]},
+        'present': [r'(?i)dog', r'(?i)(brindle|mix)', r'(?i)(hazel|brown)'],
+    })
+
+
 @register_test('tool_use', 'Tool use')
 def test_tool_use(
     client: OpenAI, model_name: str, ollama_base_url: str,
@@ -705,7 +728,7 @@ def test_knowledge_recenecy(
     })
 
 
-@register_test('storytelling', 'Storytelling', skip=True)
+@register_test('storytelling', 'Storytelling', skip=True, version=1)
 def test_storytelling(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -715,11 +738,11 @@ def test_storytelling(
         'English.')
     prompt = (
         'Tell a detailed story, around 2000 words, told as if it is a '
-        'journal of a diplomat travelling between outposts or settlements '
+        'journal of a diplomat traveling between outposts or settlements '
         'where her journal is mostly focused on how coffee, tea, or other '
-        'non-intoxicating drinks are served and only slightly about building '
-        'a coalition for environmental policy.  There should be a gradual '
-        'reveal that common culture results in success.')
+        'invigorating drinks and their variations are served and only '
+        'slightly about building a coalition for environmental policy.  There '
+        'should be a gradual reveal that common culture results in success.')
     result = chat_completion_with_usage(
         client,
         model_name,
@@ -730,11 +753,16 @@ def test_storytelling(
     )
     raw_answer = result['content']
     answer = extract_answer_from_reasoning(raw_answer)
-    passed = 'espresso' in answer.lower() or 'brew' in answer.lower()
-    passed = passed and 1000 < len(answer.split()) < 3000
+    has_words = 'espresso' in answer.lower() or 'brew' in answer.lower()
+    word_length = len(answer.split())
+    passed = has_words and 1000 < word_length < 3000
     return TestResult(
         passed=passed, output=raw_answer,
-        details={'duration': result.get('duration')},
+        details={
+            'has_key_words': has_words,
+            'word_length': word_length,
+            'extracted_answer': answer,
+            'duration': result.get('duration')},
         usage=result.get('usage'),
     )
 
