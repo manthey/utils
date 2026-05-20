@@ -1051,6 +1051,9 @@ def create_summary(summary_path, output_dir, summary):
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
         '%Y-%m-%d %H:%M:%S UTC')
     sections = [
+        '---',
+        'cssclasses: scrollable-table',
+        '---',
         '# Model Card Summary',
         f'Generated: {timestamp}',
         '',
