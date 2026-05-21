@@ -35,7 +35,7 @@ ClientKwargs = {}
 
 @dataclass
 class TestResult:
-    passed: bool | None
+    passed: bool | list[int, int] | None
     output: str
     metadata: dict[str, Any] = field(default_factory=dict)
     details: dict[str, Any] = field(default_factory=dict)
@@ -355,8 +355,6 @@ def test_first_load(
     for model in ps['models']:
         if model['name'] == model_name:
             found = model
-    if not found:
-        found = ps['models'][0]
     return TestResult(
         passed=True, output=ps,
         metadata={
@@ -384,11 +382,14 @@ def chat_test(
     answer = extract_answer_from_reasoning(raw_answer)
     details = {'extracted_answer': answer,
                'duration': result.get('duration')}
-    passed = True
+    count = needed = 0
     for exp in test.get('present', []):
+        needed += 1
         found = re.search(exp, answer)
         details[f'{exp} present'] = bool(found)
-        passed = passed and bool(found)
+        if bool(found):
+            count += 1
+    passed = [count, needed]
     return TestResult(
         passed=passed, output=raw_answer, details=details,
         usage=result.get('usage'),
@@ -526,7 +527,15 @@ def test_embedding(
     vector = response.data[0].embedding
     dimensions = len(vector)
     has_nonzero = any(v != 0.0 for v in vector)
-    passed = dimensions > 0 and has_nonzero
+    results = [dimensions > 0, has_nonzero]
+    passed = [len([r for r in results if r]), len(results)]
+    ps = requests.get(f'{ollama_base_url}/api/ps', timeout=10)
+    ps.raise_for_status()
+    ps = ps.json()
+    found = None
+    for model in ps['models']:
+        if model['name'] == model_name:
+            found = model
     return TestResult(
         passed=passed,
         output=f'Generated embedding with {dimensions} dimensions',
@@ -535,6 +544,10 @@ def test_embedding(
         },
         details={
             'has_nonzero_values': has_nonzero,
+            'size': found['size'],
+            'size_vram': found['size_vram'],
+            'vram_percentage': round(100 * found['size_vram'] / found['size'], 2),
+            'context_length': found['context_length'],
         },
     )
 
@@ -755,7 +768,8 @@ def test_storytelling(
     answer = extract_answer_from_reasoning(raw_answer)
     has_words = 'espresso' in answer.lower() or 'brew' in answer.lower()
     word_length = len(answer.split())
-    passed = has_words and 1000 < word_length < 3000
+    results = [has_words, 1000 < word_length < 3000]
+    passed = [len([r for r in results if r]), len(results)]
     return TestResult(
         passed=passed, output=raw_answer,
         details={
@@ -830,13 +844,17 @@ def escape_markdown(text, maxlen=None):
     return text
 
 
+def passed_to_status(passed):
+    if passed is True or (isinstance(passed, (tuple, list)) and passed[0] == passed[1]):
+        return 'PASSED'
+    if passed is False:
+        return 'Failed'
+    if isinstance(passed, (tuple, list)):
+        return f'{passed[0]}/{passed[1]}'
+    return 'Unknown'
+
+
 def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
-    if result.passed is True:
-        status = 'PASSED'
-    elif result.passed is False:
-        status = 'FAILED'
-    else:
-        status = 'INCONCLUSIVE'
     truncated_output = result.output
     if len(truncated_output) > 1000:
         truncated_output = (
@@ -846,7 +864,7 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
     lines = [
         f'### {test_def.description}',
         f'**Test**: `{test_def.name}`',
-        f'**Result**: {status}',
+        f'**Result**: {passed_to_status(result.passed)}',
     ]
     if result.usage:
         if result.usage.get('prompt_tokens'):
@@ -927,12 +945,7 @@ def generate_report(
         for test_def, result in test_results:
             if result is None:
                 continue
-            if result.passed is True:
-                status = 'PASSED'
-            elif result.passed is False:
-                status = 'FAILED'
-            else:
-                status = 'INCONCLUSIVE'
+            status = passed_to_status(result.passed)
             duration = result.details.get('duration') or 0
             sections.append(
                 f'| {test_def.description} | {status} | {duration:4.2f}s | '
@@ -981,12 +994,7 @@ def run_tests(
         elapsed = time.time() - start
         if not result.details.get('duration', 0):
             result.details['duration'] = elapsed
-        if result.passed is True:
-            sys.stderr.write(f'PASSED ({elapsed:4.2f}s)\n')
-        elif result.passed is False:
-            sys.stderr.write(f'FAILED ({elapsed:4.2f}s)\n')
-        else:
-            sys.stderr.write(f'INCONCLUSIVE ({elapsed:4.2f}s)\n')
+        sys.stderr.write(f'{passed_to_status(result.passed)} ({elapsed:4.2f}s)\n')
         results.append((test_def, result))
         if save_progress:
             save_progress(results)
@@ -1073,8 +1081,7 @@ def add_to_summary(summary, model, metadata, test_results):
                     summary['columns'].append(k_str)
                 summary['models'][model]['metadata'][k_str] = v_str
         summary['models'][model]['tests'][test_name] = {
-            'status': 'PASSED' if result.passed is True else (
-                'FAILED' if result.passed is False else 'INCONCLUSIVE'),
+            'status': passed_to_status(result.passed),
             'duration': f'{result.details.get("duration") or 0:4.2f}s',
             'tokens': result.usage['completion_tokens'] if result.usage else '',
         }
