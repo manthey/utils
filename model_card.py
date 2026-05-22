@@ -415,7 +415,7 @@ def chat_test(
         r'\u2022\u2023\u2043'   # Fancy bullets
         r']',
         answer,
-        re.UNICODE
+        re.UNICODE,
     )
 
     details['Disallowed characters absent'] = not bool(found)
@@ -491,7 +491,7 @@ def test_code_python_yaml(
     })
 
 
-@register_test('code_editing', 'Code editing')
+@register_test('code_editing', 'Code editing', version=1)
 def test_code_editing(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -503,13 +503,14 @@ def test_code_editing(
         'comments.')
     prompt = (
         'Below is a program to test llm models and generate model cards. '
-        'Modify the `chat_test` method to fail any test that ever generates '
-        'an emoji. Remember, more compact code with clear variables and few '
-        'to no comments is preferred. Never use emojis, slang, or metaphors. '
-        'Do not prefix variables or functions with underscores unless they '
-        'are unused. Do not add separator comments. Do not add needless blank '
-        'lines inside functions.  Show code changes less than 50 lines in git '
-        'diff format, more than 100 lines as complete files.')
+        'Modify the `basic_question` method to test for the capital of '
+        'Canada rather than France.  Remember, more compact code with clear '
+        'variables and few to no comments is preferred. Never use emojis, '
+        'slang, or metaphors. Do not prefix variables or functions with '
+        'underscores unless they are unused. Do not add separator comments. '
+        'Do not add needless blank lines inside functions.  Show code changes '
+        'less than 50 lines in git diff format, more than 100 lines as '
+        'complete files.')
     src = open(os.path.realpath(__file__), encoding='utf-8').read()
     prompt += (
         f'\n\n##### File: {os.path.basename(__file__)}\n```python\n' +
