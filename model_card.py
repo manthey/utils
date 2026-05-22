@@ -397,22 +397,22 @@ def chat_test(
             count += 1
     found = re.search(
         r'['
-        r'\U0001F300-\U0001F9FF'  # Misc symbols, emoticons, transport, supplemental
+        r'\U0001F300-\U0001F9FF'  # Misc symbols, emoticons, transport
         r'\U0001FA00-\U0001FAFF'  # Chess, shapes, symbols extended
         r'\U00002600-\U000027BF'  # Misc symbols, dingbats
-        r'\U0001F000-\U0001F02F'  # Mahjong/dominos
+        r'\U0001F000-\U0001F02F'  # Games
         r'\U0001F0A0-\U0001F0FF'  # Playing cards
         r'\uFE00-\uFE0F'          # Variation selectors
-        r'\u2460-\u24FF'          # Enclosed/circled letters
+        r'\u2460-\u24FF'          # Circled letters
         r'\u2500-\u259F'          # Box drawing, block elements
         r'\u2190-\u21FF'          # Arrows
         r'\u2700-\u27BF'          # Stars, bullets, decorative marks
         r'\uFE0F'                 # Variation selector 16
-        r'\u2610\u2611\u2612'  # Classic checkboxes
-        r'\u2713\u2717\u2718'  # Check and cross marks
-        r'\u25C9\u25CB\u25CF'  # Radio-button style bullets
-        r'\u25B6\u25B7\u25BA'  # Decorative arrow bullets
-        r'\u2022\u2023\u2043'   # Fancy bullets
+        r'\u2610\u2611\u2612'     # Checkboxes
+        r'\u2713\u2717\u2718'     # Check and cross marks
+        r'\u25C9\u25CB\u25CF'     # Radio-button style bullets
+        r'\u25B6\u25B7\u25BA'     # Decorative arrow bullets
+        r'\u2022\u2023\u2043'     # Fancy bullets
         r']',
         answer,
         re.UNICODE,

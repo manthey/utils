@@ -115,6 +115,7 @@ QUANT_PRIORITY_BITS = {
 MODEL_PATTERNS = {
     'code': {
         'tags': {'code', 'conversational'},
+        'arch': {'coder'},
         'patterns': {
             r'code', r'coder', r'codestral', r'starcoder', r'codellama',
             r'wizardcoder', r'phind', r'magicoder', r'codegen', r'replit',
@@ -125,6 +126,7 @@ MODEL_PATTERNS = {
         'patterns': {r'embed'}},
     'vision': {
         'tags': {'image-text-to-text', 'conversational'},
+        'arch': {'clip', 'llava'},
         'patterns': {
             r'vision', r'llava', r'bakllava', r'moondream', r'cogvlm', r'minicpm-v',
             r'internvl', r'paligemma', r'qwen.*vl', r'yi-vl', r'bunny',
@@ -134,6 +136,13 @@ MODEL_PATTERNS = {
         'tags': {'medical', 'image-feature-extraction'},
         'patterns': {
             r'medical', r'extract', r'path',
+        }},
+    'geo': {
+        'tags': {
+            'geospatial', 'earth-observation', 'image-feature-extraction',
+            'zero-shot-image-classification', 'image-classification'},
+        'patterns': {
+            r'geo', r'extract', r'path',
         }},
 }
 
@@ -486,7 +495,7 @@ def discover_models(  # noqa
     skipped_no_fit = 0
     skipped_fetch_failed = 0
     tw, _ = shutil.get_terminal_size()
-    for i, model in tqdm.contrib.tenumerate(with_gguf, ncols=tw):
+    for _, model in tqdm.contrib.tenumerate(with_gguf, ncols=tw):
         model_type = model_filter if model_filter != 'all' else (
             'code' if matches_type(model.id, 'code') else
             'vision' if matches_type(model.id, 'vision') else None
@@ -604,18 +613,11 @@ def ollama_api_post(host: str, path: str, body: dict) -> object:
 def infer_model_type_from_details(details: dict, name: str) -> str | None:
     arch = (details.get('family', '') or details.get('architecture', '') or '').lower()
     name_lower = name.lower()
-    if any(x in arch for x in ('clip', 'llava')) or any(
-            re.search(p, name_lower) for p in MODEL_PATTERNS['vision']['patterns']):
-        return 'vision'
-    if 'embed' in arch or any(
-            re.search(p, name_lower) for p in MODEL_PATTERNS['embed']['patterns']):
-        return 'embed'
-    if 'medical' in arch or any(
-            re.search(p, name_lower) for p in MODEL_PATTERNS['medical']['patterns']):
-        return 'medical'
-    if any(x in arch for x in ('code', 'coder')) or any(
-            re.search(p, name_lower) for p in MODEL_PATTERNS['code']['patterns']):
-        return 'code'
+    for key in MODEL_PATTERNS:
+        if key in arch or any(x in arch for x in MODEL_PATTERNS[key].get('arch', set())):
+            return key
+        if any(re.search(p, name_lower) for p in MODEL_PATTERNS[key]['patterns']):
+            return key
     return None
 
 
@@ -722,7 +724,7 @@ def main():  # noqa
         help='Minimum model GPU memory in gigabytes',
     )
     parser.add_argument(
-        '-f', '--filter', choices=['code', 'vision', 'embed', 'medical', 'all'], default='all',
+        '-f', '--filter', choices=sorted(MODEL_PATTERNS) + ['all'], default='all',
         help='Filter by model type (default: all)',
     )
     parser.add_argument(
