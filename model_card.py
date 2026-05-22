@@ -653,6 +653,29 @@ def test_photo(
     })
 
 
+@register_test('geospatial_image', 'Geospatial understanding', version=1)
+def test_geospatial_image(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    img = base64.b64encode(open(os.path.join(os.path.dirname(
+        __file__), 'model_card_test_image3.jpg'), 'rb').read()).decode('utf-8')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [{
+            'role': 'user',
+            'content': [
+                {
+                    'type': 'text',
+                    'text': 'Describe what is in this photograph in three sentences.',
+                }, {
+                    'type': 'image_url',
+                    'image_url': {'url': f'data:image/jpeg;base64,{img}'},
+                },
+            ],
+        }]},
+        'present': [r'(?i)roads'],
+    })
+
+
 @register_test('tool_use', 'Tool use')
 def test_tool_use(
     client: OpenAI, model_name: str, ollama_base_url: str,
