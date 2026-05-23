@@ -11,6 +11,7 @@
 import argparse
 import base64
 import datetime
+import html
 import json
 import multiprocessing
 import os
@@ -1144,30 +1145,124 @@ def add_to_summary(summary, model, metadata, test_results):
         }
 
 
-def create_summary(summary_path, output_dir, summary):
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        '%Y-%m-%d %H:%M:%S UTC')
-    sections = [
-        '---',
-        'cssclasses: scrollable-table',
-        '---',
-        '# Model Card Summary',
-        f'Generated: {timestamp}',
-        '',
-    ]
+def summary_table(summary):
     known = {t.name: t.description for t in TEST_REGISTRY}
     cols = list(summary['columns'])
+    rows = []
     for t in summary['tests']:
         cols += [f'{known.get(t, t)}', 'Duration', 'Tokens']
-    sections.append('| ' + ' | '.join(cols) + ' |')
-    sections.append('|' + '---|' * len(cols))
     for model in summary['models'].values():
         row = [model['metadata'].get(col, '') for col in summary['columns']]
         for t in summary['tests']:
             tval = model['tests'].get(t, {})
             row += [tval.get('status', ''), tval.get('duration', ''), tval.get('tokens', '')]
-        sections.append('| ' + ' | '.join([str(r) for r in row]) + ' |')
-    record = '\n'.join(sections) + '\n'
+        rows.append(row)
+    return cols, rows
+
+
+def create_summary_html(timestamp, cols, rows):
+    th_cells = ''.join(f'<th>{html.escape(str(c))}</th>' for c in cols)
+    tr_rows = ''.join(
+        '<tr>' + ''.join(f'<td>{html.escape(str(r))}</td>' for r in row) + '</tr>'
+        for row in rows
+    )
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Model Card Summary</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tablesort@5.7.1/tablesort.css">
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+    }
+    body {
+      display: flex;
+      flex-direction: column;
+    }
+    .header-wrap {
+      padding: 10px;
+    }
+    .header-wrap h1,
+    .header-wrap p {
+      margin: 0;
+    }
+    .table-wrap {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      padding: 10px;
+    }
+    table {
+      border-collapse: collapse;
+    }
+    th, td {
+      border: 1px solid;
+      padding: 0 3px;
+    }
+    table thead th {
+      position: sticky !important;
+      top: 0;
+      z-index: 20;
+      background-color: Canvas;
+    }
+    table thead th:first-child,
+    table tbody td:first-child,
+    table tbody th:first-child {
+      position: sticky !important;
+      left: 0;
+      z-index: 10;
+      background-color: Canvas;
+    }
+    table thead th:first-child {
+      z-index: 30;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/tablesort@5.7.1/dist/tablesort.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tablesort@5.7.1/dist/sorts/tablesort.number.min.js">
+  </script>
+</head>
+""" + f"""
+<body>
+  <div class="header-wrap">
+    <h1>Model Card Summary</h1>
+    <p>Generated: {html.escape(timestamp)}</p>
+  </div>
+  <div class="table-wrap">
+    <table id="summary">
+      <thead><tr>{th_cells}</tr></thead>
+      <tbody>{tr_rows}</tbody>
+    </table>
+  </div>
+  <script>
+    new Tablesort(document.getElementById('summary'), {{ descending: false }});
+  </script>
+</body>
+</html>
+"""
+
+
+def create_summary(summary_path, output_dir, summary):
+    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+        '%Y-%m-%d %H:%M:%S UTC')
+    cols, rows = summary_table(summary)
+    if summary_path.endswith('.html'):
+        record = create_summary_html(timestamp, cols, rows)
+    else:
+        sections = [
+            '---',
+            'cssclasses: scrollable-table',
+            '---',
+            '# Model Card Summary',
+            f'Generated: {timestamp}',
+            '',
+        ]
+        sections.append('| ' + ' | '.join(cols) + ' |')
+        sections.append('|' + '---|' * len(cols))
+        for row in rows:
+            sections.append('| ' + ' | '.join([str(r) for r in row]) + ' |')
+        record = '\n'.join(sections) + '\n'
     out_path = (summary_path if os.path.dirname(summary_path) or
                 not os.path.isdir(output_dir) else os.path.join(output_dir, summary_path))
     with open(out_path, 'w', encoding='utf-8') as f:
@@ -1233,7 +1328,8 @@ def main():  # noqa
         help='If specified, the name of a summary file to write.  If this '
         'does not include a directory, it will be written in the --output '
         'directory.  Use --collect to collect model cards in the output '
-        'directory that were not processed in this run.',
+        'directory that were not processed in this run.  The summary is in '
+        'markdown unless the name ends in .html.',
     )
     parser.add_argument(
         '--collect', action='store_true',
