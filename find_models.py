@@ -5,6 +5,7 @@
 #     "python-dateutil",
 #     "diskcache",
 #     "huggingface-hub>=0.20.0",
+#     "parsel",
 #     "tqdm",
 # ]
 # ///
@@ -717,6 +718,266 @@ def discover_ollama_models(  # noqa
     return models
 
 
+OLLAMA_HTMX_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0',
+    'HX-Request': 'true',
+    'Accept': 'text/html',
+}
+
+OLLAMA_PLAIN_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0',
+    'Accept': 'text/html',
+}
+
+
+def parse_pull_count(text: str) -> int:
+    text = text.strip().replace(',', '')
+    multipliers = {'K': 1_000, 'M': 1_000_000, 'B': 1_000_000_000}
+    for suffix, mult in multipliers.items():
+        if text.upper().endswith(suffix):
+            return int(float(text[:-1]) * mult)
+    try:
+        return int(text)
+    except ValueError:
+        return 0
+
+
+def parse_size_text(text: str) -> float:
+    text = text.strip().upper()
+    if text.endswith('GB'):
+        return float(text[:-2])
+    if text.endswith('MB'):
+        return float(text[:-2]) / 1024.0
+    if text.endswith('TB'):
+        return float(text[:-2]) * 1024.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def parse_context_text(text: str) -> int | None:
+    text = text.strip().upper()
+    if text.endswith('K'):
+        return int(float(text[:-1]) * 1024)
+    if text.endswith('M'):
+        return int(float(text[:-1]) * 1024 * 1024)
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+@cache.memoize(expire=86400)
+def fetch_ollama_search_page(page: int, query: str) -> str:
+    print(f'  Fetching search page {page}')
+    url = f'https://ollama.com/search?page={page}&q={query}'
+    req = urllib.request.Request(url, headers=OLLAMA_HTMX_HEADERS)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode('utf-8', errors='replace')
+
+
+@cache.memoize(expire=86400)
+def fetch_ollama_tags_page(model_path: str) -> str:
+    url = f'https://ollama.com{model_path}/tags'
+    req = urllib.request.Request(url, headers=OLLAMA_PLAIN_HEADERS)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read().decode('utf-8', errors='replace')
+
+
+def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> list[dict]:
+    import parsel
+    models = []
+    seen = set()
+    page = 1
+    while True:
+        try:
+            html = fetch_ollama_search_page(page, query)
+        except (urllib.error.URLError, OSError) as e:
+            print(f'  Failed to fetch page {page}: {e}')
+            break
+        sel = parsel.Selector(text=html)
+        items = sel.css('li[x-test-model]')
+        if not items:
+            break
+        for item in items:
+            href = item.css('a::attr(href)').get('')
+            name = item.css('[x-test-search-response-title]::text').get('').strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            pull_text = item.css('[x-test-pull-count]::text').get('0')
+            pull_count = parse_pull_count(pull_text)
+            if pull_count < downloads_min:
+                continue
+            capabilities = item.css('[x-test-capability]::text').getall()
+            capabilities = [c.strip().lower() for c in capabilities]
+            cloud_spans = item.css('span.text-cyan-500::text').getall()
+            is_cloud_only = any('cloud' in s.lower() for s in cloud_spans)
+            sizes = item.css('[x-test-size]::text').getall()
+            sizes = [s.strip() for s in sizes]
+            updated_title = item.css('span[title]::attr(title)').get('')
+            models.append({
+                'name': name,
+                'href': href,
+                'pulls': pull_count,
+                'capabilities': capabilities,
+                'is_cloud_only': is_cloud_only,
+                'param_sizes': sizes,
+                'updated_title': updated_title,
+            })
+            if limit and len(models) >= limit:
+                break
+        next_page_el = sel.css(f'li[hx-get*="page={page + 1}"]')
+        if not next_page_el or (limit and len(models) >= limit):
+            break
+        page += 1
+    return models
+
+
+def scrape_ollama_tags_for_model(model_info: dict) -> list[dict]:
+    import parsel
+    try:
+        html = fetch_ollama_tags_page(model_info['href'])
+    except (urllib.error.URLError, OSError) as e:
+        print(f"  Failed to fetch tags for {model_info['name']}: {e}")
+        return []
+    sel = parsel.Selector(text=html)
+    tags = []
+    for row in sel.css('div.group'):
+        desktop = row.css('div.hidden.md\\:flex')
+        if not desktop:
+            continue
+        tag_name_el = desktop.css('a.group-hover\\:underline')
+        if not tag_name_el:
+            continue
+        tag_name = tag_name_el.css('::text').get('').strip()
+        if not tag_name:
+            continue
+        cols = desktop.css('div.grid-cols-12 > *')
+        size_text = ''
+        context_text = ''
+        input_text = ''
+        if len(cols) >= 2:
+            size_text = cols[1].css('::text').get('').strip()
+        if len(cols) >= 3:
+            context_text = cols[2].css('::text').get('').strip()
+        if len(cols) >= 4:
+            input_text = cols[3].css('::text').get('').strip()
+        tags.append({
+            'tag': tag_name,
+            'size_text': size_text,
+            'context_text': context_text,
+            'input_text': input_text,
+        })
+    return tags
+
+
+def discover_ollama_registry_models(  # noqa
+    name_filter: str | None, gpu_memory_gb: float | None,
+    model_filter: str, limit: int, downloads: int,
+    context_memory: int = 32768, context_limit_gb: float | None = None,
+) -> list[ModelInfo]:
+    print('Fetching models from Ollama registry')
+    search_results = scrape_ollama_search_models('all', limit, downloads)
+    print(f'Retrieved {len(search_results)} models from search')
+    if name_filter:
+        search_results = [
+            m for m in search_results
+            if re.search(name_filter, m['name'], re.IGNORECASE)]
+    models = []
+    skipped_cloud = 0
+    skipped_no_fit = 0
+    skipped_type_mismatch = 0
+    tw, _ = shutil.get_terminal_size()
+    for _, search_model in tqdm.contrib.tenumerate(search_results, ncols=tw):
+        if search_model['is_cloud_only'] and not search_model['param_sizes']:
+            skipped_cloud += 1
+            continue
+        caps = {
+            'has_tools': 'tools' in search_model['capabilities'],
+            'has_reasoning': 'thinking' in search_model['capabilities'],
+            'has_vision': 'vision' in search_model['capabilities'],
+            'has_embedding': 'embedding' in search_model['capabilities'],
+        }
+        model_type = infer_model_type_from_details(
+            {'capabilities': search_model['capabilities']}, search_model['name'])
+        if caps['has_vision']:
+            model_type = model_type or 'vision'
+        if caps['has_embedding']:
+            model_type = model_type or 'embed'
+        if model_filter != 'all' and model_type != model_filter:
+            if not matches_type(search_model['name'], model_filter):
+                skipped_type_mismatch += 1
+                continue
+        modified = None
+        if search_model['updated_title']:
+            try:
+                modified = dateutil.parser.parse(
+                    search_model['updated_title']).astimezone(datetime.timezone.utc)
+            except (ValueError, OverflowError):
+                pass
+        tag_details = scrape_ollama_tags_for_model(search_model)
+        if not tag_details:
+            skipped_no_fit += 1
+            continue
+        candidates = []
+        for tag_info in tag_details:
+            tag_name = tag_info['tag']
+            if ':' in tag_name:
+                tag_suffix = tag_name.split(':')[1]
+            else:
+                tag_suffix = tag_name
+            size_gb = parse_size_text(tag_info['size_text'])
+            if not size_gb:
+                continue
+            context_size = parse_context_text(tag_info['context_text'])
+            quant = extract_quantization(tag_suffix)
+            if quant == 'UNKNOWN':
+                quant = 'Q4_K_M'
+            if gpu_memory_gb is not None and size_gb > gpu_memory_gb:
+                continue
+            if context_limit_gb is not None and size_gb > context_limit_gb:
+                continue
+            candidates.append(ModelInfo(
+                source='ollama-registry',
+                repo_id=search_model['name'],
+                filename=tag_name,
+                size_gb=size_gb,
+                quantization=quant,
+                model_type=model_type,
+                is_chunked=False,
+                downloads=search_model['pulls'],
+                created=modified,
+                modified=modified,
+                context_size=context_size,
+                arch_params=ModelArchParams(
+                    param_count=None, num_layers=None,
+                    num_kv_heads=None, head_dim=None,
+                    context_length=context_size,
+                ),
+                memory_burden_gb=None,
+                has_tools=caps['has_tools'],
+                has_reasoning=caps['has_reasoning'],
+                has_vision=caps['has_vision'],
+                has_embedding=caps['has_embedding'],
+            ))
+        if not candidates:
+            skipped_no_fit += 1
+            continue
+        best = select_best_quantization(
+            candidates, gpu_memory_gb, None, context_limit_gb)
+        if best:
+            models.append(best)
+        else:
+            skipped_no_fit += 1
+    print(f'Found {len(models)} matching models')
+    print(f'  Skipped (cloud only): {skipped_cloud}')
+    print(f'  Skipped (type mismatch): {skipped_type_mismatch}')
+    print(f'  Skipped (no fit): {skipped_no_fit}')
+    return models
+
+
 def main():  # noqa
     parser = argparse.ArgumentParser(
         description='Find Ollama-compatible models from HuggingFace',
@@ -755,8 +1016,13 @@ def main():  # noqa
     parser.add_argument(
         '--after', help='Only show models after this date')
     parser.add_argument(
+        '--source', '-s', default='hf',
+        choices=['hf', 'huggingface', 'local', 'ollama'],
+        help='Model source: hf/huggingface, local (ollama server), ollama (registry)',
+    )
+    parser.add_argument(
         '--local', action='store_true', default=False,
-        help='Inspect locally available ollama models instead of querying HuggingFace',
+        help='Shorthand for --source local',
     )
     parser.add_argument(
         '--ollama-host', default=os.environ.get('OLLAMA_HOST', '127.0.0.1:11434'),
@@ -771,6 +1037,9 @@ def main():  # noqa
         help='Use context memory as the measure for choosing models',
     )
     args = parser.parse_args()
+    if args.local:
+        args.source = 'local'
+    source = args.source
     columns = {
         'repo': {
             'name': 'Repository', 'format': 'rw',
@@ -806,9 +1075,9 @@ def main():  # noqa
                 mdate := (m.modified if args.modified else m.created) or m.created) else ''},
         'downloads': {'name': 'Dwnlds', 'format': ' >6', 'func': lambda m: m.downloads},
     }
-    if not args.local and args.gpu_memory_gb is None and args.context_limit is None:
-        parser.error('-m/--gpu-memory-gb is required unless --local is specified')
-    if args.local:
+    if source == 'local':
+        if args.gpu_memory_gb is None and args.context_limit is None:
+            pass
         models = discover_ollama_models(
             host=args.ollama_host, name_filter=args.regex,
             gpu_memory_gb=args.gpu_memory_gb,
@@ -816,7 +1085,23 @@ def main():  # noqa
             context_limit_gb=args.context_limit,
         )
         columns['downloads']['show'] = False
+    elif source == 'ollama':
+        if args.context_limit:
+            args.gpu_memory_gb = args.gpu_memory_gb or args.context_limit
+            args.context_limit = None
+        models = discover_ollama_registry_models(
+            name_filter=args.regex,
+            gpu_memory_gb=args.gpu_memory_gb,
+            model_filter=args.filter,
+            limit=args.limit,
+            downloads=args.downloads,
+            context_memory=args.context_memory,
+            context_limit_gb=args.context_limit,
+        )
+        columns['memory_burden']['show'] = False
     else:
+        if args.gpu_memory_gb is None and args.context_limit is None:
+            parser.error('-m/--gpu-memory-gb is required unless --source local or --source ollama')
         api = huggingface_hub.HfApi()
         models = discover_models(
             api=api, gpu_memory_gb=args.gpu_memory_gb, model_filter=args.filter,
@@ -824,20 +1109,20 @@ def main():  # noqa
             min_memory=args.min, context_memory=args.context_memory,
             context_limit_gb=args.context_limit,
         )
-        if args.before or args.after:
-            before = dateutil.parser.parse(args.before).astimezone(
-                datetime.timezone.utc) if args.before else None
-            after = dateutil.parser.parse(args.after).astimezone(
-                datetime.timezone.utc) if args.after else None
-            filtered = []
-            for m in models:
-                mdate = (m.modified if args.modified else m.created) or m.created
-                if mdate and before is not None and mdate > before:
-                    continue
-                if mdate and after is not None and mdate < after:
-                    continue
-                filtered.append(m)
-            models = filtered
+    if args.before or args.after:
+        before = dateutil.parser.parse(args.before).astimezone(
+            datetime.timezone.utc) if args.before else None
+        after = dateutil.parser.parse(args.after).astimezone(
+            datetime.timezone.utc) if args.after else None
+        filtered = []
+        for m in models:
+            mdate = (m.modified if args.modified else m.created) or m.created
+            if mdate and before is not None and mdate > before:
+                continue
+            if mdate and after is not None and mdate < after:
+                continue
+            filtered.append(m)
+        models = filtered
     models.sort(key=lambda m: (
         -m.size_gb if args.context_limit is None else (-m.memory_burden_gb or 0),
         -m.size_gb, m.repo_id))
@@ -878,7 +1163,10 @@ def main():  # noqa
     else:
         print('# Ollama pull commands:')
         for m in models:
-            print(f'ollama pull hf.co/{m.repo_id}:{m.quantization}')
+            if m.source == 'ollama-registry':
+                print(f'ollama pull {m.repo_id}:{m.quantization}')
+            else:
+                print(f'ollama pull hf.co/{m.repo_id}:{m.quantization}')
     print(f'Total: {len(models)} models')
 
 
