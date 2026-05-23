@@ -597,13 +597,19 @@ def format_ollama_tag(filename: str) -> str:
 
 
 def ollama_api_get(host: str, path: str) -> object:
-    url = f'http://{host}{path}'
+    if '://' not in host:
+        url = f'http://{host}{path}'
+    else:
+        url = f'{host}{path}'
     with urllib.request.urlopen(urllib.request.Request(url), timeout=10) as resp:
         return json.loads(resp.read().decode())
 
 
 def ollama_api_post(host: str, path: str, body: dict) -> object:
-    url = f'http://{host}{path}'
+    if '://' not in host:
+        url = f'http://{host}{path}'
+    else:
+        url = f'{host}{path}'
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -634,7 +640,7 @@ def infer_quantization_from_info_block(metadata: dict, size_bytes: int) -> str:
                 quant = key
         return quant
     except Exception:
-        raise
+        pass
     return 'UNKNOWN'
 
 
