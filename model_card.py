@@ -4,6 +4,7 @@
 # dependencies = [
 #     "openai",
 #     "python-dateutil",
+#     "pyyaml",
 #     "requests",
 # ]
 # ///
@@ -29,6 +30,7 @@ from typing import Any
 
 import dateutil.parser
 import requests
+import yaml
 from openai import OpenAI
 
 ClientKwargs = {}
@@ -1048,6 +1050,7 @@ def run_tests(
             result = test_def.run(client, model_name, ollama_base_url)
         except Exception as exc:
             result = TestResult(passed=False, output=f'Error: {exc}')
+            raise
         result.version = test_def.version
         elapsed = time.time() - start
         if not result.details.get('duration', 0):
@@ -1269,6 +1272,22 @@ def create_summary(summary_path, output_dir, summary):
         f.write(record)
 
 
+def load_yaml_tests():
+    path = os.path.join(os.path.dirname(__file__), 'model_card.yaml')
+    if not os.path.isfile(path):
+        return
+    tests = yaml.safe_load(open(path, encoding='utf-8').read())
+    for test in tests:
+
+        def test_func(
+            client: OpenAI, model_name: str, ollama_base_url: str,
+        ) -> TestResult:
+            return chat_test(client, model_name, test['test'])
+
+        register_test(test['name'], test['description'],
+                      test.get('skip', False), test.get('version', 0))(test_func)
+
+
 def main():  # noqa
     parser = argparse.ArgumentParser(
         description='Generate a model card for an Ollama model.')
@@ -1336,6 +1355,7 @@ def main():  # noqa
         help='Collect older model cards for the summary.',
     )
     args = parser.parse_args()
+    load_yaml_tests()
     if args.list_tests:
         for t in TEST_REGISTRY:
             sys.stdout.write(f'{t.name:25s} {t.description}{" (skip)" if t.skip else ""}\n')
