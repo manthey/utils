@@ -1050,7 +1050,6 @@ def run_tests(
             result = test_def.run(client, model_name, ollama_base_url)
         except Exception as exc:
             result = TestResult(passed=False, output=f'Error: {exc}')
-            raise
         result.version = test_def.version
         elapsed = time.time() - start
         if not result.details.get('duration', 0):
@@ -1277,7 +1276,8 @@ def load_yaml_tests():
     if not os.path.isfile(path):
         return
     tests = yaml.safe_load(open(path, encoding='utf-8').read())
-    for test in tests:
+
+    def make_test(test):
 
         def test_func(
             client: OpenAI, model_name: str, ollama_base_url: str,
@@ -1286,6 +1286,9 @@ def load_yaml_tests():
 
         register_test(test['name'], test['description'],
                       test.get('skip', False), test.get('version', 0))(test_func)
+
+    for test in tests:
+        make_test(test)
 
 
 def main():  # noqa
