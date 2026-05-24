@@ -446,7 +446,7 @@ def select_best_quantization(
     return fitting[0]
 
 
-@cache.memoize(expire=3600)
+@cache.memoize(expire=86400)
 def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
     all_models = []
     for tag in tags:

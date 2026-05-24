@@ -204,6 +204,8 @@ def chat_completion_worker(  # noqa
         'stream': use_stream,
         'tools': tools,
     }
+    if use_stream:
+        kwargs['stream_options'] = {'include_usage': True}
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     response = client.chat.completions.create(**kwargs)
     content_parts: list[str] = []
@@ -219,6 +221,12 @@ def chat_completion_worker(  # noqa
             delta = chunk.choices[0].delta if chunk.choices else None
         else:
             delta = chunk.choices[0].message
+        if chunk.usage is not None:
+            usage = {
+                'prompt_tokens': chunk.usage.prompt_tokens,
+                'completion_tokens': chunk.usage.completion_tokens,
+                'total_tokens': chunk.usage.total_tokens,
+            }
         if not delta:
             continue
         if delta.content:
@@ -237,12 +245,6 @@ def chat_completion_worker(  # noqa
                         tc['function']['name'] += tc_delta.function.name
                     if tc_delta.function.arguments:
                         tc['function']['arguments'] += tc_delta.function.arguments
-        if chunk.usage is not None:
-            usage = {
-                'prompt_tokens': chunk.usage.prompt_tokens,
-                'completion_tokens': chunk.usage.completion_tokens,
-                'total_tokens': chunk.usage.total_tokens,
-            }
         if queue is not None and use_stream:
             queue.put(snapshot())
     return snapshot()
