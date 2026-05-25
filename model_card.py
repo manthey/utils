@@ -1030,8 +1030,10 @@ def get_timestamp(val=None):
     if not val:
         return datetime.datetime.now(datetime.timezone.utc).strftime(
             '%Y-%m-%d %H:%M:%S UTC')
-    return dateutil.parser.parse(val).astimezone(
-        datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+    tval = dateutil.parser.parse(val)
+    if tval.tzinfo is None:
+        tval = tval.replace(tzinfo=datetime.timezone.utc)
+    return tval.astimezone(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
 
 
 def generate_report(
@@ -1399,6 +1401,9 @@ def main():  # noqa
         help='Read an existing model card and run only missing tests plus first_load.',
     )
     parser.add_argument(
+        '--after', '--since',
+        help='Any test older than this is considered mussinb.')
+    parser.add_argument(
         '--summary',
         help='If specified, the name of a summary file to write.  If this '
         'does not include a directory, it will be written in the --output '
@@ -1468,9 +1473,13 @@ def main():  # noqa
             _, existing_results = load_existing_results(out_path)
             if args.missing_tests:
                 known = {t.name: t for t in TEST_REGISTRY}
+                after = ''
+                if args.after:
+                    after = get_timestamp(args.after)
                 sel_tests -= {name for name, r in existing_results.items()
                               if name not in known or
-                              r.version == known[name].version}
+                              (r.version == known[name].version and (
+                                  r.timestamp or '') >= after)}
             sel_tests.add('first_load')
             run_names = [t.name for t in TEST_REGISTRY if t.name in sel_tests]
             if len(run_names) <= 1:

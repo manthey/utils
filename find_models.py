@@ -1014,7 +1014,7 @@ def main():  # noqa
     parser.add_argument(
         '--before', help='Only show models before this date')
     parser.add_argument(
-        '--after', help='Only show models after this date')
+        '--after', '--since', help='Only show models after this date')
     parser.add_argument(
         '--source', '-s', default='hf',
         choices=['hf', 'huggingface', 'local', 'ollama'],
