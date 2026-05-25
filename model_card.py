@@ -43,6 +43,7 @@ class TestResult:
     metadata: dict[str, Any] = field(default_factory=dict)
     details: dict[str, Any] = field(default_factory=dict)
     version: int = 0
+    timestamp: str | None = None
     usage: dict[str, int] | None = None
 
 
@@ -381,6 +382,7 @@ def test_first_load(
         details={
             'duration': result.get('duration'),
         },
+        timestamp=get_timestamp(),
         usage=result.get('usage'),
     )
 
@@ -455,6 +457,7 @@ def chat_test_worker(client: OpenAI, model_name: str, test):
     passed = [count, needed]
     return TestResult(
         passed=passed, output=raw_answer, details=details,
+        timestamp=get_timestamp(),
         usage=result.get('usage'),
     )
 
@@ -615,6 +618,7 @@ def test_embedding(
             'vram_percentage': round(100 * found['size_vram'] / found['size'], 2),
             'context_length': found['context_length'],
         },
+        timestamp=get_timestamp(),
     )
 
 
@@ -753,11 +757,13 @@ def test_tool_use(
                 'arguments': arguments,
                 'duration': result.get('duration'),
             },
+            timestamp=get_timestamp(),
             usage=result.get('usage'),
         )
     content = result['content'] or '(no content)'
     return TestResult(
         passed=False, output=f'No tool call made. Response: {content}',
+        timestamp=get_timestamp(),
     )
 
 
@@ -806,6 +812,7 @@ def test_temperature_variation(
             'responses': responses,
             'duration': duration,
         },
+        timestamp=get_timestamp(),
         usage=usage,
     )
 
@@ -867,6 +874,7 @@ def test_storytelling(
             'word_length': word_length,
             'extracted_answer': answer,
             'duration': result.get('duration')},
+        timestamp=get_timestamp(),
         usage=result.get('usage'),
     )
 
@@ -887,8 +895,7 @@ def get_metadata_table(metadata: dict[str, Any]) -> list[tuple[str, Any]]:
     )
     mod_str = metadata['modified_at']
     try:
-        mod_str = dateutil.parser.parse(mod_str).astimezone(
-            datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        mod_str = get_timestamp(mod_str)
     except Exception:
         pass
     rows = [
@@ -956,6 +963,9 @@ def format_test_result(test_def: TestDefinition, result: TestResult) -> str:
         f'**Test**: `{test_def.name}`',
         f'**Result**: {passed_to_status(result.passed)}',
     ]
+    if result.timestamp:
+        lines.append(
+            f'**Completed**: {result.timestamp}')
     if result.usage:
         if result.usage.get('prompt_tokens'):
             lines.append(f'**Prompt Tokens**: {result.usage["prompt_tokens"]}')
@@ -1011,19 +1021,26 @@ def load_existing_results(path: str | None) -> dict[str, TestResult]:
                 version=data.get('version', 0), passed=data.get('passed'),
                 output=data.get('output', ''),
                 metadata=data.get('metadata') or {},
+                timestamp=data.get('timestamp'),
                 details=data.get('details') or {}, usage=data.get('usage'))
     return record.get('metadata'), results
+
+
+def get_timestamp(val=None):
+    if not val:
+        return datetime.datetime.now(datetime.timezone.utc).strftime(
+            '%Y-%m-%d %H:%M:%S UTC')
+    return dateutil.parser.parse(val).astimezone(
+        datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
 
 
 def generate_report(
     metadata: dict[str, Any],
     test_results: list[tuple[TestDefinition, TestResult]],
 ) -> str:
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        '%Y-%m-%d %H:%M:%S UTC')
     sections = [
         f"# Model Card: {metadata['name']}",
-        f'Generated: {timestamp}',
+        f'Generated: {get_timestamp()}',
         '## Metadata',
         format_metadata_table(metadata),
     ]
@@ -1080,7 +1097,8 @@ def run_tests(
         try:
             result = test_def.run(client, model_name, ollama_base_url)
         except Exception as exc:
-            result = TestResult(passed=False, output=f'Error: {exc}')
+            result = TestResult(passed=False, output=f'Error: {exc}',
+                                timestamp=get_timestamp())
             if raise_errors:
                 raise
         result.version = test_def.version
@@ -1279,8 +1297,7 @@ def create_summary_html(timestamp, cols, rows):
 
 
 def create_summary(summary_path, output_dir, summary):
-    timestamp = datetime.datetime.now(datetime.timezone.utc).strftime(
-        '%Y-%m-%d %H:%M:%S UTC')
+    timestamp = get_timestamp()
     cols, rows = summary_table(summary)
     if summary_path.endswith('.html'):
         record = create_summary_html(timestamp, cols, rows)
