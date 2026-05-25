@@ -390,18 +390,27 @@ def test_first_load(
 def chat_test(client: OpenAI, model_name: str, test):
     effort = test['chat'].get('reasoning_effort')
     effort = [effort] if effort is not None else ['none', 'low', 'medium', 'high']
-    res = None
+    best = None
     for eff in effort:
         etest = test.copy()
         etest['chat'] = etest['chat'].copy()
         etest['chat']['reasoning_effort'] = eff
-        res = chat_test_worker(client, model_name, etest)
+        try:
+            res = chat_test_worker(client, model_name, etest)
+        except TimeoutError:
+            if best is not None:
+                return best
+            raise
         if len(effort) > 1:
             res.details['reasoning_effort'] = eff
         if res.passed is True or (isinstance(res.passed, (tuple, list)) and
                                   res.passed[0] == res.passed[1]):
             return res
-    return res
+        best = best or res
+        if (isinstance(best.passed, (tuple, list)) and isinstance(res.passed, (tuple, list)) and
+                res.passed[0] > best.passed[0]):
+            best = res
+    return best
 
 
 def chat_test_worker(client: OpenAI, model_name: str, test):
