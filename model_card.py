@@ -1387,7 +1387,8 @@ def main():  # noqa
         'does not include a directory, it will be written in the --output '
         'directory.  Use --collect to collect model cards in the output '
         'directory that were not processed in this run.  The summary is in '
-        'markdown unless the name ends in .html.',
+        'markdown unless the name ends in .html.  Use a comma separated '
+        'list for multiple summary files.',
     )
     parser.add_argument(
         '--collect', action='store_true',
@@ -1495,7 +1496,8 @@ def main():  # noqa
             except Exception:
                 pass
     if args.summary:
-        create_summary(args.summary, args.output, summary)
+        for summ in args.summary.split(','):
+            create_summary(summ, args.output, summary)
 
 
 if __name__ == '__main__':
