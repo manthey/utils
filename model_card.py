@@ -31,7 +31,7 @@ from typing import Any
 import dateutil.parser
 import requests
 import yaml
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 
 ClientKwargs = {}
 
@@ -397,7 +397,7 @@ def chat_test(client: OpenAI, model_name: str, test):
         etest['chat']['reasoning_effort'] = eff
         try:
             res = chat_test_worker(client, model_name, etest)
-        except TimeoutError:
+        except (TimeoutError, APIStatusError):
             if best is not None:
                 return best
             raise
@@ -508,7 +508,7 @@ def test_coding(
     })
 
 
-@register_test('python_yaml', 'Python yaml library use')
+@register_test('python_yaml', 'Python yaml library use', version=1)
 def test_code_python_yaml(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -519,11 +519,12 @@ def test_code_python_yaml(
         'and carefully considered, using clear variable names and few to no '
         'comments.')
     prompt = (
-        'Write a Python program that uses pep 723 and argparse to take a yaml '
-        'or json input file (as the first command line parameter), and '
-        'output either yaml or json, either as compact as possible or nicely '
-        'formatted; for instance, if outputting yaml, the compact form could '
-        'deduplicate repeated data, but the nice formatting would not.')
+        'Write a Python program that uses pep 723 (inline script metadata) '
+        'and argparse to take a yaml or json input file (as the first command '
+        'line parameter), and output either yaml or json, either as compact '
+        'as possible or nicely formatted; for instance, if outputting yaml, '
+        'the compact form could deduplicate repeated data, but the nice '
+        'formatting would not.')
     return chat_test(client, model_name, {
         'chat': {'messages': [
             {'role': 'system', 'content': system_prompt},
