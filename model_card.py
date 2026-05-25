@@ -193,6 +193,7 @@ def chat_completion_worker(  # noqa
     max_tokens: int = 16384,
     tools: list[dict] | None = None,
     use_stream: bool = True,
+    reasoning_effort: str | None = None,
     queue=None,
 ) -> dict[str, Any]:
     start = time.time()
@@ -203,10 +204,13 @@ def chat_completion_worker(  # noqa
         'max_tokens': max_tokens,
         'stream': use_stream,
         'tools': tools,
+        'reasoning_effort': reasoning_effort,
     }
     if use_stream:
         kwargs['stream_options'] = {'include_usage': True}
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
+    sys.stdout.write('.')
+    sys.stdout.flush()
     response = client.chat.completions.create(**kwargs)
     content_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
@@ -259,11 +263,13 @@ def chat_completion_wrapper(
     max_tokens: int,
     tools: list[dict] | None,
     use_stream: bool,
+    reasoning_effort: str | None = None,
 ) -> None:
     client = OpenAI(**client_kwargs)
     try:
         queue.put(chat_completion_worker(
-            client, model_name, messages, temperature, max_tokens, tools, use_stream, queue))
+            client, model_name, messages, temperature, max_tokens, tools, use_stream,
+            reasoning_effort, queue))
     except BaseException as exc:
         queue.put(exc)
 
@@ -276,6 +282,7 @@ def chat_completion(  # noqa
     max_tokens: int = 16384,
     tools: list[dict] | None = None,
     use_stream: bool = True,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     timeout = ClientKwargs.get('timeout', 300)
     mp_queue = multiprocessing.Queue()
@@ -283,7 +290,7 @@ def chat_completion(  # noqa
     process = multiprocessing.Process(
         target=chat_completion_wrapper,
         args=(mp_queue, ClientKwargs, model_name, messages,
-              temperature, max_tokens, tools, use_stream),
+              temperature, max_tokens, tools, use_stream, reasoning_effort),
     )
     process.start()
     last = None
@@ -345,10 +352,13 @@ def test_first_load(
             messages=[{'role': 'user', 'content': 'Echo "this is a test"'}],
             max_tokens=1,
             use_stream=True,
+            reasoning_effort='none',
         )
     except Exception:
         try:
             start = time.time()
+            sys.stdout.write('.')
+            sys.stdout.flush()
             client.embeddings.create(model=model_name, input='Echo "this is a test"')
             result = {'duration': time.time() - start}
         except Exception:
@@ -375,9 +385,24 @@ def test_first_load(
     )
 
 
-def chat_test(
-    client: OpenAI, model_name: str,
-        test):
+def chat_test(client: OpenAI, model_name: str, test):
+    effort = test['chat'].get('reasoning_effort')
+    effort = [effort] if effort is not None else ['none', 'low', 'medium', 'high']
+    res = None
+    for eff in effort:
+        etest = test.copy()
+        etest['chat'] = etest['chat'].copy()
+        etest['chat']['reasoning_effort'] = eff
+        res = chat_test_worker(client, model_name, etest)
+        if len(effort) > 1:
+            res.details['reasoning_effort'] = eff
+        if res.passed is True or (isinstance(res.passed, (tuple, list)) and
+                                  res.passed[0] == res.passed[1]):
+            return res
+    return res
+
+
+def chat_test_worker(client: OpenAI, model_name: str, test):
     result = chat_completion_with_usage(
         client,
         model_name,
@@ -559,6 +584,8 @@ def test_java_simple(
 def test_embedding(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
+    sys.stdout.write('.')
+    sys.stdout.flush()
     response = client.embeddings.create(
         model=model_name,
         input='The quick brown fox jumps over the lazy dog.',
@@ -750,6 +777,7 @@ def test_temperature_variation(
             model_name,
             messages=[{'role': 'user', 'content': prompt}],
             temperature=temp,
+            reasoning_effort='none',
             max_tokens=2048,
         )
         if result.get('duration') and duration is not None:
@@ -1040,23 +1068,26 @@ def run_tests(
     ollama_base_url: str,
     test_names: list[str] | None,
     save_progress: Callable[[list[tuple[TestDefinition, TestResult]]], None] | None = None,
+    raise_errors: bool = False,
 ) -> list[tuple[TestDefinition, TestResult]]:
     results = []
     for test_def in TEST_REGISTRY:
         if test_names is not None and test_def.name not in test_names:
             continue
-        sys.stderr.write(f'Running test: {test_def.name} ... ')
+        sys.stderr.write(f'Running test: {test_def.name} ')
         sys.stderr.flush()
         start = time.time()
         try:
             result = test_def.run(client, model_name, ollama_base_url)
         except Exception as exc:
             result = TestResult(passed=False, output=f'Error: {exc}')
+            if raise_errors:
+                raise
         result.version = test_def.version
         elapsed = time.time() - start
         if not result.details.get('duration', 0):
             result.details['duration'] = elapsed
-        sys.stderr.write(f'{passed_to_status(result.passed)} ({elapsed:4.2f}s)\n')
+        sys.stderr.write(f' {passed_to_status(result.passed)} ({elapsed:4.2f}s)\n')
         results.append((test_def, result))
         if save_progress:
             save_progress(results)
@@ -1344,6 +1375,9 @@ def main():  # noqa
         help='Skip checking a model if the output file already exists.',
     )
     parser.add_argument(
+        '--raise', dest='raise_errors', action='store_true',
+        help='Raise test errors for debugging')
+    parser.add_argument(
         '--missing-tests', '-m', action='store_true',
         help='Read an existing model card and run only missing tests plus first_load.',
     )
@@ -1437,7 +1471,7 @@ def main():  # noqa
                 return save_progress
 
             new_results = run_tests(client, model, ollama_base_url, run_names, save_func(
-                out_path, metadata, existing_results))
+                out_path, metadata, existing_results), args.raise_errors)
             new_by_name = {test_def.name: result for test_def, result in new_results}
             test_results = [(test_def, new_by_name.get(
                 test_def.name, existing_results.get(test_def.name)))
