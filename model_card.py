@@ -31,7 +31,7 @@ from typing import Any
 import dateutil.parser
 import requests
 import yaml
-from openai import APIStatusError, OpenAI
+from openai import OpenAI
 
 ClientKwargs = {}
 
@@ -397,7 +397,9 @@ def chat_test(client: OpenAI, model_name: str, test):
         etest['chat']['reasoning_effort'] = eff
         try:
             res = chat_test_worker(client, model_name, etest)
-        except (TimeoutError, APIStatusError):
+        except TimeoutError:
+            raise
+        except Exception:
             if best is not None:
                 return best
             raise
