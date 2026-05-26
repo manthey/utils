@@ -1259,13 +1259,17 @@ def create_summary_html(timestamp, cols, rows):
       flex: 1 1 auto;
       min-height: 0;
       overflow: auto;
-      padding: 10px;
+      padding: 0;
     }
     table {
-      border-collapse: collapse;
+      border-collapse: separate;
+      border-spacing: 0;
     }
     th, td {
-      border: 1px solid;
+      border-left: 0 transparent;
+      border-top: 0 transparent;
+      border-right: 1px solid;
+      border-bottom: 1px solid;
       padding: 0 3px;
     }
     table thead th {
@@ -1273,6 +1277,7 @@ def create_summary_html(timestamp, cols, rows):
       top: 0;
       z-index: 20;
       background-color: Canvas;
+      border-top: 1px solid;
     }
     table thead th:first-child,
     table tbody td:first-child,
@@ -1281,6 +1286,7 @@ def create_summary_html(timestamp, cols, rows):
       left: 0;
       z-index: 10;
       background-color: Canvas;
+      border-left: 1px solid;
     }
     table thead th:first-child {
       z-index: 30;
