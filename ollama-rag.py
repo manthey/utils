@@ -1336,14 +1336,20 @@ async def chat_completions(request: fastapi.Request):  # noqa
     methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
 )
 async def proxy_passthrough(request: fastapi.Request, path: str):
+    log_chat = chat_logger.getEffectiveLevel() <= logging.INFO
     async with httpx.AsyncClient(timeout=None) as client:
+        content = await request.body()
+        if log_chat and 'generate' in path:
+            chat_logger.info('request: %r', content)
         response = await client.request(
             method=request.method,
             url=f'{config.ollama_base_url}/{path}',
             headers={k: v for k, v in request.headers.items() if k.lower() != 'host'},
-            content=await request.body(),
+            content=content,
             params=request.query_params,
         )
+    if log_chat and 'generate' in path:
+        chat_logger.info('response: %r', response.content)
     return fastapi.responses.Response(
         content=response.content,
         status_code=response.status_code,
