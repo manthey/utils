@@ -1158,7 +1158,7 @@ def write_text_atomic(path: str, text: str) -> None:
 
     try:
         signal.signal(signal.SIGINT, handle_sigint)
-        with open(temp_path, 'w', encoding='utf-8') as f:
+        with open(temp_path, 'w', encoding='utf-8', newline='') as f:
             f.write(text)
             f.write('\n')
             f.flush()
@@ -1337,7 +1337,7 @@ def create_summary(summary_path, output_dir, summary):
         record = '\n'.join(sections) + '\n'
     out_path = (summary_path if os.path.dirname(summary_path) or
                 not os.path.isdir(output_dir) else os.path.join(output_dir, summary_path))
-    with open(out_path, 'w', encoding='utf-8') as f:
+    with open(out_path, 'w', encoding='utf-8', newline='') as f:
         f.write(record)
 
 
