@@ -1250,18 +1250,75 @@ def add_to_summary(summary, model, metadata, test_results):
         }
 
 
+def int_from_val(val):
+    try:
+        return int(str(val).replace(',', ''))
+    except Exception:
+        return 0
+
+
+def covered_by(model, summary):
+    mcl = max(int_from_val(model['metadata'].get('Model Context Length')),
+              int_from_val(model['metadata'].get('Context Length')))
+    me = int_from_val(model['metadata'].get('Embedding Dimensions'))
+    for check in summary['models'].values():
+        if check == model:
+            continue
+        ccl = max(int_from_val(check['metadata'].get('Model Context Length')),
+                  int_from_val(check['metadata'].get('Context Length')))
+        if mcl > ccl:
+            continue
+        if me > int_from_val(check['metadata'].get('Embedding Dimensions')):
+            continue
+        sval = []
+        stime = []
+        cval = []
+        ctime = []
+        for t in summary['tests']:
+            if t not in model['tests'] or t not in check['tests']:
+                continue
+            s = model['tests'][t].get('status', '')
+            st = model['tests'][t].get('duration', '')
+            c = check['tests'][t].get('status', '')
+            ct = check['tests'][t].get('duration', '')
+            sval.append(1 if s == 'PASSED' else 0 if s == 'Failed' else
+                        int(s.split('/')[0]) / int(s.split('/')[1]))
+            cval.append(1 if c == 'PASSED' else 0 if c == 'Failed' else
+                        int(c.split('/')[0]) / int(c.split('/')[1]))
+            stime.append(10000 if not st else float(st[:-1]))
+            ctime.append(10000 if not ct else float(ct[:-1]))
+        if any(sval[idx] == 1 and cval[idx] != 1 for idx in range(len(sval))):
+            continue
+        if not any(sval[idx] != 1 and cval[idx] == 1 for idx in range(len(sval))):
+            if any(sval[idx] > cval[idx] for idx in range(len(sval))):
+                continue
+        if any(sval[idx] == 1 and stime[idx] < ctime[idx] for idx in range(len(sval))):
+            continue
+        return check['metadata']['Name']
+    return ''
+
+
 def summary_table(summary):
     known = {t.name: t.description for t in TEST_REGISTRY}
     cols = list(summary['columns'])
     rows = []
     for t in summary['tests']:
         cols += [f'{known.get(t, t)}', 'Duration', 'Tokens']
+    cols += ['Covered']
     for model in summary['models'].values():
         row = [model['metadata'].get(col, '') for col in summary['columns']]
         for t in summary['tests']:
             tval = model['tests'].get(t, {})
             row += [tval.get('status', ''), tval.get('duration', ''), tval.get('tokens', '')]
+        row.append(covered_by(model, summary))
         rows.append(row)
+    # Get rid of columns with all identical values
+    for idx in range(len(cols) - 1, -1, -1):
+        if len({r[idx] for r in rows}) != 1 or rows[0][idx] == 'PASSED':
+            continue
+        for r in rows:
+            r[idx:idx + 1] = []
+        cols[idx:idx + 1] = []
     return cols, rows
 
 
