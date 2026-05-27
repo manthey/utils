@@ -1292,7 +1292,8 @@ def covered_by(model, summary):
         if not any(sval[idx] != 1 and cval[idx] == 1 for idx in range(len(sval))):
             if any(sval[idx] > cval[idx] for idx in range(len(sval))):
                 continue
-        if any(sval[idx] == 1 and stime[idx] < ctime[idx] for idx in range(len(sval))):
+        if any(sval[idx] == 1 and max(1, stime[idx]) * 1.5 < ctime[idx]
+               for idx in range(len(sval))):
             continue
         return check['metadata']['Name']
     return ''
