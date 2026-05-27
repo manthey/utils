@@ -473,6 +473,44 @@ def chat_test_worker(client: OpenAI, model_name: str, test):
     )
 
 
+def bash_test(client: OpenAI, model_name: str, test):
+    commands = test['bash']
+    env = os.environ.copy()
+    localenv = {str(k): str(v if v != '{model}' else model_name)
+                for k, v in test.get('env', {}).items()}
+    env.update(localenv)
+    timeout = test.get('timeout', ClientKwargs.get('timeout', 300))
+    output = ''
+    count = 0
+    details = []
+    start = time.time()
+    for command in commands:
+        command_start = time.time()
+        command = command.replace('{model}', model_name)
+        try:
+            result = subprocess.run(
+                command, shell=True, capture_output=True, text=True,
+                env=env, cwd=test.get('cwd'), timeout=timeout)
+            output = (result.stdout or '') + (result.stderr or '')
+            return_code = result.returncode
+        except subprocess.TimeoutExpired:
+            try:
+                output = (result.stdout or '') + (result.stderr or '')
+            except Exception:
+                output = ''
+            output += f'\nTimeout after {timeout} seconds'
+            return_code = None
+        details.append({'command': command, 'return_code': return_code,
+                        'duration': time.time() - command_start})
+        if return_code != 0:
+            break
+        count += 1
+    return TestResult(
+        passed=[count, len(commands)], output=output.strip(),
+        details={'commands': json.dumps(details), 'duration': time.time() - start},
+        timestamp=get_timestamp())
+
+
 @register_test('basic_question', 'Basic question answering')
 def test_basic_question(
     client: OpenAI, model_name: str, ollama_base_url: str,
@@ -1342,28 +1380,48 @@ def create_summary(summary_path, output_dir, summary):
 
 
 def load_yaml_tests():
-    path = os.path.join(os.path.dirname(__file__), 'model_card.yaml')
-    if not os.path.isfile(path):
-        return
-    tests = yaml.safe_load(open(path, encoding='utf-8').read())
+    dirname = os.path.dirname(__file__)
+    paths = [
+        os.path.join(dirname, name) for name in os.listdir(dirname)
+        if name.startswith(os.path.splitext(os.path.basename(__file__))[0]) and
+        os.path.splitext(name)[1] in {'.yml', '.yaml'} and
+        os.path.isfile(os.path.join(dirname, name))]
+    for path in sorted(paths):
+        tests = yaml.safe_load(open(path, encoding='utf-8').read())
 
-    def make_test(test):
+        def make_test(test):
 
-        def test_func(
-            client: OpenAI, model_name: str, ollama_base_url: str,
-        ) -> TestResult:
-            return chat_test(client, model_name, test['test'])
+            def test_func(
+                client: OpenAI, model_name: str, ollama_base_url: str,
+            ) -> TestResult:
+                if 'chat' in test['test']:
+                    return chat_test(client, model_name, test['test'])
+                return bash_test(client, model_name, test['test'])
 
-        register_test(test['name'], test['description'],
-                      test.get('skip', False), test.get('version', 0))(test_func)
+            register_test(test['name'], test['description'],
+                          test.get('skip', False), test.get('version', 0))(test_func)
 
-    for test in tests:
-        make_test(test)
+        for test in tests:
+            make_test(test)
 
 
 def main():  # noqa
     parser = argparse.ArgumentParser(
-        description='Generate a model card for an Ollama model.')
+        description='Generate a model card for an Ollama model.',
+        epilog='If there are files that starts with the same base name as '
+        'this source file and ends with .yml or .yaml, they can contain a '
+        'list of additional tests.  All tests have "name", "description", '
+        '"version" as an optional integer, "skip" as optional boolean, and '
+        '"test".  "test" must either have "chat" or "bash".  "chat" contains '
+        '"messages" and any other values to pass to the chat test.  The '
+        '"test" key can also contain "present" and "absent" as optional lists '
+        'of regex to match with the output of the chat.  "bash" contains a '
+        'list of bash commands or shell commands to execute in order.  The '
+        '"test" also has optional "timeout" in seconds per shell command, '
+        '"env" a dictionary of environment variables, "cwd" and optional '
+        'working directory.  The "env" values and the "bash" commands can '
+        'contain the substring "{model}" which will be replaced with the '
+        'current model name without any escaping.')
     parser.add_argument(
         'model', nargs='?',
         help='Exact model name (e.g. llama3.2:latest).  Use --models for '

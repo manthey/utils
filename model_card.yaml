@@ -9,3 +9,9 @@
       - "assert"
       - "asgiBoundServer"
       - "def "
+- name: "ollama_show_test"
+  description: "Show ollama model information"
+  version: 1
+  test:
+    bash:
+      - 'ollama show "{model}"'
