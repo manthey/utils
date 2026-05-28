@@ -879,7 +879,7 @@ def discover_ollama_registry_models(  # noqa
     context_memory: int = 32768, context_limit_gb: float | None = None,
 ) -> list[ModelInfo]:
     print('Fetching models from Ollama registry')
-    search_results = scrape_ollama_search_models('all', limit, downloads)
+    search_results = scrape_ollama_search_models('.', limit, downloads)
     print(f'Retrieved {len(search_results)} models from search')
     if name_filter:
         search_results = [
