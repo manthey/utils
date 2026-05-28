@@ -473,41 +473,75 @@ def chat_test_worker(client: OpenAI, model_name: str, test):
     )
 
 
-def bash_test(client: OpenAI, model_name: str, test):
+def bash_test(client: OpenAI, model_name: str, test):  # noqa
     commands = test['bash']
+    start_commands = test.get('start', [])
+    stop_commands = test.get('stop', [])
     env = os.environ.copy()
     localenv = {str(k): str(v if v != '{model}' else model_name)
                 for k, v in test.get('env', {}).items()}
     env.update(localenv)
     timeout = test.get('timeout', ClientKwargs.get('timeout', 300))
     output = ''
+    needed = len(commands)
     count = 0
-    details = []
+    command_details = []
+    details = {}
     start = time.time()
-    for command in commands:
-        command_start = time.time()
-        command = command.replace('{model}', model_name)
-        try:
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True,
-                env=env, cwd=test.get('cwd'), timeout=timeout)
-            output = (result.stdout or '') + (result.stderr or '')
-            return_code = result.returncode
-        except subprocess.TimeoutExpired:
+    stop = False
+    for stage, cmds in [('start', start_commands), ('main', commands), ('stop', stop_commands)]:
+        if stage != 'stop' and stop:
+            continue
+        for command in cmds:
+            command_start = time.time()
+            command = command.replace('{model}', model_name)
             try:
-                output = (result.stdout or '') + (result.stderr or '')
-            except Exception:
-                output = ''
-            output += f'\nTimeout after {timeout} seconds'
-            return_code = None
-        details.append({'command': command, 'return_code': return_code,
-                        'duration': time.time() - command_start})
-        if return_code != 0:
-            break
-        count += 1
+                result = subprocess.run(
+                    command, shell=True, capture_output=True, text=True,
+                    env=env, cwd=test.get('cwd'), timeout=timeout)
+                if stage == 'main':
+                    output = (result.stdout or '') + (result.stderr or '')
+                return_code = result.returncode
+            except subprocess.TimeoutExpired:
+                if stage == 'main':
+                    try:
+                        output = (result.stdout or '') + (result.stderr or '')
+                    except Exception:
+                        output = ''
+                    output += f'\nTimeout after {timeout} seconds'
+                return_code = None
+            if stage == 'main':
+                command_details.append({
+                    'command': command, 'return_code': return_code,
+                    'duration': time.time() - command_start})
+            if return_code != 0:
+                stop = True
+                break
+            if stage == 'main':
+                count += 1
+    answer = output if count >= needed - 1 else None
+    for exp in test.get('present', []):
+        needed += 1
+        if answer is None:
+            continue
+        found = re.search(exp, answer)
+        details[f'{exp} present'] = bool(found)
+        if bool(found):
+            count += 1
+    for exp in test.get('absent', []):
+        needed += 1
+        if answer is None:
+            continue
+        found = re.search(exp, answer)
+        details[f'{exp} absent'] = not bool(found)
+        if not bool(found):
+            count += 1
+    details.update({
+        'commands': json.dumps(command_details),
+        'duration': time.time() - start})
     return TestResult(
-        passed=[count, len(commands)], output=output.strip(),
-        details={'commands': json.dumps(details), 'duration': time.time() - start},
+        passed=[count, needed], output=output.strip(),
+        details=details,
         timestamp=get_timestamp())
 
 
@@ -1493,18 +1527,23 @@ def main():  # noqa
         description='Generate a model card for an Ollama model.',
         epilog='If there are files that starts with the same base name as '
         'this source file and ends with .yml or .yaml, they can contain a '
-        'list of additional tests.  All tests have "name", "description", '
-        '"version" as an optional integer, "skip" as optional boolean, and '
-        '"test".  "test" must either have "chat" or "bash".  "chat" contains '
-        '"messages" and any other values to pass to the chat test.  The '
-        '"test" key can also contain "present" and "absent" as optional lists '
-        'of regex to match with the output of the chat.  "bash" contains a '
-        'list of bash commands or shell commands to execute in order.  The '
+        'list of additional tests.\n'
+        'All tests have "name", "description", "version" as an optional '
+        'integer, "skip" as optional boolean, and "test".  "test" must either '
+        'have "chat" or "bash".\n"chat" contains "messages" and any other '
+        'values to pass to the chat test.\n'
+        '"bash" contains a list of bash commands or shell commands to execute '
+        'in order.  The "test" also has optional "start" and "stop" command '
+        'lists.  If a "start" command fails, the main "bash" commands are '
+        'never run.  The "stop" commands are run regardless of success. '
         '"test" also has optional "timeout" in seconds per shell command, '
         '"env" a dictionary of environment variables, "cwd" and optional '
         'working directory.  The "env" values and the "bash" commands can '
         'contain the substring "{model}" which will be replaced with the '
-        'current model name without any escaping.')
+        'current model name without any escaping.\n'
+        ' The "test" key can also contain "present" and "absent" as optional '
+        'lists of regex to match with the output of the chat or final main '
+        'bash command.')
     parser.add_argument(
         'model', nargs='?',
         help='Exact model name (e.g. llama3.2:latest).  Use --models for '
