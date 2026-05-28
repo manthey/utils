@@ -1299,19 +1299,44 @@ def covered_by(model, summary):
     return ''
 
 
-def summary_table(summary):
+def model_rank(model, summary):
+    passed = 0
+    ptime = 0
+    sval = []
+    stime = []
+    for t in summary['tests']:
+        if t not in model['tests']:
+            continue
+        s = model['tests'][t].get('status', '')
+        st = model['tests'][t].get('duration', '')
+        sval.append(1 if s == 'PASSED' else 0 if s == 'Failed' else
+                    int(s.split('/')[0]) / int(s.split('/')[1]))
+        stime.append(10000 if not st else float(st[:-1]))
+        if sval[-1] == 1:
+            passed += 1
+            ptime += stime[-1]
+    rank = (-passed, ptime, -sum(sval), sum(stime))
+    return rank
+
+
+def summary_table(summary, models):
+    models = set(models or [])
     known = {t.name: t.description for t in TEST_REGISTRY}
     cols = list(summary['columns'])
     rows = []
     for t in summary['tests']:
         cols += [f'{known.get(t, t)}', 'Duration', 'Tokens']
-    cols += ['Covered']
-    for model in summary['models'].values():
+    cols += ['Covered', 'Present', 'Rank']
+    for idx, model in enumerate([m[-1] for m in sorted([
+            (model_rank(m, summary), m['metadata']['Name'], m)
+            for m in summary['models'].values()])]):
         row = [model['metadata'].get(col, '') for col in summary['columns']]
         for t in summary['tests']:
             tval = model['tests'].get(t, {})
             row += [tval.get('status', ''), tval.get('duration', ''), tval.get('tokens', '')]
         row.append(covered_by(model, summary))
+        row.append('Yes' if model['metadata']['Name'] in models else '')
+        row.append(str(idx + 1))
         rows.append(row)
     # Get rid of columns with all identical values
     for idx in range(len(cols) - 1, -1, -1):
@@ -1412,9 +1437,9 @@ def create_summary_html(timestamp, cols, rows):
 """
 
 
-def create_summary(summary_path, output_dir, summary):
+def create_summary(summary_path, output_dir, summary, models):
     timestamp = get_timestamp()
-    cols, rows = summary_table(summary)
+    cols, rows = summary_table(summary, models)
     if summary_path.endswith('.html'):
         record = create_summary_html(timestamp, cols, rows)
     else:
@@ -1657,7 +1682,7 @@ def main():  # noqa
                 pass
     if args.summary:
         for summ in args.summary.split(','):
-            create_summary(summ, args.output, summary)
+            create_summary(summ, args.output, summary, models)
 
 
 if __name__ == '__main__':
