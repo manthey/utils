@@ -1523,6 +1523,32 @@ def load_yaml_tests():
             make_test(test)
 
 
+def sort_models(summary, output_dir, models):
+    oldlist = None
+    for summary_path in summary.split(','):
+        try:
+            out_path = (summary_path if os.path.dirname(summary_path) or
+                        not os.path.isdir(output_dir) else os.path.join(output_dir, summary_path))
+            if os.path.isfile(out_path):
+                summ = open(out_path, encoding='utf-8').read()
+                if '<tr><td>' in summ:
+                    oldlist = [r.split('</td>', 1)[0] for r in summ.split('<tr><td>')[1:]]
+                else:
+                    oldlist = [r.split(' | ', 1)[0] for r in summ.split('\n| ')[2:]]
+        except Exception:
+            pass
+        if oldlist:
+            break
+    if not oldlist:
+        return models
+    oldset = set(oldlist)
+    newlist = [record[-1] for record in sorted([
+        (-1 if m not in oldset else oldlist.index(m), idx, m)
+        for idx, m in enumerate(models)])]
+    print(newlist)
+    return newlist
+
+
 def main():  # noqa
     parser = argparse.ArgumentParser(
         description='Generate a model card for an Ollama model.',
@@ -1628,6 +1654,8 @@ def main():  # noqa
         if args.models:
             pattern = re.compile(args.models, re.IGNORECASE)
             models = [m for m in models if pattern.search(m)]
+        if args.summary:
+            models = sort_models(args.summary, args.output, models)
     else:
         models = [args.model]
     summary = {}
