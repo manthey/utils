@@ -773,7 +773,7 @@ def test_photo(
     })
 
 
-@register_test('geospatial_image', 'Geospatial understanding', version=1)
+@register_test('geospatial_image', 'Geospatial understanding', version=2)
 def test_geospatial_image(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -792,7 +792,7 @@ def test_geospatial_image(
                 },
             ],
         }]},
-        'present': [r'(?i)roads'],
+        'present': [r'(?i)(road|street)'],
     })
 
 

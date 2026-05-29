@@ -1276,7 +1276,7 @@ async def chat_completions(request: fastapi.Request):  # noqa
     body['stream'] = stream
     log_chat = chat_logger.getEffectiveLevel() <= logging.INFO
     if log_chat:
-        chat_logger.info('request: %s', json.dumps(body))
+        chat_logger.info('openai request: %s', json.dumps(body))
     if stream:
         async def generate():
             response_chunks = []
@@ -1300,7 +1300,7 @@ async def chat_completions(request: fastapi.Request):  # noqa
             finally:
                 if log_chat:
                     chat_logger.info(
-                        '%sstreaming response: %s', '' if completed else 'partial ',
+                        '%sstreaming openai response: %s', '' if completed else 'partial ',
                         json.dumps({'content': ''.join(response_chunks)}))
         return fastapi.responses.StreamingResponse(generate(), media_type='text/event-stream')
 
@@ -1322,7 +1322,7 @@ async def chat_completions(request: fastapi.Request):  # noqa
             content = (json.loads(content.decode(
                 'utf-8').split('data:', 1)[-1].strip())
                 .get('choices', [{}])[0].get('delta', {}).get('content', ''))
-            chat_logger.info('response: %s', json.dumps({'content': content}))
+            chat_logger.info('openai response: %s', json.dumps({'content': content}))
     except Exception:
         pass
     return fastapi.responses.Response(
@@ -1349,7 +1349,13 @@ async def proxy_passthrough(request: fastapi.Request, path: str):
             params=request.query_params,
         )
     if log_chat and 'generate' in path:
-        chat_logger.info('response: %r', response.content)
+        val = response.content
+        try:
+            val = json.loads(val.decode('utf-8'))
+            val.pop('context', None)
+        except Exception:
+            pass
+        chat_logger.info('response: %r', val)
     return fastapi.responses.Response(
         content=response.content,
         status_code=response.status_code,
