@@ -1010,8 +1010,9 @@ def format_metadata_table(metadata: dict[str, Any]) -> str:
 
 
 def escape_markdown(text, maxlen=None):
-    if not isinstance(text, str):
+    if isinstance(text, (int, float)):
         return text
+    text = str(text)
     if re.search(
             r'(?:[\*_`\[\]()]|[#\-=]+(?=\s|$)|[>+]|(?:\r?\n){2,}|\>\s+.*|[`]{1,3}|[\\]{1,2}|\!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\))',  # noqa
             text, re.VERBOSE | re.MULTILINE) is None:
