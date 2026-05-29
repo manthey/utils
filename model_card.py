@@ -1545,7 +1545,6 @@ def sort_models(summary, output_dir, models):
     newlist = [record[-1] for record in sorted([
         (-1 if m not in oldset else oldlist.index(m), idx, m)
         for idx, m in enumerate(models)])]
-    print(newlist)
     return newlist
 
 
@@ -1601,6 +1600,10 @@ def main():  # noqa
     parser.add_argument(
         '-x', '--skip-tests',
         help='Comma-separated list of test names to skip',
+    )
+    parser.add_argument(
+        '--remove-tests',
+        help='Comma-separated list of test names to remove',
     )
     parser.add_argument(
         '--list-tests', '-l', action='store_true',
@@ -1698,6 +1701,12 @@ def main():  # noqa
             if args.skip_tests:
                 sel_tests -= set(args.skip_tests.split(','))
             _, existing_results = load_existing_results(out_path)
+            removed = False
+            if args.remove_tests:
+                for t in args.remove_tests.split(','):
+                    if t in existing_results:
+                        existing_results.pop(t, None)
+                        removed = True
             if args.missing_tests:
                 known = {t.name: t for t in TEST_REGISTRY}
                 after = ''
@@ -1710,7 +1719,10 @@ def main():  # noqa
             sel_tests.add('first_load')
             run_names = [t.name for t in TEST_REGISTRY if t.name in sel_tests]
             if len(run_names) <= 1:
-                continue
+                if removed:
+                    run_names = []
+                else:
+                    continue
 
             def save_func(out_path, metadata, existing_results):
                 def save_progress(results):
@@ -1745,6 +1757,11 @@ def main():  # noqa
             path = os.path.join(args.output, filename)
             try:
                 metadata, results = load_existing_results(path)
+                if args.remove_tests and (set(results) & set(args.remove_tests.split(','))):
+                    sys.stderr.write(f'Removing tests from {metadata["name"]}\n')
+                    for t in args.remove_tests.split(','):
+                        results.pop(t, None)
+                    generate_report(metadata, results)
                 add_to_summary(summary, metadata['name'], metadata, results)
             except Exception:
                 pass
