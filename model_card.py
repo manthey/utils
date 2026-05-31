@@ -549,7 +549,7 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
         timestamp=get_timestamp())
 
 
-@register_test('basic_question', 'Basic question answering')
+@register_test('basic_question', 'Basic question answering', version=1)
 def test_basic_question(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -558,7 +558,7 @@ def test_basic_question(
             'role': 'user',
             'content': 'What is the capital of France? Answer with only the city name.',
         }]},
-        'present': [r'(?i)paris'],
+        'present': [r'(?i)\bparis\b'],
     })
 
 
@@ -1536,7 +1536,8 @@ def create_report(report_spec, output_dir, summary):
         sections.append(f'## {t}')
         for _, k, f in sorted((f[0][0], k, f) for k, f in found.items()):
             for _, dur, mn in f:
-                sections.append(f'- {mn} ({dur})')
+                esc_name = mn.replace('.', '\\.')
+                sections.append(f'- **{esc_name}** ({dur})')
             sections.append(escape_markdown(k, always=True).strip())
     record = '\n'.join(sections) + '\n'
     out_path = (report_path if os.path.dirname(report_path) or
