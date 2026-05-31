@@ -505,13 +505,14 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
                 if stage == 'main':
                     output = (result.stdout or '') + (result.stderr or '')
                 return_code = result.returncode
-            except subprocess.TimeoutExpired:
+            except Exception as exc:
                 if stage == 'main':
                     try:
                         output = (result.stdout or '') + (result.stderr or '')
                     except Exception:
                         output = ''
-                    output += f'\nTimeout after {timeout} seconds'
+                    if isinstance(exc, subprocess.TimeoutExpired):
+                        output += f'\nTimeout after {timeout} seconds'
                 return_code = None
             if stage == 'main':
                 command_details.append({
