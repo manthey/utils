@@ -59,9 +59,11 @@ class TestDefinition:
 TEST_REGISTRY: list[TestDefinition] = []
 
 
-def register_test(name: str, description: str, skip: bool = False, version: int = 0):
+def register_test(name: str, description: str, skip: bool | str = False, version: int = 0):
     def decorator(func: Callable[[OpenAI, str, str], TestResult]) -> Callable:
         func._version = version
+        if skip == 'always':
+            return func
         TEST_REGISTRY.append(TestDefinition(
             name=name, description=description, run=func, skip=skip, version=version,
         ))
@@ -1009,13 +1011,13 @@ def format_metadata_table(metadata: dict[str, Any]) -> str:
     return '\n'.join(lines)
 
 
-def escape_markdown(text, maxlen=None):
+def escape_markdown(text, maxlen=None, always=False):
     if isinstance(text, (int, float)):
         return text
     text = str(text)
     if re.search(
             r'(?:[\*_`\[\]()]|[#\-=]+(?=\s|$)|[>+]|(?:\r?\n){2,}|\>\s+.*|[`]{1,3}|[\\]{1,2}|\!\[[^\]]*\]\([^)]*\)|\[[^\]]*\]\([^)]*\))',  # noqa
-            text, re.VERBOSE | re.MULTILINE) is None:
+            text, re.VERBOSE | re.MULTILINE) is None and not always:
         return text
     needed = 3
     while ('`' * needed) in text:
@@ -1282,6 +1284,7 @@ def add_to_summary(summary, model, metadata, test_results):
             'status': passed_to_status(result.passed),
             'duration': f'{result.details.get("duration") or 0:4.2f}s',
             'tokens': result.usage['completion_tokens'] if result.usage else '',
+            'output': result.details.get('extracted_answer') or result.output,
         }
 
 
@@ -1497,6 +1500,47 @@ def create_summary(summary_path, output_dir, summary, models):
         f.write(record)
 
 
+def create_report(report_spec, output_dir, summary):
+    timestamp = get_timestamp()
+    sections = [
+        '# Test Report',
+        f'Generated: {timestamp}',
+        '',
+    ]
+    only = None
+    report_path = report_spec.split(',', 1)[0]
+    if ',' in report_spec:
+        only = report_path.split(',')[1:]
+    for t in summary['tests']:
+        if only and t not in only:
+            continue
+        found = {}
+        for m in summary['models'].values():
+            if t not in m['tests']:
+                continue
+            mt = m['tests'].get(t)
+            if not mt or not mt['output'] or not isinstance(mt['output'], str) or mt['status'] != 'PASSED':
+                continue
+            val = mt['output']
+            dur = mt['duration']
+            if val not in found:
+                found[val] = []
+            found[val].append((float(dur[:-1]) if dur else 9999, dur, m['metadata']['Name']))
+            found[val].sort()
+        if not len(found):
+            continue
+        sections.append(f'## {t}')
+        for _, k, f in sorted((f[0][0], k, f) for k, f in found.items()):
+            for _, dur, mn in f:
+                sections.append(f'- {mn} ({dur})')
+            sections.append(escape_markdown(k, always=True).strip())
+    record = '\n'.join(sections) + '\n'
+    out_path = (report_path if os.path.dirname(report_path) or
+                not os.path.isdir(output_dir) else os.path.join(output_dir, report_path))
+    with open(out_path, 'w', encoding='utf-8', newline='') as f:
+        f.write(record)
+
+
 def load_yaml_tests():
     dirname = os.path.dirname(__file__)
     paths = [
@@ -1626,11 +1670,11 @@ def main():  # noqa
         help='Raise test errors for debugging')
     parser.add_argument(
         '--missing-tests', '-m', action='store_true',
-        help='Read an existing model card and run only missing tests plus first_load.',
-    )
+        help='Read an existing model card and run only missing tests plus'
+        'first_load.')
     parser.add_argument(
         '--after', '--since',
-        help='Any test older than this is considered mussinb.')
+        help='Any test older than this is considered mussing.')
     parser.add_argument(
         '--summary',
         help='If specified, the name of a summary file to write.  If this '
@@ -1641,8 +1685,13 @@ def main():  # noqa
         'list for multiple summary files.',
     )
     parser.add_argument(
+        '--report',
+        help='Generate a test report in markdown format.  If a '
+        'comma-separated list, the first value is the output path and '
+        'subsequent values are the tests to include.')
+    parser.add_argument(
         '--collect', action='store_true',
-        help='Collect older model cards for the summary.',
+        help='Collect older model cards for the summary and report.',
     )
     args = parser.parse_args()
     load_yaml_tests()
@@ -1752,7 +1801,7 @@ def main():  # noqa
             sys.stdout.write(report)
         add_to_summary(summary, model, metadata, {t.name: r for t, r in test_results})
         restart_command(args.restart)
-    if args.summary and args.collect and os.path.isdir(args.output):
+    if (args.summary or args.report) and args.collect and os.path.isdir(args.output):
         for filename in os.listdir(args.output):
             path = os.path.join(args.output, filename)
             try:
@@ -1768,6 +1817,8 @@ def main():  # noqa
     if args.summary:
         for summ in args.summary.split(','):
             create_summary(summ, args.output, summary, models)
+    if args.report:
+        create_report(args.report, args.output, summary)
 
 
 if __name__ == '__main__':
