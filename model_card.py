@@ -500,7 +500,8 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
             try:
                 result = subprocess.run(
                     command, shell=True, capture_output=True, text=True,
-                    env=env, cwd=test.get('cwd'), timeout=timeout)
+                    env=env, cwd=test.get('cwd'), timeout=timeout,
+                    encoding='utf8')
                 if stage == 'main':
                     output = (result.stdout or '') + (result.stderr or '')
                 return_code = result.returncode
@@ -1519,7 +1520,9 @@ def create_report(report_spec, output_dir, summary):
             if t not in m['tests']:
                 continue
             mt = m['tests'].get(t)
-            if not mt or not mt['output'] or not isinstance(mt['output'], str) or mt['status'] != 'PASSED':
+            if (not mt or not mt['output'] or
+                    not isinstance(mt['output'], str) or
+                    mt['status'] != 'PASSED'):
                 continue
             val = mt['output']
             dur = mt['duration']
