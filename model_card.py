@@ -1557,6 +1557,15 @@ def load_yaml_tests():
         tests = yaml.safe_load(open(path, encoding='utf-8').read())
 
         def make_test(test):
+            if 'chat' in test['test'] and 'messages' in test['test']['chat']:
+                for m in test['test']['chat']['messages']:
+                    if 'append' in m:
+                        val = subprocess.check_output(m['append'], shell=True, encoding='utf8')
+                        if isinstance(val, bytes):
+                            val = val.decode()
+                        print(f'Appending {len(val)} characters')
+                        m['content'] = m.get('content', '') + val
+                        m.pop('append')
 
             def test_func(
                 client: OpenAI, model_name: str, ollama_base_url: str,
