@@ -345,11 +345,14 @@ def find_source_for_path(abs_path: str) -> tuple[SourceConfig, str] | None:
     Given an absolute path, find the owning SourceConfig and the relative
     path within that source root.
     """
+    best = None
     for src in source_configs:
         prefix = src.source_path.replace('\\', '/').rstrip('/') + '/'
         if abs_path.replace('\\', '/').startswith(prefix):
-            return src, abs_path[len(prefix):]
-    return None
+            result = src, abs_path[len(prefix):]
+            if best is None or len(result[1]) < len(best[1]):
+                best = result
+    return best
 
 
 def load_single_file_document(abs_path: str) -> Document | None:
