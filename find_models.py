@@ -447,23 +447,29 @@ def select_best_quantization(
 
 
 @cache.memoize(expire=86400)
+def fetch_models_for_tag(tag, limit: int) -> list:
+    def fetch(t=tag):
+        kwargs = {}
+        expsib = ['siblings']
+        if 'apps' in inspect.signature(huggingface_hub.list_models).parameters:
+            kwargs['apps'] = 'ollama'
+            expsib = []
+        return list(huggingface_hub.list_models(
+            filter=t,
+            # gated=False,
+            expand=['createdAt', 'lastModified', 'gguf'] + expsib,
+            sort='downloads',
+            limit=limit if limit else None,
+            **kwargs,
+        ))
+    print(f"  Fetching models with tag '{tag}'")
+    return rate_limited_call(fetch)
+
+
 def fetch_models_for_tags(tags: set[str], limit: int, downloads: int) -> list:
     all_models = []
     for tag in tags:
-        def fetch(t=tag):
-            kwargs = {}
-            if 'apps' in inspect.signature(huggingface_hub.list_models).parameters:
-                kwargs['apps'] = 'ollama'
-            return list(huggingface_hub.list_models(
-                filter=t,
-                # gated=False,
-                expand=['siblings', 'createdAt', 'lastModified', 'gguf'],
-                sort='downloads',
-                limit=limit if limit else None,
-                **kwargs,
-            ))
-        print(f"  Fetching models with tag '{tag}'")
-        all_models.extend(rate_limited_call(fetch))
+        all_models.extend(fetch_models_for_tag(tag, limit))
     seen = set()
     unique = []
     for m in all_models:
@@ -486,10 +492,11 @@ def discover_models(  # noqa
             tags |= MODEL_PATTERNS[key]['tags']
     found_models = fetch_models_for_tags(tags, limit, downloads)
     print(f'Retrieved {len(found_models)} candidate models')
+    all_gguf = 'apps' in inspect.signature(huggingface_hub.list_models).parameters
     with_gguf = [
         m for m in found_models
         if (not name_filter or re.search(name_filter, m.id, re.IGNORECASE)) and
-        has_gguf_files(getattr(m, 'siblings', None))
+        (all_gguf or has_gguf_files(getattr(m, 'siblings', None)))
     ]
     discovered = {}
     skipped_name_mismatch = 0
