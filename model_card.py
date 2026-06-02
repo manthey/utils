@@ -541,6 +541,7 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
         if not bool(found):
             count += 1
     details.update({
+        'extracted_answer': re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', output.strip()),
         'commands': json.dumps(command_details),
         'duration': time.time() - start})
     return TestResult(
