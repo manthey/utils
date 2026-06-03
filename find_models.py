@@ -41,6 +41,7 @@ class ModelArchParams:
     num_kv_heads: int | None
     head_dim: int | None
     context_length: int | None
+    embedding_length: int | None
 
 
 @dataclass
@@ -299,6 +300,7 @@ def arch_params_from_config_json(config: dict, param_count_hint: int | None) -> 
     num_kv_heads = first_match(r'num_key_value_heads|n_head_kv|num_kv_heads') or num_attention_heads
     hidden_size = first_match(r'hidden_size|d_model|n_embd|model_dim')
     context_length = first_match(r'max_position_embeddings|max_seq_len|seq_length|n_positions')
+    embedding_length = first_match(r'embedding_length')
     head_dim = hidden_size // num_attention_heads if hidden_size and num_attention_heads else None
     return ModelArchParams(
         param_count=param_count_hint,
@@ -306,6 +308,7 @@ def arch_params_from_config_json(config: dict, param_count_hint: int | None) -> 
         num_kv_heads=num_kv_heads,
         head_dim=head_dim,
         context_length=context_length,
+        embedding_length=embedding_length,
     )
 
 
@@ -318,6 +321,7 @@ def arch_params_from_ollama_model_info(model_info: dict) -> ModelArchParams:
         r'.+\.embedding_length': 'embedding_length',
         r'.+\.context_length': 'context_length',
         r'.+\.parameter_count': 'param_count',
+        r'.+\.attention\.key_length': 'head_dim',
     }
     gathered = {}
     for key, value in model_info.items():
@@ -332,13 +336,16 @@ def arch_params_from_ollama_model_info(model_info: dict) -> ModelArchParams:
                 break
     head_count = gathered.pop('head_count', None)
     embedding_length = gathered.pop('embedding_length', None)
-    head_dim = embedding_length // head_count if embedding_length and head_count else None
+    head_dim = gathered.pop(
+        'head_dim',
+        embedding_length // head_count if embedding_length and head_count else None)
     return ModelArchParams(
         param_count=gathered.get('param_count'),
         num_layers=gathered.get('num_layers'),
         num_kv_heads=gathered.get('num_kv_heads'),
         head_dim=head_dim,
         context_length=gathered.get('context_length'),
+        embedding_length=embedding_length,
     )
 
 
@@ -388,17 +395,20 @@ def extract_capabilities_from_ollama(show_response: dict) -> dict:
 def compute_memory_burden_gb(
     arch: ModelArchParams, quantization: str, requested_context: int,
 ) -> float | None:
-    bits_per_weight = QUANT_PRIORITY_BITS.get(quantization, (0, 16.0))[1]
+    bits_per_weight = QUANT_PRIORITY_BITS.get(quantization, (0, 16))[1]
     if bits_per_weight is None or arch is None or arch.param_count is None:
         return None
-    weights_bytes = (arch.param_count * bits_per_weight) / 8.0
+    weights_bytes = (arch.param_count * bits_per_weight) / 8
     effective_context = requested_context
     if arch.context_length is not None:
         effective_context = min(requested_context, arch.context_length)
-    kv_bytes = 0.0
+    kv_bytes = 0
     if arch.num_layers is not None and arch.num_kv_heads is not None and arch.head_dim is not None:
-        kv_bytes = 4.0 * arch.num_layers * arch.num_kv_heads * arch.head_dim * effective_context
-    return (weights_bytes + kv_bytes) / (1024.0 ** 3)
+        kv_bytes = 4 * arch.num_layers * arch.num_kv_heads * arch.head_dim * effective_context
+    embed_bytes = 0
+    if arch.embedding_length:
+        embed_bytes = 2 * effective_context * arch.embedding_length * 4
+    return (weights_bytes + kv_bytes + embed_bytes) / (1024 ** 3)
 
 
 @cache.memoize(expire=86400 * 10)
@@ -540,6 +550,7 @@ def discover_models(  # noqa
                 param_count=arch.param_count, num_layers=arch.num_layers,
                 num_kv_heads=arch.num_kv_heads, head_dim=arch.head_dim,
                 context_length=hf_context_length,
+                embedding_length=arch.embedding_length,
             )
         if arch.num_layers is None or arch.num_kv_heads is None or arch.head_dim is None:
             gguf_candidate = next((f for f, _, chunked in gguf_files if not chunked), None)
@@ -553,6 +564,7 @@ def discover_models(  # noqa
                         num_kv_heads=arch.num_kv_heads or gguf_arch.num_kv_heads,
                         head_dim=arch.head_dim or gguf_arch.head_dim,
                         context_length=arch.context_length or gguf_arch.context_length,
+                        embedding_length=arch.embedding_length or gguf_arch.embedding_length,
                     )
         candidates = []
         quants = {}
@@ -962,6 +974,7 @@ def discover_ollama_registry_models(  # noqa
                     param_count=None, num_layers=None,
                     num_kv_heads=None, head_dim=None,
                     context_length=context_size,
+                    embedding_length=None,
                 ),
                 memory_burden_gb=None,
                 has_tools=caps['has_tools'],
