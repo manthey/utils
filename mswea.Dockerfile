@@ -34,6 +34,8 @@ RUN apt-get update && \
       libfuse2 \
       libldap2-dev \
       libsasl2-dev \
+      # geojs convenience \
+      imagemagick \
       # developer convenience \
       bzip2 \
       dirmngr \
@@ -47,9 +49,6 @@ RUN apt-get update && \
       # testing \
       redis \
       rabbitmq-server \
-      # testing convenience \
-      fonts-dejavu \
-      libmagic-dev \
       # tools \
       jq \
       shellcheck \
