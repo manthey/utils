@@ -137,7 +137,8 @@ EOF
 
 RUN chmod a+x /home/ubuntu/.local/bin/start_services.sh
 RUN uv tool install tox && \
-    uv tool install pre-commit
+    uv tool install pre-commit && \
+    uv tool install mini-swe-agent
 RUN git config --global user.name "Container" && \
     git config --global user.email "container@example.com"
 RUN uvx mini-swe-agent --help
