@@ -1316,12 +1316,12 @@ def covered_by(model, summary):
         cval = []
         ctime = []
         for t in summary['tests']:
-            if t not in model['tests'] or t not in check['tests']:
+            if t not in model['tests']:
                 continue
             s = model['tests'][t].get('status', '')
             st = model['tests'][t].get('duration', '')
-            c = check['tests'][t].get('status', '')
-            ct = check['tests'][t].get('duration', '')
+            c = check['tests'].get(t, {}).get('status', 'Failed')
+            ct = check['tests'].get(t, {}).get('duration', '')
             sval.append(1 if s == 'PASSED' else 0 if s == 'Failed' else
                         int(s.split('/')[0]) / int(s.split('/')[1]))
             cval.append(1 if c == 'PASSED' else 0 if c == 'Failed' else
@@ -1347,6 +1347,8 @@ def model_rank(model, summary):
     stime = []
     for t in summary['tests']:
         if t not in model['tests']:
+            sval.append(0)
+            stime.append(10000)
             continue
         s = model['tests'][t].get('status', '')
         st = model['tests'][t].get('duration', '')
