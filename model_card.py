@@ -635,8 +635,8 @@ def test_code_editing(
         'complete files.')
     src = open(os.path.realpath(__file__), encoding='utf-8').read()
     prompt += (
-        f'\n\n##### File: {os.path.basename(__file__)}\n```python\n' +
-        src.replace('```', '\\`\\`\\`').strip() + '\n```\n')
+        f'\n\n##### File: {os.path.basename(__file__)}\n```' + '`python\n' +
+        src.strip() + '\n`' + '```\n')
     return chat_test(client, model_name, {
         'chat': {'messages': [
             {'role': 'system', 'content': system_prompt},
