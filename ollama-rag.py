@@ -1320,14 +1320,13 @@ async def chat_completions(request: fastapi.Request):  # noqa
             return response.content, response.status_code, dict(response.headers)
 
     content, status_code, headers = await asyncio.to_thread(fetch)
-    try:
-        if log_chat:
-            content = (json.loads(content.decode(
-                'utf-8').split('data:', 1)[-1].strip())
-                .get('choices', [{}])[0].get('delta', {}).get('content', ''))
-            chat_logger.info('openai response: %s', json.dumps({'content': content}))
-    except Exception:
-        pass
+    if log_chat:
+        try:
+            val = json.loads(content.decode('utf-8').split('data:', 1)[-1].strip())
+            val = val.get('choices', [{}])[0].get('message', '')
+            chat_logger.info('openai response: %s', json.dumps({'content': val}))
+        except Exception:
+            pass
     return fastapi.responses.Response(
         content=content, status_code=status_code,
         headers=strip_hop_by_hop_headers(headers),
