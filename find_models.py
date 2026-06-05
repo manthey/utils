@@ -142,7 +142,7 @@ MODEL_PATTERNS = {
     'geo': {
         'tags': {
             'geospatial', 'earth-observation', 'image-feature-extraction',
-            'zero-shot-image-classification', 'image-classification'},
+            'zero-shot-image-classification', 'image-classification', 'gis'},
         'patterns': {
             r'geo', r'extract', r'path',
         }},
