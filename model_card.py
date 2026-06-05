@@ -511,6 +511,8 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
                         output = (result.stdout or '') + (result.stderr or '')
                     except Exception:
                         output = ''
+                    if len(output) > 65536:
+                        output = output[:32768] + '\n...\n' + output[-32768:]
                     if isinstance(exc, subprocess.TimeoutExpired):
                         output += f'\nTimeout after {timeout} seconds'
                 return_code = None
