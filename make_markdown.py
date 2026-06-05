@@ -62,8 +62,11 @@ def expand_paths(paths, exclude_paths):
             if os.path.isfile(p) and ((is_git_tracked(p) and not is_binary(p)) or p in paths)]
 
 
-def escape_backticks(content):
-    return content.replace('```', r'\`\`\`')
+def backtick_fence(content):
+    needed = 3
+    while ('`' * needed) in content:
+        needed += 1
+    return '`' * needed
 
 
 def main():
@@ -73,17 +76,14 @@ def main():
     parser.add_argument('-x', '--exclude', action='append', default=[],
                         help='Exclude paths and globs')
     args = parser.parse_args()
-
     for path in expand_paths(args.paths, args.exclude):
         ext = os.path.splitext(path)[1]
         lang = LANGUAGE_MAP.get(ext, ext[1:])
-
         print(f'##### File: {path}')
-        print(f'```{lang}')
         with open(path, encoding='utf8') as f:
-            content = f.read()
-            print(escape_backticks(content).rstrip())
-        print('```')
+            contents = f.read()
+            fence = backtick_fence(contents)
+            print(f'{fence}{lang}\n{contents}\n{fence}')
 
 
 if __name__ == '__main__':
