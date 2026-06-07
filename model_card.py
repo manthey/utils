@@ -1720,6 +1720,8 @@ def main():  # noqa
         sys.exit(0)
     restart_command(args.restart)
     ollama_base_url = args.base_url.rstrip('/')
+    if args.remove_tests and not args.tests:
+        args.tests = 'skip_all_tests'
     if not args.model or args.models is not None:
         models = list_models(ollama_base_url)
         if args.models:

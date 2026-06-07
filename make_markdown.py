@@ -83,6 +83,8 @@ def main():
         with open(path, encoding='utf8') as f:
             contents = f.read()
             fence = backtick_fence(contents)
+            if contents[-1:] == '\n':
+                contents = contents[:-1]
             print(f'{fence}{lang}\n{contents}\n{fence}')
 
 

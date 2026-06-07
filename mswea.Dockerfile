@@ -161,7 +161,7 @@ index 75785585..2bc38592 100644
      """Stop agent after this many seconds of wall-clock time. 0 means no limit."""
      output_path: Path | None = None
      """Save the trajectory to this path."""
-+    format_error_limit: int = 0
++    format_error_limit: int = 10
 
 
  class DefaultAgent:
@@ -204,7 +204,7 @@ MSWEA_CONFIGURED="true"
 MSWEA_MODEL_NAME="ollama/qwen2.5-coder:14b"
 MSWEA_COST_TRACKING="ignore_errors"
 MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT="10"
-MSWEA_MODEL_FORMAT_ERROR_LIMIT="10"
+MSWEA_AGENT_FORMAT_ERROR_LIMIT="7"
 LITELLM_REQUEST_TIMEOUT="300000"
 OLLAMA_API_BASE=http://host.docker.internal:11434
 OPENAI_API_BASE=http://host.docker.internal:11434/v1
