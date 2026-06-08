@@ -33,6 +33,7 @@ RUN apt-get update && \
       libfuse2 \
       libldap2-dev \
       libsasl2-dev \
+      pandoc \
       # geojs convenience \
       imagemagick \
       # developer convenience \
@@ -48,6 +49,7 @@ RUN apt-get update && \
       # testing \
       redis \
       rabbitmq-server \
+      memcached \
       # tools \
       jq \
       shellcheck \
@@ -134,6 +136,7 @@ mkdir -p /tmp/db
 nohup redis-server --bind 0.0.0.0 >/tmp/redis.log 2>&1 &
 nohup mongod --noauth --bind_ip_all --dbpath=/tmp/db >/tmp/mongo.log 2>&1 &
 nohup rabbitmq-server >/tmp/rabbitmq.log 2>&1 &
+nphup memcached -d >/tmp/memcached.log 2>&1 &
 EOF
 
 RUN chmod a+x /home/ubuntu/.local/bin/start_services.sh
@@ -142,7 +145,6 @@ RUN uv tool install tox && \
 RUN git config --global user.name "Container" && \
     git config --global user.email "container@example.com"
 RUN uvx mini-swe-agent --help
-RUN find /home/ubuntu -xdev -name mini_textbased.yaml -exec cp {} /home/ubuntu/.config/mini-swe-agent/mini.yaml \;
 RUN cat <<'EOF' > /tmp/diff.txt
 diff --git a/src/minisweagent/agents/default.py b/src/minisweagent/agents/default.py
 index 75785585..2bc38592 100644
@@ -161,7 +163,7 @@ index 75785585..2bc38592 100644
      """Stop agent after this many seconds of wall-clock time. 0 means no limit."""
      output_path: Path | None = None
      """Save the trajectory to this path."""
-+    format_error_limit: int = 10
++    format_error_limit: int = 0
 
 
  class DefaultAgent:
@@ -199,12 +201,12 @@ index 75785585..2bc38592 100644
 EOF
 
 RUN find /home/ubuntu/. -name minisweagent -exec patch {}/agents/default.py /tmp/diff.txt \;
+RUN find /home/ubuntu -xdev -name mini_textbased.yaml -exec cp {} /home/ubuntu/.config/mini-swe-agent/mini.yaml \;
 RUN cat <<'EOF' > /home/ubuntu/.config/mini-swe-agent/.env
 MSWEA_CONFIGURED="true"
 MSWEA_MODEL_NAME="ollama/qwen2.5-coder:14b"
 MSWEA_COST_TRACKING="ignore_errors"
 MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT="10"
-MSWEA_AGENT_FORMAT_ERROR_LIMIT="7"
 LITELLM_REQUEST_TIMEOUT="300000"
 OLLAMA_API_BASE=http://host.docker.internal:11434
 OPENAI_API_BASE=http://host.docker.internal:11434/v1
