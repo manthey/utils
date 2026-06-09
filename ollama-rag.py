@@ -114,6 +114,7 @@ class SourceConfig:
         exclude: str, git_extensions: str, dir_suffixes: str,
     ):
         self.source_path = os.path.abspath(source_path)
+        self.is_file = os.path.isfile(self.source_path)
         self.source_type = source_type
         self.source_sub_path = source_sub_path
         self.exclude = exclude
@@ -221,6 +222,8 @@ def list_paths(
 
 
 def is_git_source(src: SourceConfig) -> bool:
+    if src.is_file:
+        return False
     return src.source_type == 'git' or (
         src.source_type == 'auto' and
         os.path.exists(os.path.join(src.source_path, '.git'))
@@ -228,6 +231,12 @@ def is_git_source(src: SourceConfig) -> bool:
 
 
 def current_file_hashes_for_source(src: SourceConfig) -> dict[str, str]:
+    if src.is_file:
+        p = Path(src.source_path)
+        if not p.is_file():
+            return {}
+        with open(p, 'rb') as fptr:
+            return {src.source_path: hashlib.file_digest(fptr, 'sha256').hexdigest()}
     if is_git_source(src):
         extensions = [e.strip() for e in src.git_extensions.split(',')]
         return {
@@ -347,6 +356,12 @@ def find_source_for_path(abs_path: str) -> tuple[SourceConfig, str] | None:
     """
     best = None
     for src in source_configs:
+        if src.is_file:
+            if os.path.abspath(abs_path) == src.source_path:
+                result = src, os.path.basename(src.source_path)
+                if best is None or len(result[1]) < len(best[1]):
+                    best = result
+            continue
         prefix = src.source_path.replace('\\', '/').rstrip('/') + '/'
         if abs_path.replace('\\', '/').startswith(prefix):
             result = src, abs_path[len(prefix):]
@@ -371,7 +386,7 @@ def load_single_file_document(abs_path: str) -> Document | None:
             })
         except Exception:
             return None
-    p = Path(src.source_path) / rel_path
+    p = Path(src.source_path) if src.is_file else Path(src.source_path) / rel_path
     if not p.is_file():
         return None
     try:
@@ -778,6 +793,8 @@ def build_collection_for_source(src: SourceConfig) -> chromadb.Collection:
 
 
 def source_unavailable(src: SourceConfig) -> bool:
+    if src.is_file:
+        return not Path(src.source_path).is_file()
     if is_git_source(src):
         try:
             git.Repo(src.source_path)
@@ -1597,9 +1614,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         sub.add_argument(
             '--source-path', '-s',
             action='append', default=None,
-            help='The root of a git repo or document directory to embed.  '
-            'Can be specified multiple times to index multiple sources '
-            'into separate collections that are queried together.',
+            help='The root of a git repo, document directory, or single file '
+            'to embed.  Can be specified multiple times to index multiple '
+            'sources into separate collections that are queried together.',
         )
         sub.add_argument(
             '--source-sub-path',
