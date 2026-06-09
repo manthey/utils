@@ -43,6 +43,7 @@ RUN apt-get update && \
       less \
       locales \
       vim \
+      telnet \
       # testing convenience \
       fonts-dejavu \
       libmagic-dev \
@@ -136,7 +137,7 @@ mkdir -p /tmp/db
 nohup redis-server --bind 0.0.0.0 >/tmp/redis.log 2>&1 &
 nohup mongod --noauth --bind_ip_all --dbpath=/tmp/db >/tmp/mongo.log 2>&1 &
 nohup rabbitmq-server >/tmp/rabbitmq.log 2>&1 &
-nphup memcached -d >/tmp/memcached.log 2>&1 &
+nohup memcached -d >/tmp/memcached.log 2>&1 &
 EOF
 
 RUN chmod a+x /home/ubuntu/.local/bin/start_services.sh
