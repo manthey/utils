@@ -373,6 +373,10 @@ def test_first_load(
     for model in ps['models']:
         if model['name'] == model_name:
             found = model
+    if not found:
+        for model in ps['models']:
+            if model['name'].startswith(model_name):
+                found = model
     return TestResult(
         passed=True, output=ps,
         metadata={
