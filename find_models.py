@@ -153,7 +153,7 @@ def rate_limited_call(func, max_retries=8, base_delay=5):
     for attempt in range(max_retries):
         try:
             return func()
-        except huggingface_hub.utils.HfHubHTTPError as e:
+        except (urllib.error.HTTPError, huggingface_hub.utils.HfHubHTTPError) as e:
             if '429' in str(e) or 'rate limit' in str(e).lower():
                 delay = base_delay * (2 ** attempt)
                 print(f'  Rate limited. Waiting {delay}s (attempt {attempt + 1}/{max_retries})')
@@ -789,10 +789,11 @@ def parse_context_text(text: str) -> int | None:
 
 @cache.memoize(expire=86400)
 def fetch_ollama_search_page(page: int, query: str) -> str:
-    print(f'  Fetching search page {page}')
+    sys.stdout.write(f'  Fetching search page {page}\r')
+    sys.stdout.flush()
     url = f'https://ollama.com/search?page={page}&q={query}'
     req = urllib.request.Request(url, headers=OLLAMA_HTMX_HEADERS)
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    with rate_limited_call(lambda: urllib.request.urlopen(req, timeout=30)) as resp:
         return resp.read().decode('utf-8', errors='replace')
 
 

@@ -51,7 +51,7 @@ class TestResult:
 class TestDefinition:
     name: str
     description: str
-    skip: bool
+    skip: bool | str
     version: int
     run: Callable[[OpenAI, str, str], TestResult]
 
