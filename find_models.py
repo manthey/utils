@@ -464,14 +464,21 @@ def fetch_models_for_tag(tag, limit: int) -> list:
         if 'apps' in inspect.signature(huggingface_hub.list_models).parameters:
             kwargs['apps'] = 'ollama'
             expsib = []
-        return list(huggingface_hub.list_models(
+        models = []
+        for m in huggingface_hub.list_models(
             filter=t,
             # gated=False,
             expand=['createdAt', 'lastModified', 'gguf'] + expsib,
             sort='downloads',
             limit=limit if limit else None,
             **kwargs,
-        ))
+        ):
+            models.append(argparse.Namespace(**{k: getattr(m, k) for k in {
+                'author', 'card_data', 'config', 'created_at', 'downloads',
+                'gated', 'gguf', 'id', 'last_modified', 'siblings', 'tags',
+            } if hasattr(m, k)}))
+        return models
+
     print(f"  Fetching models with tag '{tag}'")
     return rate_limited_call(fetch)
 
