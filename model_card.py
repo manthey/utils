@@ -62,8 +62,6 @@ TEST_REGISTRY: list[TestDefinition] = []
 def register_test(name: str, description: str, skip: bool | str = False, version: int = 0):
     def decorator(func: Callable[[OpenAI, str, str], TestResult]) -> Callable:
         func._version = version
-        if skip == 'always':
-            return func
         TEST_REGISTRY.append(TestDefinition(
             name=name, description=description, run=func, skip=skip, version=version,
         ))
@@ -1720,6 +1718,8 @@ def main():  # noqa
     load_yaml_tests()
     if args.list_tests:
         for t in TEST_REGISTRY:
+            if t.skip == 'always':
+                continue
             sys.stdout.write(f'{t.name:25s} {t.description}{" (skip)" if t.skip else ""}\n')
         sys.exit(0)
     restart_command(args.restart)
@@ -1769,7 +1769,7 @@ def main():  # noqa
             client = OpenAI(**ClientKwargs)
             sel_tests = set(args.tests.split(',')) if args.tests else set()
             if 'all' in sel_tests:
-                sel_tests = {t.name for t in TEST_REGISTRY}
+                sel_tests = {t.name for t in TEST_REGISTRY if t.skip != 'always'}
             if 'default' in sel_tests or not args.tests:
                 sel_tests |= {t.name for t in TEST_REGISTRY if not t.skip}
             if args.skip_tests:
