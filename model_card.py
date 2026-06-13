@@ -805,6 +805,37 @@ def test_geospatial_image(
     })
 
 
+@register_test('geospatial_analysis', 'Image description for tools', version=2)
+def test_geospatial_analysis(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    img = base64.b64encode(open(os.path.join(os.path.dirname(
+        __file__), 'model_card_test_image3.jpg'), 'rb').read()).decode('utf-8')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [{
+            'role': 'system',
+            'content': [{
+                'type': 'text',
+                'text': 'You are an image analyst who describes images so that '
+                'other tools know their contents.  You never use emojis, slang, '
+                'or metaphors.',
+            }],
+        }, {
+            'role': 'user',
+            'content': [{
+                'type': 'text',
+                'text': 'Provide a complete and detailed description of the '
+                'image in markdown format.  This may be a reduced scale '
+                'version of the original image.',
+            }, {
+                'type': 'image_url',
+                'image_url': {'url': f'data:image/jpeg;base64,{img}'},
+            }],
+        }]},
+        'present': [r'(?i)(road|street)', r'(?i)(building|house)'],
+    })
+
+
 @register_test('tool_use', 'Tool use')
 def test_tool_use(
     client: OpenAI, model_name: str, ollama_base_url: str,
