@@ -805,7 +805,7 @@ def test_geospatial_image(
     })
 
 
-@register_test('geospatial_analysis', 'Image description for tools', version=2)
+@register_test('geospatial_analysis', 'Geospatial image description for tools', version=2)
 def test_geospatial_analysis(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:

@@ -146,62 +146,7 @@ RUN uv tool install tox && \
 RUN git config --global user.name "Container" && \
     git config --global user.email "container@example.com"
 RUN uvx mini-swe-agent --help
-RUN cat <<'EOF' > /tmp/diff.txt
-diff --git a/src/minisweagent/agents/default.py b/src/minisweagent/agents/default.py
-index 75785585..2bc38592 100644
---- a/src/minisweagent/agents/default.py
-+++ b/src/minisweagent/agents/default.py
-@@ -12,7 +12,7 @@ from jinja2 import StrictUndefined, Template
- from pydantic import BaseModel
 
- from minisweagent import Environment, Model, __version__
--from minisweagent.exceptions import InterruptAgentFlow, LimitsExceeded, TimeExceeded
-+from minisweagent.exceptions import InterruptAgentFlow, LimitsExceeded, TimeExceeded, FormatError
- from minisweagent.utils.serialize import recursive_merge
-
-
-@@ -31,6 +31,7 @@ class AgentConfig(BaseModel):
-     """Stop agent after this many seconds of wall-clock time. 0 means no limit."""
-     output_path: Path | None = None
-     """Save the trajectory to this path."""
-+    format_error_limit: int = 0
-
-
- class DefaultAgent:
-@@ -44,6 +45,7 @@ class DefaultAgent:
-         self.logger = logging.getLogger("agent")
-         self.cost = 0.0
-         self.n_calls = 0
-+        self.format_errors = 0
-         self._start_time = time.time()
-
-     def get_template_vars(self, **kwargs) -> dict:
-@@ -110,7 +112,7 @@ class DefaultAgent:
-
-     def query(self) -> dict:
-         """Query the model and return model messages. Override to add hooks."""
--        if 0 < self.config.step_limit <= self.n_calls or 0 < self.config.cost_limit <= self.cost:
-+        if 0 < self.config.step_limit <= self.n_calls or 0 < self.config.cost_limit <= self.cost or 0 < self.config.format_error_limit <= self.format_errors:
-             raise LimitsExceeded(
-                 {
-                     "role": "exit",
-@@ -127,7 +129,12 @@ class DefaultAgent:
-                 }
-             )
-         self.n_calls += 1
--        message = self.model.query(self.messages)
-+        try:
-+            message = self.model.query(self.messages)
-+        except FormatError:
-+            self.format_errors += 1
-+            raise
-+        self.format_errors = 0
-         self.cost += message.get("extra", {}).get("cost", 0.0)
-         self.add_messages(message)
-         return message
-EOF
-
-RUN find /home/ubuntu/. -name minisweagent -exec patch {}/agents/default.py /tmp/diff.txt \;
 RUN find /home/ubuntu -xdev -name mini_textbased.yaml -exec cp {} /home/ubuntu/.config/mini-swe-agent/mini.yaml \;
 RUN cat <<'EOF' > /home/ubuntu/.config/mini-swe-agent/.env
 MSWEA_CONFIGURED="true"

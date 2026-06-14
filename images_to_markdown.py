@@ -4,7 +4,9 @@
 # dependencies = [
 #   'pillow',
 #   'openai',
-#   'large-image[sources]',
+#   'large-image[sources]; sys_platform == "linux"',
+#   'large-image[common]; sys_platform == "win32" or sys_platform == "darwin"',
+#   'large-image[pil]; sys_platform == "android"',
 # ]
 # ///
 
