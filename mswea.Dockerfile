@@ -51,6 +51,10 @@ RUN apt-get update && \
       redis \
       rabbitmq-server \
       memcached \
+      openjdk-17-jdk \
+      android-sdk-platform-tools \
+      maven \
+      gradle \
       # tools \
       jq \
       shellcheck \
