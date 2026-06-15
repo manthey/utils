@@ -391,6 +391,16 @@ def test_first_load(
     )
 
 
+def result_passed(result: TestResult):
+    return result.passed is True or (
+        isinstance(result.passed, (tuple, list)) and result.passed[0] == result.passed[1])
+
+
+def result_complete_fail(result: TestResult):
+    return result.passed is False or (
+        isinstance(result.passed, (tuple, list)) and result.passed[0] == 0)
+
+
 def chat_test(client: OpenAI, model_name: str, test):
     effort = test['chat'].get('reasoning_effort')
     effort = [effort] if effort is not None else ['none', 'low', 'medium', 'high']
@@ -409,8 +419,7 @@ def chat_test(client: OpenAI, model_name: str, test):
             raise
         if len(effort) > 1:
             res.details['reasoning_effort'] = eff
-        if res.passed is True or (isinstance(res.passed, (tuple, list)) and
-                                  res.passed[0] == res.passed[1]):
+        if result_passed(res):
             return res
         best = best or res
         if (isinstance(best.passed, (tuple, list)) and isinstance(res.passed, (tuple, list)) and
@@ -1213,6 +1222,7 @@ def run_tests(
     test_names: list[str] | None,
     save_progress: Callable[[list[tuple[TestDefinition, TestResult]]], None] | None = None,
     raise_errors: bool = False,
+    require_first_load: bool = False,
 ) -> list[tuple[TestDefinition, TestResult]]:
     results = []
     for test_def in TEST_REGISTRY:
@@ -1226,6 +1236,8 @@ def run_tests(
         except Exception as exc:
             result = TestResult(passed=False, output=f'Error: {exc}',
                                 timestamp=get_timestamp())
+            if test_def.name == 'first_load' and require_first_load:
+                return None
             if raise_errors:
                 raise
         result.version = test_def.version
@@ -1669,61 +1681,59 @@ def main():  # noqa
     parser.add_argument(
         'model', nargs='?',
         help='Exact model name (e.g. llama3.2:latest).  Use --models for '
-        'filtering by regex.',
-    )
+        'filtering by regex.')
     parser.add_argument(
         '--models',
         help='If specified, run on all models that match this regex. Use an '
-        'empty string to match all of them.',
-    )
+        'empty string to match all of them.')
     parser.add_argument(
-        '--restart', help='Shell command to run between models',
-    )
+        '--restart', help='Shell command to run between models')
     parser.add_argument(
         '--base-url',
         default='http://localhost:11434',
-        help='Ollama server base URL (default: http://localhost:11434)',
-    )
+        help='Ollama server base URL (default: http://localhost:11434)')
     parser.add_argument(
-        '-o', '--output', help='Output file path (default: stdout) or directory',
-    )
+        '-o', '--output', help='Output file path (default: stdout) or directory')
     parser.add_argument(
         '-t', '--tests',
         help='Comma-separated list of test names to run.  Defaults to all '
         'tests not marked "skip".  Add "all" to include all tests, "default" '
-        'to include the non-skip tests.',
-    )
+        'to include the non-skip tests.')
     parser.add_argument(
         '-x', '--skip-tests',
-        help='Comma-separated list of test names to skip',
-    )
+        help='Comma-separated list of test names to skip')
     parser.add_argument(
         '--remove-tests',
-        help='Comma-separated list of test names to remove',
-    )
+        help='Comma-separated list of test names to remove')
     parser.add_argument(
         '--list-tests', '-l', action='store_true',
-        help='List available tests and exit',
-    )
+        help='List available tests and exit')
     parser.add_argument(
         '--metadata-only', action='store_true',
-        help='Collect metadata only, skip all tests',
-    )
+        help='Collect metadata only, skip all tests')
     parser.add_argument(
         '--timeout', type=float, default=300,
-        help='Per-request timeout in seconds (default: 300)',
-    )
+        help='Per-request timeout in seconds (default: 300)')
     parser.add_argument(
         '--skip', '-s', action='store_true',
-        help='Skip checking a model if the output file already exists.',
-    )
+        help='Skip checking a model if the output file already exists.')
     parser.add_argument(
         '--raise', dest='raise_errors', action='store_true',
         help='Raise test errors for debugging')
     parser.add_argument(
-        '--missing-tests', '-m', action='store_true',
+        '--missing-tests', '--missing', '-m', action='store_true',
         help='Read an existing model card and run only missing tests plus'
         'first_load.')
+    parser.add_argument(
+        '--failed-tests', '--failed', '-f',
+        choices={'false', 'partial', 'full'},
+        help='Read an existing model card and run only failed tests plus'
+        'first_load.  Using "full" will only rerun tests with no partial '
+        'success.')
+    parser.add_argument(
+        '--require-first-load', '-r', action='store_true',
+        help='If the first load fails, do not write a model card or proceed '
+        'with other tests.')
     parser.add_argument(
         '--after', '--since',
         help='Any test older than this is considered mussing.')
@@ -1734,8 +1744,7 @@ def main():  # noqa
         'directory.  Use --collect to collect model cards in the output '
         'directory that were not processed in this run.  The summary is in '
         'markdown unless the name ends in .html.  Use a comma separated '
-        'list for multiple summary files.',
-    )
+        'list for multiple summary files.')
     parser.add_argument(
         '--report',
         help='Generate a test report in markdown format.  If a '
@@ -1743,8 +1752,7 @@ def main():  # noqa
         'subsequent values are the tests to include.')
     parser.add_argument(
         '--collect', action='store_true',
-        help='Collect older model cards for the summary and report.',
-    )
+        help='Collect older model cards for the summary and report.')
     args = parser.parse_args()
     load_yaml_tests()
     if args.list_tests:
@@ -1821,6 +1829,14 @@ def main():  # noqa
                               if name not in known or
                               (r.version == known[name].version and (
                                   r.timestamp or '') >= after)}
+            if args.failed_tests and str(args.failed_tests) != 'false':
+                known = {t.name: t for t in TEST_REGISTRY}
+                if args.failed_tests != 'full':
+                    sel_tests &= {name for name, r in existing_results.items()
+                                  if name in known and not result_passed(r)}
+                else:
+                    sel_tests &= {name for name, r in existing_results.items()
+                                  if name in known and result_complete_fail(r)}
             sel_tests.add('first_load')
             run_names = [t.name for t in TEST_REGISTRY if t.name in sel_tests]
             if len(run_names) <= 1:
@@ -1842,7 +1858,11 @@ def main():  # noqa
                 return save_progress
 
             new_results = run_tests(client, model, ollama_base_url, run_names, save_func(
-                out_path, metadata, existing_results), args.raise_errors)
+                out_path, metadata, existing_results), args.raise_errors,
+                args.require_first_load)
+            if new_results is None:
+                restart_command(args.restart)
+                continue
             new_by_name = {test_def.name: result for test_def, result in new_results}
             test_results = [(test_def, new_by_name.get(
                 test_def.name, existing_results.get(test_def.name)))

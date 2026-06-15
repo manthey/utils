@@ -83,7 +83,8 @@ def process_directory(
         if str(filepath).endswith('.pdf'):
             continue
         md_path = filepath.with_suffix('.description.md')
-        if not overwrite and md_path.exists():
+        if (not overwrite and md_path.exists() and
+                md_path.stat().st_mtime > filepath.stat().st_mtime):
             continue
         try:
             b64_image, w, h = prepare_image(filepath)
