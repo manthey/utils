@@ -817,8 +817,8 @@ def test_geospatial_analysis(
             'content': [{
                 'type': 'text',
                 'text': 'You are an image analyst who describes images so that '
-                'other tools know their contents.  You never use emojis, slang, '
-                'or metaphors.',
+                'other tools know their contents.  You never use emojis, '
+                'slang, or metaphors.',
             }],
         }, {
             'role': 'user',

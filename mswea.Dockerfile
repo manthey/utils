@@ -44,6 +44,7 @@ RUN apt-get update && \
       locales \
       vim \
       telnet \
+      unzip \
       # testing convenience \
       fonts-dejavu \
       libmagic-dev \
@@ -52,9 +53,6 @@ RUN apt-get update && \
       rabbitmq-server \
       memcached \
       openjdk-17-jdk \
-      android-sdk-platform-tools \
-      maven \
-      gradle \
       # tools \
       jq \
       shellcheck \
@@ -162,6 +160,13 @@ OLLAMA_API_BASE=http://host.docker.internal:11434
 OPENAI_API_BASE=http://host.docker.internal:11434/v1
 OPENAI_API_KEY=ollama
 EOF
+
+RUN cat <<'EOF' > /home/ubuntu/.local/bin/yolo.sh
+#!/usr/bin/env bash
+uvx mini-swe-agent --model-class litellm_textbased -c ~/.config/mini-swe-agent/mini.yaml -c model.model_kwargs.timeout=300 -c environment.timeout=300 -c agent.format_error_limit=7 -y -m openai/"$1" -t "$2"
+EOF
+
+RUN chmod a+x /home/ubuntu/.local/bin/yolo.sh
 
 # USER root
 # Run like `docker exec -t model_card_docker bash -c "cd some_repo && uvx mini-swe-agent --model-class litellm_textbased -c ~/.config/mini-swe-agent/mini.yaml -c model.model_kwargs.timeout=300 -c environment.local.timeout=300 -t \"some requires\" -m openai/{model} -y < /dev/null | tee /tmp/mswea.log"`
