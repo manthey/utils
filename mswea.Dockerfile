@@ -29,8 +29,8 @@ RUN apt-get update && \
       # for curl \
       ca-certificates \
       # girder convenience \
-      fuse \
-      libfuse2 \
+      fuse3 \
+      libfuse3-dev \
       libldap2-dev \
       libsasl2-dev \
       pandoc \
@@ -121,6 +121,7 @@ RUN usermod -aG rabbitmq ubuntu && \
     chmod -R 777 /var/log/rabbitmq
 USER ubuntu
 WORKDIR /home/ubuntu
+COPY .vimrc /home/ubuntu/.vimrc
 # hadolint ignore=SC2016
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     echo 'export PATH="$HOME/.local/bin:$HOME/.env:$PATH"' >> ~/.bashrc
