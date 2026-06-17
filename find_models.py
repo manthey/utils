@@ -1031,7 +1031,7 @@ def main():  # noqa
         help='Minimum downloads to include (default: 0)',
     )
     parser.add_argument(
-        '-o', '--output-format', choices=['table', 'commands', 'push', 't', 'c', 'p'],
+        '-o', '--output-format', choices=['table', 'pull', 't', 'p'],
         default='table',
         help='Output format (default: table)',
     )
