@@ -69,7 +69,7 @@ def describe_image(url: str, model: str, b64_image: str, w: int, h: int) -> str:
     response = client.chat.completions.create(model=model, messages=messages, temperature=0.2)
     message = response.choices[0].message.content
     if '```' in message:
-        message = message.split('```')[1].split('\n', 1)[0]
+        message = message.split('```')[1].split('\n', 1)[-1]
     return message
 
 
