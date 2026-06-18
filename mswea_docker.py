@@ -32,11 +32,15 @@ def main():
         '--shm-size', '512M',
         '-t', 'manthey/mswea:latest', 'bash', '-c', 'while true; do sleep 86400; done',
     ])
-    tar_proc = subprocess.Popen([
-        'tar', '-cf', '-', '-C', os.path.pardir, current_dir], stdout=subprocess.PIPE)
-    subprocess.check_call(docker_cmd + [
-        'exec', '-i', container_name, 'tar', '-xf', '-', '-C',
-        '/home/ubuntu/'], stdin=tar_proc.stdout)
+    if is_windows:
+        subprocess.check_call(
+            docker_cmd + ['cp', f'../{current_dir}', f'{container_name}:/home/ubuntu/.'])
+    else:
+        tar_proc = subprocess.Popen([
+            'tar', '-cf', '-', '-C', os.path.pardir, current_dir], stdout=subprocess.PIPE)
+        subprocess.check_call(docker_cmd + [
+            'exec', '-i', container_name, 'tar', '-xf', '-', '-C',
+            '/home/ubuntu/'], stdin=tar_proc.stdout)
     subprocess.run(docker_cmd + ['exec', '-it', container_name, 'bash'])
 
 

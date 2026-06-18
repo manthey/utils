@@ -119,9 +119,10 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | b
 RUN usermod -aG rabbitmq ubuntu && \
     chmod -R 777 /var/lib/rabbitmq/mnesia && \
     chmod -R 777 /var/log/rabbitmq
+COPY .vimrc /home/ubuntu/.vimrc
+RUN chown ubuntu:ubuntu /home/ubuntu/.vimrc
 USER ubuntu
 WORKDIR /home/ubuntu
-COPY .vimrc /home/ubuntu/.vimrc
 # hadolint ignore=SC2016
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
     echo 'export PATH="$HOME/.local/bin:$HOME/.env:$PATH"' >> ~/.bashrc
