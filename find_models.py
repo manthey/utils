@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import dateutil.parser
 import diskcache
 import huggingface_hub
+import parsel
 import tqdm
 
 cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.cache')
@@ -48,6 +49,7 @@ class ModelArchParams:
 class ModelInfo:
     source: str
     repo_id: str
+    repo_name: str
     filename: str
     size_gb: float
     quantization: str
@@ -68,8 +70,8 @@ class ModelInfo:
 QUANT_PRIORITY_BITS = {
     # Full precision
     'F32': (1, 32.0),
-    'F16': (2, 16.0),
-    'BF16': (None, 16.0),   # disabled because of my specific GPUs
+    'BF16': (None, 16.0),  # disabled because of my specific GPUs
+    'F16': (3, 16.0),      # list after BF16 for eager parsing
     # Near-lossless
     'Q8_0': (10, 8.5),
     'Q8_1': (11, 9.0),
@@ -172,8 +174,18 @@ def extract_quantization(filename: str) -> str:
     return 'UNKNOWN'
 
 
-def estimate_memory_gb(file_size_bytes: int) -> float:
-    return (file_size_bytes / (1024**3)) * 1.15
+def estimate_memory_gb(file_size_bytes: int, quantization_bits: float | None = None) -> float:
+    """
+    Estimate memory burden in GB.
+
+    When quantization is unknown, use simple file size with overhead.
+    Otherwise, calculate based on file size scaled by quantization efficiency.
+    """
+    base_gb = (file_size_bytes / (1024**3))
+    overhead = 1.15
+    if quantization_bits is not None and quantization_bits > 0:
+        return base_gb * quantization_bits / 8.0 * overhead
+    return base_gb * overhead
 
 
 def matches_type(repo_id: str, model_type: str) -> bool:
@@ -411,6 +423,32 @@ def compute_memory_burden_gb(
     return (weights_bytes + kv_bytes + embed_bytes) / (1024 ** 3)
 
 
+def estimate_ollama_memory_gb(
+    size_gb: float, quantization: str, context_size: int | None,
+) -> float | None:
+    """
+    Estimate memory burden for Ollama models using file size and quantization.
+
+    For GGUF models without full architecture info, estimate based on file
+    size, quantizations, and context length.
+    """
+    bits_per_weight = QUANT_PRIORITY_BITS.get(quantization, (None, 16))[1]
+    if size_gb is None or size_gb <= 0:
+        return None
+    if bits_per_weight and bits_per_weight > 0:
+        quant_factor = bits_per_weight / 32.0
+        if context_size and context_size > 0:
+            # Estimate KV cache based on context size
+            # Without arch params, assume reasonable defaults
+            # Cap at 4x for large contexts
+            context_factor = min(context_size / 32768.0, 4.0)
+            overhead = 1.5 + (quant_factor * 0.5) + context_factor * 0.5
+            return size_gb * overhead
+        # Without context info, just add overhead
+        return size_gb * 2.0
+    return size_gb * 1.5
+
+
 @cache.memoize(expire=86400 * 10)
 def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tuple[str, int, bool]]:
     try:
@@ -441,15 +479,14 @@ def select_best_quantization(
     candidates: list[ModelInfo], gpu_memory_gb: float,
     min_memory: float | None, context_limit_gb: float | None = None,
 ) -> ModelInfo | None:
+    fitting = [
+        m for m in candidates if QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0] is not None]
     if context_limit_gb is not None:
         fitting = [
-            m for m in candidates if m.memory_burden_gb is not None and
-            (min_memory or 0) <= m.memory_burden_gb <= context_limit_gb and
-            QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0] is not None]
+            m for m in fitting if m.memory_burden_gb is not None and
+            (min_memory or 0) <= m.memory_burden_gb <= context_limit_gb]
     else:
-        fitting = [
-            m for m in candidates if (min_memory or 0) <= m.size_gb <= gpu_memory_gb and
-            QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0] is not None]
+        fitting = [m for m in fitting if (min_memory or 0) <= m.size_gb <= gpu_memory_gb]
     if not fitting:
         return None
     fitting.sort(key=lambda m: QUANT_PRIORITY_BITS.get(m.quantization, (99, 0))[0])
@@ -588,6 +625,7 @@ def discover_models(  # noqa
             candidates.append(ModelInfo(
                 source='huggingface',
                 repo_id=model.id,
+                repo_name=model.id,
                 filename=info['file'],
                 size_gb=info['size'],
                 quantization=quant,
@@ -725,6 +763,7 @@ def discover_ollama_models(  # noqa
         models.append(ModelInfo(
             source='ollama',
             repo_id=name,
+            repo_name=name,
             filename=name,
             size_gb=size_gb,
             quantization=quantization,
@@ -813,7 +852,6 @@ def fetch_ollama_tags_page(model_path: str) -> str:
 
 
 def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> list[dict]:
-    import parsel
     models = []
     seen = set()
     page = 1
@@ -840,7 +878,7 @@ def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> l
             capabilities = item.css('[x-test-capability]::text').getall()
             capabilities = [c.strip().lower() for c in capabilities]
             cloud_spans = item.css('span.text-cyan-500::text').getall()
-            is_cloud_only = any('cloud' in s.lower() for s in cloud_spans)
+            is_cloud = any('cloud' in s.lower() for s in cloud_spans)
             sizes = item.css('[x-test-size]::text').getall()
             sizes = [s.strip() for s in sizes]
             updated_title = item.css('span[title]::attr(title)').get('')
@@ -849,7 +887,7 @@ def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> l
                 'href': href,
                 'pulls': pull_count,
                 'capabilities': capabilities,
-                'is_cloud_only': is_cloud_only,
+                'is_cloud': is_cloud,
                 'param_sizes': sizes,
                 'updated_title': updated_title,
             })
@@ -863,7 +901,6 @@ def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> l
 
 
 def scrape_ollama_tags_for_model(model_info: dict) -> list[dict]:
-    import parsel
     try:
         html = fetch_ollama_tags_page(model_info['href'])
     except (urllib.error.URLError, OSError) as e:
@@ -871,6 +908,7 @@ def scrape_ollama_tags_for_model(model_info: dict) -> list[dict]:
         return []
     sel = parsel.Selector(text=html)
     tags = []
+    tags_by_hash = {}
     for row in sel.css('div.group'):
         desktop = row.css('div.hidden.md\\:flex')
         if not desktop:
@@ -882,21 +920,23 @@ def scrape_ollama_tags_for_model(model_info: dict) -> list[dict]:
         if not tag_name:
             continue
         cols = desktop.css('div.grid-cols-12 > *')
-        size_text = ''
-        context_text = ''
-        input_text = ''
-        if len(cols) >= 2:
-            size_text = cols[1].css('::text').get('').strip()
-        if len(cols) >= 3:
-            context_text = cols[2].css('::text').get('').strip()
-        if len(cols) >= 4:
-            input_text = cols[3].css('::text').get('').strip()
-        tags.append({
-            'tag': tag_name,
-            'size_text': size_text,
-            'context_text': context_text,
-            'input_text': input_text,
-        })
+        size_text = cols[1].css('::text').get('').strip() if len(cols) >= 2 else ''
+        context_text = cols[2].css('::text').get('').strip() if len(cols) >= 3 else ''
+        input_text = cols[3].css('::text').get('').strip() if len(cols) >= 4 else ''
+        hash_text = desktop.css('span.font-mono').css('::text').get('').strip()
+        if hash_text and hash_text in tags_by_hash:
+            tags_by_hash[hash_text]['taglist'].append(tag_name)
+        else:
+            tags.append({
+                'tag': tag_name,
+                'taglist': [tag_name],
+                'size_text': size_text,
+                'context_text': context_text,
+                'input_text': input_text,
+                'hash': hash_text,
+            })
+            if hash_text:
+                tags_by_hash[hash_text] = tags[-1]
     return tags
 
 
@@ -904,6 +944,7 @@ def discover_ollama_registry_models(  # noqa
     name_filter: str | None, gpu_memory_gb: float | None,
     model_filter: str, limit: int, downloads: int,
     context_memory: int = 32768, context_limit_gb: float | None = None,
+    min_memory: float | None = None,
 ) -> list[ModelInfo]:
     print('Fetching models from Ollama registry')
     search_results = scrape_ollama_search_models('.', limit, downloads)
@@ -918,7 +959,11 @@ def discover_ollama_registry_models(  # noqa
     skipped_type_mismatch = 0
     tw, _ = shutil.get_terminal_size()
     for _, search_model in tqdm.contrib.tenumerate(search_results, ncols=tw):
-        if search_model['is_cloud_only'] and not search_model['param_sizes']:
+        tag_details = scrape_ollama_tags_for_model(search_model)
+        if not tag_details:
+            skipped_no_fit += 1
+            continue
+        if search_model['is_cloud'] and not any(t.get('size_text') for t in tag_details):
             skipped_cloud += 1
             continue
         caps = {
@@ -944,22 +989,23 @@ def discover_ollama_registry_models(  # noqa
                     search_model['updated_title']).astimezone(datetime.timezone.utc)
             except (ValueError, OverflowError):
                 pass
-        tag_details = scrape_ollama_tags_for_model(search_model)
-        if not tag_details:
-            skipped_no_fit += 1
-            continue
         candidates = []
         for tag_info in tag_details:
             tag_name = tag_info['tag']
-            if ':' in tag_name:
-                tag_suffix = tag_name.split(':')[1]
-            else:
-                tag_suffix = tag_name
+            # Skip Apple hardware
+            if any(t in tag_name.lower() for t in {'mlx', 'mx', 'int8', 'nvfp4', 'int4'}):
+                continue
+            tag_suffix = tag_name.split(':', 1)[-1]
             size_gb = parse_size_text(tag_info['size_text'])
             if not size_gb:
                 continue
             context_size = parse_context_text(tag_info['context_text'])
             quant = extract_quantization(tag_suffix)
+            if quant == 'UNKNOWN':
+                for subtag in tag_info.get('taglist', []):
+                    quant = extract_quantization(subtag.split(':', 1)[-1])
+                    if quant != 'UNKNOWN':
+                        break
             if quant == 'UNKNOWN':
                 quant = 'Q4_K_M'
             if gpu_memory_gb is not None and size_gb > gpu_memory_gb:
@@ -969,6 +1015,7 @@ def discover_ollama_registry_models(  # noqa
             candidates.append(ModelInfo(
                 source='ollama-registry',
                 repo_id=search_model['name'],
+                repo_name=f'{search_model["name"]}:{tag_suffix}',
                 filename=tag_name,
                 size_gb=size_gb,
                 quantization=quant,
@@ -984,7 +1031,7 @@ def discover_ollama_registry_models(  # noqa
                     context_length=context_size,
                     embedding_length=None,
                 ),
-                memory_burden_gb=None,
+                memory_burden_gb=estimate_ollama_memory_gb(size_gb, quant, context_size),
                 has_tools=caps['has_tools'],
                 has_reasoning=caps['has_reasoning'],
                 has_vision=caps['has_vision'],
@@ -993,11 +1040,32 @@ def discover_ollama_registry_models(  # noqa
         if not candidates:
             skipped_no_fit += 1
             continue
-        best = select_best_quantization(
-            candidates, gpu_memory_gb, None, context_limit_gb)
-        if best:
-            models.append(best)
-        else:
+
+        # Filter and add all valid candidates (per size/quant combination)
+        fitting_candidates = []
+        for m in candidates:
+            quant_priority = QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0]
+            if quant_priority is None:
+                continue
+            if context_limit_gb is not None and m.memory_burden_gb is not None:
+                # Use estimated memory burden for filtering
+                if (min_memory or 0) <= m.memory_burden_gb <= context_limit_gb:
+                    fitting_candidates.append(m)
+            else:
+                # Size-based filtering with GPU memory constraint
+                if gpu_memory_gb is None or m.size_gb <= gpu_memory_gb:
+                    fitting_candidates.append(m)
+
+        # If no candidates fit, try without strict constraints (for model discovery)
+        if not fitting_candidates and candidates:
+            # Fall back to all candidates that have valid quantization
+            for m in candidates:
+                quant_priority = QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0]
+                if quant_priority is not None:
+                    fitting_candidates.append(m)
+
+        models.extend(fitting_candidates)
+        if not fitting_candidates:
             skipped_no_fit += 1
     print(f'Found {len(models)} matching models')
     print(f'  Skipped (cloud only): {skipped_cloud}')
@@ -1071,7 +1139,8 @@ def main():  # noqa
     columns = {
         'repo': {
             'name': 'Repository', 'format': 'rw',
-            'func': lambda m, rw: m.repo_id[:rw - 3] + '...' if len(m.repo_id) > rw else m.repo_id},
+            'func': lambda m, rw: m.repo_name[:rw - 3] + '...'
+            if len(m.repo_name) > rw else m.repo_name},
         'quantization': {'name': 'Quant', 'format': ' <7', 'func': lambda m: m.quantization},
         'size_gb': {'name': 'SizGB', 'format': ' 5.1f', 'func': lambda m: m.size_gb},
         'memory_burden': {
@@ -1101,7 +1170,10 @@ def main():  # noqa
             'name': 'Date', 'format': ' >8',
             'func': lambda m: mdate.strftime('%Y%m%d') if (
                 mdate := (m.modified if args.modified else m.created) or m.created) else ''},
-        'downloads': {'name': 'Dwnlds', 'format': ' >6', 'func': lambda m: m.downloads},
+        'downloads': {
+            'name': 'Dwnlds', 'format': ' >6',
+            'func': lambda m: m.downloads if m.downloads < 1e6 else
+            f'{int(m.downloads // 1e3)}k' if m.downloads < 1e9 else f'{int(m.downloads // 1e6)}M'},
     }
     if source == 'local':
         if args.gpu_memory_gb is None and args.context_limit is None:
@@ -1125,6 +1197,7 @@ def main():  # noqa
             downloads=args.downloads,
             context_memory=args.context_memory,
             context_limit_gb=args.context_limit,
+            min_memory=args.min,
         )
         columns['memory_burden']['show'] = False
     else:
@@ -1192,7 +1265,8 @@ def main():  # noqa
         print('# Ollama pull commands:')
         for m in models:
             if m.source == 'ollama-registry':
-                print(f'ollama pull {m.repo_id}:{m.quantization}')
+                # Use the filename (tag_name) which includes quantization info
+                print(f'ollama pull {m.repo_name}')
             else:
                 print(f'ollama pull hf.co/{m.repo_id}:{m.quantization}')
     print(f'Total: {len(models)} models')

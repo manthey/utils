@@ -7,17 +7,28 @@
 import argparse
 import os
 import platform
+import re
 import subprocess
+
+
+def safe_filename(name: str) -> str:
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
+    name = name.rstrip(' .')
+    return name or 'docker'
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--name', default='mswea_docker', help='Docker container name')
+    parser.add_argument('--name', help='Docker container name')
     parser.add_argument('--num', type=int, help='Docker container suffix')
+    parser.add_argument('--src', help='Source path.  Defaults to current working directory.')
     args = parser.parse_args()
 
-    container_name = f'{args.name}_{args.num}' if args.num is not None else args.name
+    if args.src:
+        os.chdir(os.expanduser(args.src))
     current_dir = os.path.basename(os.getcwd())
+    basename = args.name or f'mswea_{safe_filename(current_dir)}'
+    container_name = basename + (f'_{args.num}' if args.num is not None else '')
     is_windows = platform.system().lower() == 'windows'
     docker_cmd = ['wsl', 'docker'] if is_windows else ['docker']
     subprocess.run(docker_cmd + [
