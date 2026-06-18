@@ -53,6 +53,8 @@ RUN apt-get update && \
       rabbitmq-server \
       memcached \
       openjdk-17-jdk \
+      xmlstarlet \
+      optipng \
       # tools \
       jq \
       shellcheck \
