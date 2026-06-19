@@ -600,6 +600,32 @@ def test_coding(
     })
 
 
+@register_test('python_argparse', 'Python argparse use', version=1)
+def test_code_python_argparse(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    system_prompt = (
+        'You are a helpful assistant who never uses metaphors, slang, emojis, '
+        'or decorative characters. You will answer only the questions asked, '
+        'and not offer to do additional work. Your code is impeccably correct '
+        'and carefully considered, using clear variable names and few to no '
+        'comments.')
+    prompt = (
+        'Is there a way to programmatically have the default in a python '
+        'argparse help string without defining it in another statement?  That '
+        "is, I have `parser.add_argument('command', nargs='?', "
+        "default='create', choices=['create', 'list'],  help='Command. "
+        'Defaults to "..."\')`, and I want that `...` to be taken from the '
+        'specified default.')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': prompt},
+        ]},
+        'present': [r'%\(default\)s'],
+    })
+
+
 @register_test('python_yaml', 'Python yaml library use', version=1)
 def test_code_python_yaml(
     client: OpenAI, model_name: str, ollama_base_url: str,
