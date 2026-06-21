@@ -1465,9 +1465,11 @@ def summary_table(summary, models):
 
 
 def create_summary_html(timestamp, cols, rows):
-    th_cells = ''.join(f'<th>{html.escape(str(c))}</th>' for c in cols)
+    th_cells = ''.join(
+        f'<th>{html.escape(str(c))}</th>' for c in cols)
+    th_cells += '<th data-sort-method="none"></th>'
     tr_rows = ''.join(
-        '<tr>' + ''.join(f'<td>{html.escape(str(r))}</td>' for r in row) + '</tr>'
+        '<tr>' + ''.join(f'<td>{html.escape(str(r))}</td>' for r in row) + '<td></td></tr>'
         for row in rows
     )
     return """<!DOCTYPE html>
@@ -1501,6 +1503,10 @@ def create_summary_html(timestamp, cols, rows):
     table {
       border-collapse: separate;
       border-spacing: 0;
+      counter-reset: row-number;
+    }
+    tbody tr {
+      counter-increment: row-number;
     }
     th, td {
       border-left: 0 transparent;
@@ -1527,6 +1533,9 @@ def create_summary_html(timestamp, cols, rows):
     }
     table thead th:first-child {
       z-index: 30;
+    }
+    td:last-child::before {
+      content: counter(row-number);
     }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/tablesort@5.7.1/dist/tablesort.min.js"></script>
