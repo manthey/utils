@@ -1113,7 +1113,6 @@ def main():  # noqa
         '--after', '--since', help='Only show models after this date')
     parser.add_argument(
         '--source', '-s', default='hf',
-        choices=['hf', 'huggingface', 'local', 'ollama'],
         help='Model source: hf/huggingface, local (ollama server), ollama (registry)',
     )
     parser.add_argument(
@@ -1135,7 +1134,7 @@ def main():  # noqa
     args = parser.parse_args()
     if args.local:
         args.source = 'local'
-    source = args.source
+    source = set(args.source.split(','))
     columns = {
         'repo': {
             'name': 'Repository', 'format': 'rw',
@@ -1175,21 +1174,22 @@ def main():  # noqa
             'func': lambda m: m.downloads if m.downloads < 1e6 else
             f'{int(m.downloads // 1e3)}k' if m.downloads < 1e9 else f'{int(m.downloads // 1e6)}M'},
     }
-    if source == 'local':
+    models = []
+    if 'local' in source:
         if args.gpu_memory_gb is None and args.context_limit is None:
             pass
-        models = discover_ollama_models(
+        models.extend(discover_ollama_models(
             host=args.ollama_host, name_filter=args.regex,
             gpu_memory_gb=args.gpu_memory_gb,
             context_memory=args.context_memory,
             context_limit_gb=args.context_limit,
-        )
+        ))
         columns['downloads']['show'] = False
-    elif source == 'ollama':
+    if 'ollama' in source:
         if args.context_limit:
             args.gpu_memory_gb = args.gpu_memory_gb or args.context_limit
             args.context_limit = None
-        models = discover_ollama_registry_models(
+        models.extend(discover_ollama_registry_models(
             name_filter=args.regex,
             gpu_memory_gb=args.gpu_memory_gb,
             model_filter=args.filter,
@@ -1198,18 +1198,18 @@ def main():  # noqa
             context_memory=args.context_memory,
             context_limit_gb=args.context_limit,
             min_memory=args.min,
-        )
+        ))
         columns['memory_burden']['show'] = False
-    else:
+    if 'hf' in source or 'huggingface' in source:
         if args.gpu_memory_gb is None and args.context_limit is None:
             parser.error('-m/--gpu-memory-gb is required unless --source local or --source ollama')
         api = huggingface_hub.HfApi()
-        models = discover_models(
+        models.extend(discover_models(
             api=api, gpu_memory_gb=args.gpu_memory_gb, model_filter=args.filter,
             limit=args.limit, downloads=args.downloads, name_filter=args.regex,
             min_memory=args.min, context_memory=args.context_memory,
             context_limit_gb=args.context_limit,
-        )
+        ))
     if args.before or args.after:
         before = dateutil.parser.parse(args.before).astimezone(
             datetime.timezone.utc) if args.before else None

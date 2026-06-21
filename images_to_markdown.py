@@ -60,7 +60,10 @@ def describe_image(url: str, model: str, b64_image: str, w: int, h: int) -> str:
             'text': 'Provide a complete and detailed description of the image '
             'in markdown format.  The original image resolution is '
             f'{w} x {h} pixels (you may be provided with a reduced scale '
-            'version).',
+            'version).  Describe colors only using basic color terms without '
+            'adjectives (black, red, orange, yellow, green, teal, blue, '
+            'purple, maroon, pink, gold, peach, beige, brown, olive, gray, '
+            'lavender, magenta, lime, white) unless describing people.',
         }, {
             'type': 'image_url',
             'image_url': {'url': f'data:image/jpeg;base64,{b64_image}'},

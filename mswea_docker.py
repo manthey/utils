@@ -44,6 +44,9 @@ def main():
     parser.add_argument('--name', help='Docker container name')
     parser.add_argument('--num', type=int, help='Docker container suffix')
     parser.add_argument('--src', help='Source path.  Defaults to current working directory.')
+    parser.add_argument(
+        '--ollama', help='Replacement url for ollama.  This can be just a '
+        'port, a host and port, or a full base url.')
     args = parser.parse_args()
 
     # add more commands: list, run <model> <text> --detach, check, log
@@ -79,6 +82,17 @@ def main():
             subprocess.check_call(docker_cmd + [
                 'exec', '-i', container_name, 'tar', '-xf', '-', '-C',
                 '/home/ubuntu/'], stdin=tar_proc.stdout)
+    if args.command in {'create', 'exec'} and args.ollama:
+        host = args.ollama
+        if '/' not in args.ollama and ':' not in args.ollama:
+            host = f'host.docker.internal:{host}'
+        if '/' not in host:
+            host = f'http://{host}'
+        host = host.rstrip('/')
+        subprocess.run(docker_cmd + [
+            'exec', '-it', container_name, 'bash', '-c',
+            'sed -i "s|^\\(.*_API_BASE=\\)https\\?://[^/]*|\\1' + host +
+            '|" /home/ubuntu/.config/mini-swe-agent/.env'])
     if args.command in {'create', 'exec'}:
         subprocess.run(docker_cmd + ['exec', '-it', container_name, 'bash'])
 
