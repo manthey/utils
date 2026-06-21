@@ -80,7 +80,7 @@ def process_directory(
     input_dir: str, model: str, url: str, overwrite: bool, dry_run: bool,
 ) -> None:
     target = Path(input_dir)
-    for filepath in sorted(target.rglob('*')):
+    for filepath in (sorted(target.rglob('*')) if not target.is_file() else [target]):
         if not filepath.is_file():
             continue
         if str(filepath).endswith('.pdf'):
