@@ -4,6 +4,7 @@
 # dependencies = [
 #   'pillow',
 #   'openai',
+#   'pyyaml',
 #   'large-image[sources]; sys_platform == "linux"',
 #   'large-image[common]; sys_platform == "win32" or sys_platform == "darwin"',
 #   'large-image[pil]; sys_platform == "android"',
@@ -13,71 +14,152 @@
 import argparse
 import base64
 import io
+import logging
 import os
+import sys
 from pathlib import Path
 
 import large_image
 import openai
 import PIL.Image
+import yaml
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 MAX_DIM = 1024
+DEFAULT_MODEL = 'qwen3.5:4b'
+DEFAULT_SYSTEM = (
+    'You are an image analyst who describes images so that other tools know '
+    'their contents.  You never use emojis, slang, or metaphors.')
+DEFAULT_USER = (
+    'Provide a complete and detailed description of the image in markdown '
+    'format.  The original image resolution is {w} x {h} pixels (you may be '
+    'provided with a reduced scale version).  Describe colors only using basic '
+    'color terms without adjectives (black, red, orange, yellow, green, teal, '
+    'blue, purple, maroon, pink, gold, peach, beige, brown, olive, gray, '
+    'lavender, magenta, lime, white) unless describing people.')
 
 
-def prepare_image(filepath: Path) -> str:
+YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
+
+---
+- models:
+    - qwen3.5:9b
+  system: >
+    You are a geospatial analyst. Answer the following question about the
+    provided image.
+  user: Is this city walkable?
+  max_dim: 2000
+- models:
+    - qwen3.5:9b
+    - hf.co/mradermacher/Geo-R1-GGUF:Q8_0
+  system: ""
+  user: >
+    You are a geospatial analyst. Answer the following question about the
+    provided image. Is this city walkable?
+  max_dim: 1000
+  temperature: 0.15
+"""
+
+
+def prepare_image(filepath: Path, max_dim: int) -> tuple[str, int, int]:
     try:
         ts = large_image.open(filepath)
         w, h = ts.sizeX, ts.sizeY
         img = ts.getRegion(
-            output={'maxWidth': MAX_DIM, 'maxHeight': MAX_DIM},
+            output={'maxWidth': max_dim, 'maxHeight': max_dim},
             format=large_image.constants.TILE_FORMAT_PIL)[0]
     except Exception:
         img = PIL.Image.open(filepath)
         w, h = img.width, img.height
     img = img.convert('RGB')
     width, height = img.size
-    if width > MAX_DIM or height > MAX_DIM:
-        scale = MAX_DIM / max(width, height)
+    if width > max_dim or height > max_dim:
+        scale = max_dim / max(width, height)
         img = img.resize((int(width * scale), int(height * scale)), PIL.Image.LANCZOS)
     buffer = io.BytesIO()
     img.save(buffer, format='JPEG', quality=85)
     return base64.b64encode(buffer.getvalue()).decode('utf-8'), w, h
 
 
-def describe_image(url: str, model: str, b64_image: str, w: int, h: int) -> str:
+def describe_image(
+    url: str, model: str, b64_image: str, system: str, user: str, temperature: float | None,
+) -> str:
     client = openai.OpenAI(base_url=f'{url}/v1', api_key='ollama', timeout=300)
     messages = [{
         'role': 'system',
-        'content': [{
-            'type': 'text',
-            'text': 'You are an image analyst who describes images so that '
-            'other tools know their contents.  You never use emojis, slang, '
-            'or metaphors.',
-        }],
+        'content': [{'type': 'text', 'text': system}],
     }, {
         'role': 'user',
         'content': [{
             'type': 'text',
-            'text': 'Provide a complete and detailed description of the image '
-            'in markdown format.  The original image resolution is '
-            f'{w} x {h} pixels (you may be provided with a reduced scale '
-            'version).  Describe colors only using basic color terms without '
-            'adjectives (black, red, orange, yellow, green, teal, blue, '
-            'purple, maroon, pink, gold, peach, beige, brown, olive, gray, '
-            'lavender, magenta, lime, white) unless describing people.',
+            'text': user,
         }, {
             'type': 'image_url',
             'image_url': {'url': f'data:image/jpeg;base64,{b64_image}'},
         }],
     }]
-    response = client.chat.completions.create(model=model, messages=messages, temperature=0.2)
+    if not system:
+        messages[0:1] = []
+    response = client.chat.completions.create(
+        model=model, messages=messages,
+        temperature=temperature if temperature is not None else 0.2)
     message = response.choices[0].message.content
     if '```' in message:
         message = message.split('```')[1].split('\n', 1)[-1]
     return message
 
 
+def load_specs(yaml_path: str | None, model_override: str | None) -> list[dict]:
+    if yaml_path:
+        entries = yaml.safe_load(Path(yaml_path).read_text())
+        specs = []
+        for entry in entries:
+            models = [model_override] if model_override else entry.get('models') or [DEFAULT_MODEL]
+            specs.append({
+                'models': models,
+                'system': entry.get('system', DEFAULT_SYSTEM),
+                'user': entry.get('user', DEFAULT_USER),
+                'max_dim': entry.get('max_dim', MAX_DIM),
+            })
+        return specs
+    return [{
+        'models': [model_override or DEFAULT_MODEL],
+        'system': DEFAULT_SYSTEM,
+        'user': DEFAULT_USER,
+        'max_dim': MAX_DIM,
+    }]
+
+
+def describe_file(url: str, specs: list[dict], filepath: Path) -> str:
+    logger.info('Processing %s', url)
+    total = sum(len(spec['models']) for spec in specs)
+    cache: dict[int, tuple[str, int, int]] = {}
+    blocks = []
+    for spec in specs:
+        if spec['max_dim'] not in cache:
+            cache[spec['max_dim']] = prepare_image(filepath, spec['max_dim'])
+        b64_image, w, h = cache[spec['max_dim']]
+        user = spec['user'].format(w=w, h=h)
+        logger.info(' Asking on %d x %d image: %s', w, h, user)
+        for model in spec['models']:
+            logger.info(' Running %s', model)
+            try:
+                response = describe_image(
+                    url, model, b64_image, spec['system'], user, spec.get('temperature'))
+            except Exception:
+                continue
+            if total > 1:
+                blocks.append(f'# {model}\n**Prompt**: {user}\n\n{response}')
+            else:
+                blocks.append(response)
+            logger.info(' Response: %s', blocks[-1])
+    return '\n\n---\n\n'.join(blocks)
+
+
 def process_directory(
-    input_dir: str, model: str, url: str, overwrite: bool, dry_run: bool,
+    input_dir: str, specs: list[dict], url: str, overwrite: bool, dry_run: bool,
 ) -> None:
     target = Path(input_dir)
     for filepath in (sorted(target.rglob('*')) if not target.is_file() else [target]):
@@ -90,12 +172,8 @@ def process_directory(
                 md_path.stat().st_mtime > filepath.stat().st_mtime):
             continue
         try:
-            b64_image, w, h = prepare_image(filepath)
-        except Exception:
-            continue
-        try:
             print(filepath)
-            description = describe_image(url, model, b64_image, w, h)
+            description = describe_file(url, specs, filepath)
             print(description)
             if not dry_run:
                 md_path.write_text(description)
@@ -108,7 +186,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description='Generate companion markdown for images using an Ollama vision model.')
     parser.add_argument('input_dir', help='Directory containing images to process')
-    parser.add_argument('--model', '-m', required=True, help='Ollama vision model name')
+    parser.add_argument(
+        '--model', '-m', default=None,
+        help='Ollama vision model name; overrides models in the yaml spec')
+    parser.add_argument(
+        '--yaml', help='YAML file containing a list of prompt specifications')
     parser.add_argument(
         '--url', default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
         help='Ollama base URL')
@@ -118,8 +200,15 @@ def main() -> None:
     parser.add_argument(
         '-n', '--dry-run', action='store_true',
         help='Do not actually write markdown files')
+    parser.add_argument(
+        '--verbose', '-v', action='count', default=0,
+        help='Increase verbosity')
     args = parser.parse_args()
-    process_directory(args.input_dir, args.model, args.url, args.overwrite, args.dry_run)
+    logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
+    logger.addHandler(logging.StreamHandler(sys.stderr))
+    logger.debug('Parsed arguments: %r', args)
+    specs = load_specs(args.yaml, args.model)
+    process_directory(args.input_dir, specs, args.url, args.overwrite, args.dry_run)
 
 
 if __name__ == '__main__':
