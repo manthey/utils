@@ -38,15 +38,18 @@ def list_known(docker_cmd: list[str], base_name: str):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        'command', nargs='?', default='create',
-        choices=['create', 'stop', 'exec', 'list'],
-        help='Command. Defaults to "%(default)s".')
+        'command',
+        choices=['create', 'start', 'stop', 'exec', 'list', 'run'],
+        help='Command.  create is the same as start followed by exec.')
     parser.add_argument('--name', help='Docker container name')
     parser.add_argument('--num', type=int, help='Docker container suffix')
     parser.add_argument('--src', help='Source path.  Defaults to current working directory.')
     parser.add_argument(
         '--ollama', help='Replacement url for ollama.  This can be just a '
         'port, a host and port, or a full base url.')
+    parser.add_argument(
+        '--fuse', action='store_true',
+        help='Pass options to allow fuse to work when starting a container.')
     args = parser.parse_args()
 
     # add more commands: list, run <model> <text> --detach, check, log
@@ -59,18 +62,24 @@ def main():
     docker_cmd = ['wsl', 'docker'] if is_windows else ['docker']
     if args.command in {'list'}:
         list_known(docker_cmd, container_name)
-    if args.command in {'create', 'stop'}:
+    if args.command in {'create', 'start', 'stop'}:
         subprocess.run(docker_cmd + [
             'rm', '-f', container_name], stderr=subprocess.DEVNULL, check=False)
-    if args.command in {'create'}:
+    if args.command in {'create', 'start'}:
         gateway = 'host-gateway'
         if is_windows:
             gateway = subprocess.check_output([
                 'wsl', 'grep', 'nameserver', '/etc/resolv.conf']).decode().split()[1].strip()
+        other_opts = []
+        if args.fuse:
+            other_opts.extend([
+                '--device', '/dev/fuse:/dev/fuse',
+                '--security-opt', 'apparmor=unconfined',
+                '--cap-add', 'SYS_ADMIN'])
         subprocess.check_call(docker_cmd + [
             'run', '-d', '--rm', '--name', container_name,
             '--add-host', f'host.docker.internal:{gateway}',
-            '--shm-size', '512M',
+            '--shm-size', '512M'] + other_opts + [
             '-t', 'manthey/mswea:latest', 'bash', '-c', 'while true; do sleep 86400; done',
         ])
         if is_windows:
@@ -82,7 +91,7 @@ def main():
             subprocess.check_call(docker_cmd + [
                 'exec', '-i', container_name, 'tar', '-xf', '-', '-C',
                 '/home/ubuntu/'], stdin=tar_proc.stdout)
-    if args.command in {'create', 'exec'} and args.ollama:
+    if args.command in {'create', 'start', 'exec'} and args.ollama:
         host = args.ollama
         if '/' not in args.ollama and ':' not in args.ollama:
             host = f'host.docker.internal:{host}'
