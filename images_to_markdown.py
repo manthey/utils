@@ -27,7 +27,7 @@ import yaml
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-MAX_DIM = 1024
+IMAGE_SIZE = 1024
 DEFAULT_MODEL = 'qwen3.5:4b'
 DEFAULT_SYSTEM = (
     'You are an image analyst who describes images so that other tools know '
@@ -60,7 +60,7 @@ YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
   # Always specify a user prompt
   user: Is this city walkable?
   # Images are scaled so their maximal dimension is no larger than this
-  max_dim: 2000
+  size: 2000
 - task: walkable2
   models:
     - qwen3.5:9b
@@ -69,7 +69,7 @@ YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
   user: >
     You are a geospatial analyst. Answer the following question about the
     provided image. Is this city walkable?
-  max_dim: 1000
+  size: 1000
   # If unspecified, the default model temperature is used
   temperature: 0.15
 """
@@ -135,14 +135,14 @@ def load_specs(yaml_path: str | None, model_override: list[str] | None) -> list[
                 'models': models,
                 'system': entry.get('system', DEFAULT_SYSTEM),
                 'user': entry.get('user', DEFAULT_USER),
-                'max_dim': entry.get('max_dim', MAX_DIM),
+                'max_dim': entry.get('size', IMAGE_SIZE),
             })
         return specs
     return [{
         'models': [model_override or DEFAULT_MODEL],
         'system': DEFAULT_SYSTEM,
         'user': DEFAULT_USER,
-        'max_dim': MAX_DIM,
+        'max_dim': IMAGE_SIZE,
     }]
 
 
