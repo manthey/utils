@@ -79,7 +79,7 @@ def main():
         subprocess.check_call(docker_cmd + [
             'run', '-d', '--rm', '--name', container_name,
             '--add-host', f'host.docker.internal:{gateway}',
-            '--shm-size', '512M'] + other_opts + [
+            '--shm-size', '1024M'] + other_opts + [
             '-t', 'manthey/mswea:latest', 'bash', '-c', 'while true; do sleep 86400; done',
         ])
         if is_windows:

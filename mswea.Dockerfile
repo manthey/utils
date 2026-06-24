@@ -167,7 +167,7 @@ EOF
 
 RUN cat <<'EOF' > /home/ubuntu/.local/bin/yolo.sh
 #!/usr/bin/env bash
-uvx mini-swe-agent --model-class litellm_textbased -c ~/.config/mini-swe-agent/mini.yaml -c model.model_kwargs.timeout=300 -c environment.timeout=300 -c agent.format_error_limit=7 -y -m openai/"$1" -t "$2" "${@:3}"
+uvx --offline mini-swe-agent --model-class litellm_textbased -c ~/.config/mini-swe-agent/mini.yaml -c model.model_kwargs.timeout=300 -c environment.timeout=300 -c agent.max_consecutive_format_errors=7 -y -m openai/"$1" -t "$2" "${@:3}"
 EOF
 
 RUN chmod a+x /home/ubuntu/.local/bin/yolo.sh && \
