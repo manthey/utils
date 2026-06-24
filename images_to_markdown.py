@@ -16,6 +16,7 @@ import base64
 import io
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -129,9 +130,10 @@ def load_specs(yaml_path: str | None, model_override: list[str] | None) -> list[
     if yaml_path:
         entries = yaml.safe_load(Path(yaml_path).read_text())
         specs = []
-        for entry in entries:
+        for idx, entry in enumerate(entries, 1):
             models = model_override if model_override else entry.get('models') or [DEFAULT_MODEL]
             specs.append({
+                'task': entry.get('task', f'task{idx}'),
                 'models': models,
                 'system': entry.get('system', DEFAULT_SYSTEM),
                 'user': entry.get('user', DEFAULT_USER),
@@ -139,6 +141,7 @@ def load_specs(yaml_path: str | None, model_override: list[str] | None) -> list[
             })
         return specs
     return [{
+        'task': 'default',
         'models': [model_override or DEFAULT_MODEL],
         'system': DEFAULT_SYSTEM,
         'user': DEFAULT_USER,
@@ -208,6 +211,15 @@ def main() -> None:
     parser.add_argument(
         '--example-yaml', action='store_true', help='Show an example YAML file.')
     parser.add_argument(
+        '--task', '-t', action='append',
+        help='Run the matching task; can be specified multiple times')
+    parser.add_argument(
+        '--task-regex', '-r',
+        help='Regular expression to match task names')
+    parser.add_argument(
+        '--list-tasks', action='store_true',
+        help='List tasks from the YAML file')
+    parser.add_argument(
         '--suffix', '--ext', default='.description.md',
         help='File extension to use for description files.')
     parser.add_argument(
@@ -233,6 +245,15 @@ def main() -> None:
     logger.addHandler(logging.StreamHandler(sys.stderr))
     logger.debug('Parsed arguments: %r', args)
     specs = load_specs(args.yaml, args.model)
+    if args.task or args.task_regex:
+        specs = [spec for spec in specs
+                 if spec['task'] in (args.task or []) or
+                 (args.task_regex and re.search(args.task_regex, spec['task']))]
+    if args.list_tasks:
+        print('Tasks')
+        for task in sorted(spec['task'] for spec in specs):
+            print(f'  {task}')
+        sys.exit(0)
     process_directory(args.input_dir, args.suffix, specs, args.url, args.overwrite, args.dry_run)
 
 
