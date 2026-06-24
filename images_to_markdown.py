@@ -44,14 +44,25 @@ DEFAULT_USER = (
 YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
 
 ---
-- models:
+# This is a list of
+-
+  # the task key is optional but allows selecting specific tasks rather than
+  # running all of them
+  task: walkable1
+  # the command line option overrides the list of models
+  models:
     - qwen3.5:9b
+  # If not specified, a default system prompt is used.  Use an empty string for
+  # no system prompt.
   system: >
     You are a geospatial analyst. Answer the following question about the
     provided image.
+  # Always specify a user prompt
   user: Is this city walkable?
+  # Images are scaled so their maximal dimension is no larger than this
   max_dim: 2000
-- models:
+- task: walkable2
+  models:
     - qwen3.5:9b
     - hf.co/mradermacher/Geo-R1-GGUF:Q8_0
   system: ""
@@ -59,6 +70,7 @@ YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
     You are a geospatial analyst. Answer the following question about the
     provided image. Is this city walkable?
   max_dim: 1000
+  # If unspecified, the default model temperature is used
   temperature: 0.15
 """
 
@@ -100,23 +112,25 @@ def describe_image(
             'image_url': {'url': f'data:image/jpeg;base64,{b64_image}'},
         }],
     }]
+    opts = {}
+    if temperature is not None:
+        opts['temperature'] = temperature
     if not system:
         messages[0:1] = []
     response = client.chat.completions.create(
-        model=model, messages=messages,
-        temperature=temperature if temperature is not None else 0.2)
+        model=model, messages=messages, **opts)
     message = response.choices[0].message.content
     if '```' in message:
         message = message.split('```')[1].split('\n', 1)[-1]
     return message
 
 
-def load_specs(yaml_path: str | None, model_override: str | None) -> list[dict]:
+def load_specs(yaml_path: str | None, model_override: list[str] | None) -> list[dict]:
     if yaml_path:
         entries = yaml.safe_load(Path(yaml_path).read_text())
         specs = []
         for entry in entries:
-            models = [model_override] if model_override else entry.get('models') or [DEFAULT_MODEL]
+            models = model_override if model_override else entry.get('models') or [DEFAULT_MODEL]
             specs.append({
                 'models': models,
                 'system': entry.get('system', DEFAULT_SYSTEM),
@@ -159,15 +173,17 @@ def describe_file(url: str, specs: list[dict], filepath: Path) -> str:
 
 
 def process_directory(
-    input_dir: str, specs: list[dict], url: str, overwrite: bool, dry_run: bool,
+    input_dir: str, suffix: str, specs: list[dict], url: str, overwrite: bool,
+    dry_run: bool,
 ) -> None:
+    suffix = f'.{suffix.lstrip(".")}'
     target = Path(input_dir)
     for filepath in (sorted(target.rglob('*')) if not target.is_file() else [target]):
         if not filepath.is_file():
             continue
         if str(filepath).endswith('.pdf'):
             continue
-        md_path = filepath.with_suffix('.description.md')
+        md_path = filepath.with_suffix(suffix)
         if (not overwrite and md_path.exists() and
                 md_path.stat().st_mtime > filepath.stat().st_mtime):
             continue
@@ -184,13 +200,19 @@ def process_directory(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description='Generate companion markdown for images using an Ollama vision model.')
+        description='Generate companion markdown or text for images using an '
+        'Ollama vision model.')
     parser.add_argument('input_dir', help='Directory containing images to process')
     parser.add_argument(
-        '--model', '-m', default=None,
-        help='Ollama vision model name; overrides models in the yaml spec')
+        '--yaml', help='YAML file containing a list of prompt specifications.')
     parser.add_argument(
-        '--yaml', help='YAML file containing a list of prompt specifications')
+        '--example-yaml', action='store_true', help='Show an example YAML file.')
+    parser.add_argument(
+        '--suffix', '--ext', default='.description.md',
+        help='File extension to use for description files.')
+    parser.add_argument(
+        '--model', '-m', default=None, action='append',
+        help='Ollama vision model name; overrides models in the yaml spec')
     parser.add_argument(
         '--url', default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
         help='Ollama base URL')
@@ -204,11 +226,14 @@ def main() -> None:
         '--verbose', '-v', action='count', default=0,
         help='Increase verbosity')
     args = parser.parse_args()
+    if args.example_yaml:
+        print(YAML_DESCRIPTION)
+        sys.exit(0)
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
     logger.addHandler(logging.StreamHandler(sys.stderr))
     logger.debug('Parsed arguments: %r', args)
     specs = load_specs(args.yaml, args.model)
-    process_directory(args.input_dir, specs, args.url, args.overwrite, args.dry_run)
+    process_directory(args.input_dir, args.suffix, specs, args.url, args.overwrite, args.dry_run)
 
 
 if __name__ == '__main__':
