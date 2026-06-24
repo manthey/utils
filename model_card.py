@@ -1771,7 +1771,7 @@ def main():  # noqa
         'with other tests.')
     parser.add_argument(
         '--after', '--since',
-        help='Any test older than this is considered mussing.')
+        help='Any test older than this is considered missing.')
     parser.add_argument(
         '--summary',
         help='If specified, the name of a summary file to write.  If this '
