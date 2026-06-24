@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = '>=3.10'
+# dependencies = [
+#   'coverage',
+# ]
+# ///
 
 import json
 import os
@@ -144,6 +150,8 @@ def get_coverage(build, collection=None, onlyLocal=False):  # noqa
             for subdir in os.listdir(root):
                 if os.path.isdir(os.path.join(root, subdir)):
                     paths.append(os.path.join(root, subdir, file))
+            if os.path.isfile(os.path.join(root, file)):
+                paths.append(os.path.join(root, file))
         paths.append(None)
         anyPath = False
         for path in paths:
