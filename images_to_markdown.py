@@ -6,11 +6,10 @@
 #   'openai',
 #   'pyyaml',
 #   'large-image[sources]; sys_platform == "linux"',
-#   'large-image[pil]; sys_platform == "win32" or sys_platform == "darwin"',
+#   'large-image[common]; sys_platform == "win32" or sys_platform == "darwin"',
 #   'large-image[pil]; sys_platform == "android"',
 # ]
 # ///
-#   'large-image[common]; sys_platform == "win32" or sys_platform == "darwin"',
 
 import argparse
 import base64
@@ -25,6 +24,8 @@ import large_image
 import openai
 import PIL.Image
 import yaml
+
+os.environ['GDAL_PAM_ENABLED'] = 'NO'
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())

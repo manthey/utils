@@ -46,7 +46,7 @@ repos:
         files: README.rst
         name: rst-linter of README.rst
   - repo: https://github.com/codespell-project/codespell
-    rev: v2.4.1
+    rev: v2.4.2
     hooks:
       - id: codespell
         args:
@@ -59,7 +59,7 @@ repos:
     hooks:
       - id: circleci-config-validate
   - repo: https://github.com/ThisIsManta/stylus-supremacy
-    rev: v5.0.1
+    rev: v5.0.2
     hooks:
       - id: stylus-supremacy
         args: [--options, ./girder/girder_large_image/web_client/package.json]
@@ -69,7 +69,7 @@ repos:
       - id: pyupgrade
         args: [--py310-plus, --keep-percent-format]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.0
+    rev: v0.15.19
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
@@ -84,7 +84,7 @@ repos:
       - id: flake8
         args: [--config=.flake8]
   - repo: https://github.com/pycqa/isort
-    rev: 7.0.0
+    rev: 9.0.0a3
     hooks:
       - id: isort
         name: isort (python)
