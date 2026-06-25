@@ -6,10 +6,11 @@
 #   'openai',
 #   'pyyaml',
 #   'large-image[sources]; sys_platform == "linux"',
-#   'large-image[common]; sys_platform == "win32" or sys_platform == "darwin"',
+#   'large-image[pil]; sys_platform == "win32" or sys_platform == "darwin"',
 #   'large-image[pil]; sys_platform == "android"',
 # ]
 # ///
+#   'large-image[common]; sys_platform == "win32" or sys_platform == "darwin"',
 
 import argparse
 import base64
@@ -45,9 +46,9 @@ DEFAULT_USER = (
 YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
 
 ---
-# This is a list of
+# This is a list of tasks, each with its own user prompt.
 -
-  # the task key is optional but allows selecting specific tasks rather than
+  # The task key is optional but allows selecting specific tasks rather than
   # running all of them
   task: walkable1
   # the command line option overrides the list of models
@@ -79,25 +80,27 @@ YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
 def prepare_image(filepath: Path, max_dim: int) -> tuple[str, int, int]:
     try:
         ts = large_image.open(filepath)
-        w, h = ts.sizeX, ts.sizeY
+        # w, h = ts.sizeX, ts.sizeY
         img = ts.getRegion(
             output={'maxWidth': max_dim, 'maxHeight': max_dim},
             format=large_image.constants.TILE_FORMAT_PIL)[0]
     except Exception:
         img = PIL.Image.open(filepath)
-        w, h = img.width, img.height
+        # w, h = img.width, img.height
     img = img.convert('RGB')
-    width, height = img.size
+    width, height = img.width, img.height
     if width > max_dim or height > max_dim:
         scale = max_dim / max(width, height)
         img = img.resize((int(width * scale), int(height * scale)), PIL.Image.LANCZOS)
+        width, height = img.width, img.height
     buffer = io.BytesIO()
     img.save(buffer, format='JPEG', quality=85)
-    return base64.b64encode(buffer.getvalue()).decode('utf-8'), w, h
+    return base64.b64encode(buffer.getvalue()).decode('utf-8'), width, height
 
 
 def describe_image(
-    url: str, model: str, b64_image: str, system: str, user: str, temperature: float | None,
+    url: str, model: str, b64_image: str, system: str, user: str,
+    temperature: float | None, reasoning_effort: str | None,
 ) -> str:
     client = openai.OpenAI(base_url=f'{url}/v1', api_key='ollama', timeout=300)
     messages = [{
@@ -116,6 +119,8 @@ def describe_image(
     opts = {}
     if temperature is not None:
         opts['temperature'] = temperature
+    if reasoning_effort is not None:
+        opts['reasoning_effort'] = reasoning_effort
     if not system:
         messages[0:1] = []
     response = client.chat.completions.create(
@@ -164,7 +169,8 @@ def describe_file(url: str, specs: list[dict], filepath: Path) -> str:
             logger.info(' Running %s', model)
             try:
                 response = describe_image(
-                    url, model, b64_image, spec['system'], user, spec.get('temperature'))
+                    url, model, b64_image, spec['system'], user,
+                    spec.get('temperature'), spec.get('reasoning_effort'))
             except Exception:
                 continue
             if total > 1:
