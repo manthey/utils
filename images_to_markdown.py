@@ -83,13 +83,13 @@ YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
 def prepare_image(filepath: Path, max_dim: int) -> tuple[str, int, int]:
     try:
         ts = large_image.open(filepath)
-        # w, h = ts.sizeX, ts.sizeY
+        w, h = ts.sizeX, ts.sizeY
         img = ts.getRegion(
             output={'maxWidth': max_dim, 'maxHeight': max_dim},
             format=large_image.constants.TILE_FORMAT_PIL)[0]
     except Exception:
         img = PIL.Image.open(filepath)
-        # w, h = img.width, img.height
+        w, h = img.width, img.height
     img = img.convert('RGB')
     width, height = img.width, img.height
     if width > max_dim or height > max_dim:
@@ -98,7 +98,7 @@ def prepare_image(filepath: Path, max_dim: int) -> tuple[str, int, int]:
         width, height = img.width, img.height
     buffer = io.BytesIO()
     img.save(buffer, format='JPEG', quality=85)
-    return base64.b64encode(buffer.getvalue()).decode('utf-8'), width, height
+    return base64.b64encode(buffer.getvalue()).decode('utf-8'), width, height, w, h
 
 
 def describe_image(
@@ -161,7 +161,7 @@ def describe_file(url: str, specs: list[dict], filepath: Path) -> str:
     for spec in specs:
         if spec['max_dim'] not in cache:
             cache[spec['max_dim']] = prepare_image(filepath, spec['max_dim'])
-        b64_image, w, h = cache[spec['max_dim']]
+        b64_image, width, height, w, h = cache[spec['max_dim']]
         user = spec['user'].format(w=w, h=h)
         logger.info(' Asking on %d x %d image: %s', w, h, user)
         options = {k: v for k, v in spec.items() if k in {
