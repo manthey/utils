@@ -129,26 +129,27 @@ def describe_image(
     return message
 
 
-def load_specs(yaml_path: str | None, model_override: list[str] | None) -> list[dict]:
+def load_specs(
+    yaml_path: str | None, models: list[str] | None, size: int | None,
+) -> list[dict]:
     if yaml_path:
         entries = yaml.safe_load(Path(yaml_path).read_text())
         specs = []
         for idx, entry in enumerate(entries, 1):
-            models = model_override if model_override else entry.get('models') or [DEFAULT_MODEL]
             specs.append({
                 'task': entry.get('task', f'task{idx}'),
-                'models': models,
+                'models': models or entry.get('models', [DEFAULT_MODEL]),
                 'system': entry.get('system', DEFAULT_SYSTEM),
                 'user': entry.get('user', DEFAULT_USER),
-                'max_dim': entry.get('size', IMAGE_SIZE),
+                'max_dim': size or entry.get('size', IMAGE_SIZE),
             })
         return specs
     return [{
         'task': 'default',
-        'models': model_override or [DEFAULT_MODEL],
+        'models': models or [DEFAULT_MODEL],
         'system': DEFAULT_SYSTEM,
         'user': DEFAULT_USER,
-        'max_dim': IMAGE_SIZE,
+        'max_dim': size or IMAGE_SIZE,
     }]
 
 
@@ -231,6 +232,9 @@ def main() -> None:
         '--model', '-m', default=None, action='append',
         help='Ollama vision model name; overrides models in the yaml spec')
     parser.add_argument(
+        '--size', '-s', type=int,
+        help='Image size; overrides size in the yaml spec')
+    parser.add_argument(
         '--url', default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
         help='Ollama base URL')
     parser.add_argument(
@@ -249,7 +253,7 @@ def main() -> None:
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
     logger.addHandler(logging.StreamHandler(sys.stderr))
     logger.debug('Parsed arguments: %r', args)
-    specs = load_specs(args.yaml, args.model)
+    specs = load_specs(args.yaml, args.model, args.size)
     if args.task or args.task_regex:
         specs = [spec for spec in specs
                  if spec['task'] in (args.task or []) or

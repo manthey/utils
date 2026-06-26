@@ -70,6 +70,60 @@ def register_test(name: str, description: str, skip: bool | str = False, version
     return decorator
 
 
+def extract_vision_information(
+    model_info: dict[str, Any], architecture: str, families: list[str],
+    capabilities: list[str], proj: Any,
+) -> dict[str, Any] | None:
+    has_vision = (
+        any(f.lower() in ('clip', 'siglip', 'mllama', 'moonshot') for f in families) or
+        'vision' in capabilities or
+        any('vision' in k.lower() or 'clip' in k.lower() or 'projector' in k.lower()
+            for k in model_info) or proj is not None)
+    if not has_vision:
+        return None
+    longest_key = next(
+        (k for k in model_info if k.endswith('.longest_edge')), None)
+    if longest_key:
+        vp = longest_key.replace('.longest_edge', '')
+        return {
+            'min_pixels': int(model_info.get(f'{vp}.shortest_edge', 0)),
+            'max_pixels': int(model_info.get(f'{vp}.longest_edge', 0)),
+            'fixed_aspect_ratio': False,
+        }
+    for key, value in (list(model_info.items()) + list(proj.items() if proj else [])):
+        lower = key.lower()
+        if lower.endswith(('.image_size', '.resolution')):
+            try:
+                return {
+                    'min_pixels': int(value) * int(value),
+                    'max_pixels': int(value) * int(value),
+                    'fixed_aspect_ratio': True,
+                }
+            except (ValueError, TypeError):
+                pass
+    known = {
+        'granite': 384, 'llava': 336, 'moondream': 378,
+        'bakllava': 336, 'nanollava': 384, 'obsidian': 384,
+        'qwen2vl': (56 ** 2, 3584 ** 2),
+        'qwen35': (256 ** 2, 4096 ** 2),
+        'internvl': (64 ** 2, 4096 ** 2),
+        'minicpmv': (49152, 1128_960),
+    }
+    for name, res in known.items():
+        if name in architecture.lower():
+            if isinstance(res, int):
+                return {
+                    'min_pixels': res * res,
+                    'max_pixels': res * res,
+                    'fixed_aspect_ratio': True,
+                }
+            return {
+                'min_pixels': res[0],
+                'max_pixels': res[1],
+                'fixed_aspect_ratio': False,
+            }
+
+
 def get_model_metadata(ollama_base_url: str, model_name: str) -> dict[str, Any]:
     response = requests.post(
         f'{ollama_base_url}/api/show',
@@ -109,7 +163,7 @@ def get_model_metadata(ollama_base_url: str, model_name: str) -> dict[str, Any]:
     ) or any(
         'clip' in k.lower() or 'vision' in k.lower() or 'projector' in k.lower()
         for k in model_info
-    ) or 'vision' in capabilities
+    ) or 'vision' in capabilities or 'projector_info' in data
     has_tool = (
         '.Tools' in template or 'tools' in template.lower() or
         'tool_call' in template.lower() or 'tools' in capabilities
@@ -117,6 +171,9 @@ def get_model_metadata(ollama_base_url: str, model_name: str) -> dict[str, Any]:
     has_reasoning = (
         '<think>' in template or '<|thinking|>' in template or
         'thinking' in capabilities or 'reasoning' in capabilities)
+    vision = extract_vision_information(
+        model_info, details.get('architecture', '').lower(), families,
+        capabilities, data.get('projector_info', {}))
     return {
         'name': model_name,
         'source': source,
@@ -132,6 +189,7 @@ def get_model_metadata(ollama_base_url: str, model_name: str) -> dict[str, Any]:
         'has_reasoning': has_reasoning,
         'has_embedding': 'embedding' in capabilities,
         'modified_at': modified_at,
+        **(vision or {}),
     }
 
 
@@ -1065,6 +1123,7 @@ def get_metadata_table(metadata: dict[str, Any]) -> list[tuple[str, Any]]:
         ('Format', metadata['format']),
         ('Parameter Size', metadata['parameter_size']),
         ('Parameter Count', parameter_count_display),
+        # add vision info here - DWM::
         ('Model Context Length', context_length_display),
         ('Quantization', metadata['quantization']),
         ('Vision (metadata)', 'yes' if metadata['has_vision'] else 'no'),
