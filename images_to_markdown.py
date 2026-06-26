@@ -19,6 +19,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import large_image
 import openai
@@ -73,7 +74,8 @@ YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
     You are a geospatial analyst. Answer the following question about the
     provided image. Is this city walkable?
   size: 1000
-  # If unspecified, the default model temperature is used
+  # If unspecified, the default model temperature is used.  You can also
+  # specify reasoning_effort and max_tokens
   temperature: 0.15
 """
 
@@ -101,7 +103,7 @@ def prepare_image(filepath: Path, max_dim: int) -> tuple[str, int, int]:
 
 def describe_image(
     url: str, model: str, b64_image: str, system: str, user: str,
-    temperature: float | None, reasoning_effort: str | None,
+    options: dict[str, Any] | None = None,
 ) -> str:
     client = openai.OpenAI(base_url=f'{url}/v1', api_key='ollama', timeout=300)
     messages = [{
@@ -117,15 +119,10 @@ def describe_image(
             'image_url': {'url': f'data:image/jpeg;base64,{b64_image}'},
         }],
     }]
-    opts = {}
-    if temperature is not None:
-        opts['temperature'] = temperature
-    if reasoning_effort is not None:
-        opts['reasoning_effort'] = reasoning_effort
     if not system:
         messages[0:1] = []
     response = client.chat.completions.create(
-        model=model, messages=messages, **opts)
+        model=model, messages=messages, **(options or {}))
     message = response.choices[0].message.content
     if '```' in message:
         message = message.split('```')[1].split('\n', 1)[-1]
@@ -148,7 +145,7 @@ def load_specs(yaml_path: str | None, model_override: list[str] | None) -> list[
         return specs
     return [{
         'task': 'default',
-        'models': [model_override or DEFAULT_MODEL],
+        'models': model_override or [DEFAULT_MODEL],
         'system': DEFAULT_SYSTEM,
         'user': DEFAULT_USER,
         'max_dim': IMAGE_SIZE,
@@ -166,12 +163,13 @@ def describe_file(url: str, specs: list[dict], filepath: Path) -> str:
         b64_image, w, h = cache[spec['max_dim']]
         user = spec['user'].format(w=w, h=h)
         logger.info(' Asking on %d x %d image: %s', w, h, user)
+        options = {k: v for k, v in spec.items() if k in {
+            'temperature', 'max_tokens', 'reasoning_effort'}}
         for model in spec['models']:
             logger.info(' Running %s', model)
             try:
                 response = describe_image(
-                    url, model, b64_image, spec['system'], user,
-                    spec.get('temperature'), spec.get('reasoning_effort'))
+                    url, model, b64_image, spec['system'], user, options)
             except Exception:
                 continue
             if total > 1:

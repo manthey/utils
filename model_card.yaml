@@ -9,6 +9,21 @@
       - "assert"
       - "asgiBoundServer"
       - "def "
+- name: "gdal_knowledge"
+  description: "Check basic GDAL knowledge"
+  version: 1
+  test:
+    chat:
+      messages:
+        - content: You are a helpful assistant who never uses metaphors, slang,
+            or emojis.  You will answer only the questions asked, and not offer
+            to do additional work.
+          role: system
+        - content: When using GDAL or rasterio, what do I set to never have it
+            create aux.xml files?
+          role: user
+    present:
+      - "GDAL_PAM_ENABLED"
 - name: "ollama_show_test"
   description: "Show ollama model information"
   version: 1
