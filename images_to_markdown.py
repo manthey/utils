@@ -153,7 +153,7 @@ def load_specs(
     }]
 
 
-def describe_file(url: str, specs: list[dict], filepath: Path) -> str:
+def describe_file(url: str, specs: list[dict], filepath: Path, raise_errors: bool) -> str:
     logger.info('Processing %s', url)
     total = sum(len(spec['models']) for spec in specs)
     cache: dict[int, tuple[str, int, int]] = {}
@@ -172,6 +172,8 @@ def describe_file(url: str, specs: list[dict], filepath: Path) -> str:
                 response = describe_image(
                     url, model, b64_image, spec['system'], user, options)
             except Exception:
+                if raise_errors:
+                    raise
                 continue
             if total > 1:
                 blocks.append(f'# {model}\n**Prompt**: {user}\n\n{response}')
@@ -183,7 +185,7 @@ def describe_file(url: str, specs: list[dict], filepath: Path) -> str:
 
 def process_directory(
     input_dir: str, suffix: str, specs: list[dict], url: str, overwrite: bool,
-    dry_run: bool,
+    dry_run: bool, raise_errors: bool,
 ) -> None:
     suffix = f'.{suffix.lstrip(".")}'
     target = Path(input_dir)
@@ -198,7 +200,7 @@ def process_directory(
             continue
         try:
             print(filepath)
-            description = describe_file(url, specs, filepath)
+            description = describe_file(url, specs, filepath, raise_errors)
             print(description)
             if not dry_run:
                 md_path.write_text(description)
@@ -244,6 +246,9 @@ def main() -> None:
         '-n', '--dry-run', action='store_true',
         help='Do not actually write markdown files')
     parser.add_argument(
+        '--raise', dest='raise_errors', action='store_true',
+        help='Raise on errors instead of ignoring them.')
+    parser.add_argument(
         '--verbose', '-v', action='count', default=0,
         help='Increase verbosity')
     args = parser.parse_args()
@@ -263,7 +268,8 @@ def main() -> None:
         for task in sorted(spec['task'] for spec in specs):
             print(f'  {task}')
         sys.exit(0)
-    process_directory(args.input_dir, args.suffix, specs, args.url, args.overwrite, args.dry_run)
+    process_directory(args.input_dir, args.suffix, specs, args.url,
+                      args.overwrite, args.dry_run, args.raise_errors)
 
 
 if __name__ == '__main__':
