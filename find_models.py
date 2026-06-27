@@ -553,18 +553,16 @@ def discover_models(  # noqa
         (all_gguf or has_gguf_files(getattr(m, 'siblings', None)))
     ]
     discovered = {}
-    skipped_name_mismatch = 0
     skipped_no_fit = 0
     skipped_fetch_failed = 0
     tw, _ = shutil.get_terminal_size()
+    if model_filter != 'all':
+        with_gguf = [m for m in with_gguf if matches_type(m.id, model_filter)]
     for _, model in tqdm.contrib.tenumerate(with_gguf, ncols=tw):
         model_type = model_filter if model_filter != 'all' else (
             'code' if matches_type(model.id, 'code') else
             'vision' if matches_type(model.id, 'vision') else None
         )
-        if model_filter != 'all' and not matches_type(model.id, model_filter):
-            skipped_name_mismatch += 1
-            continue
         gguf_files = fetch_gguf_file_sizes(api, model.id)
         if not gguf_files:
             skipped_fetch_failed += 1
@@ -648,7 +646,6 @@ def discover_models(  # noqa
         else:
             skipped_no_fit += 1
     print(f'Found {len(discovered)} matching models')
-    print(f'  Skipped (name mismatch): {skipped_name_mismatch}')
     print(f'  Skipped (fetch failed): {skipped_fetch_failed}')
     print(f'  Skipped (all too large): {skipped_no_fit}')
     return list(discovered.values())

@@ -70,9 +70,9 @@ def register_test(name: str, description: str, skip: bool | str = False, version
     return decorator
 
 
-def extract_vision_information(
+def extract_vision_information(  # noqa
     model_info: dict[str, Any], architecture: str, families: list[str],
-    capabilities: list[str], proj: Any,
+    capabilities: list[str], proj: Any, tensors: Any,
 ) -> dict[str, Any] | None:
     has_vision = (
         any(f.lower() in ('clip', 'siglip', 'mllama', 'moonshot') for f in families) or
@@ -90,7 +90,7 @@ def extract_vision_information(
             'max_pixels': int(model_info.get(f'{vp}.longest_edge', 0)),
             'fixed_aspect_ratio': False,
         }
-    for key, value in (list(model_info.items()) + list(proj.items() if proj else [])):
+    for key, value in list(model_info.items()) + list(proj.items() if proj else []):
         lower = key.lower()
         if lower.endswith(('.image_size', '.resolution')):
             try:
@@ -101,6 +101,24 @@ def extract_vision_information(
                 }
             except (ValueError, TypeError):
                 pass
+    patch = None
+    position = None
+    for t in tensors or []:
+        lower = t['name'].lower()
+        value = t['shape']
+        if 'patch_embd' in lower.split('.'):
+            patch = value
+        if 'position_embd' in lower.split('.'):
+            position = value
+    if patch and position:
+        try:
+            return {
+                'min_pixels': int(patch[0] * patch[1]),
+                'max_pixels': int(patch[0] * patch[1] * position[1]),
+                'fixed_aspect_ratio': False,
+            }
+        except Exception:
+            pass
     known = {
         'granite': 384, 'llava': 336, 'moondream': 378,
         'bakllava': 336, 'nanollava': 384, 'obsidian': 384,
@@ -173,7 +191,7 @@ def get_model_metadata(ollama_base_url: str, model_name: str) -> dict[str, Any]:
         'thinking' in capabilities or 'reasoning' in capabilities)
     vision = extract_vision_information(
         model_info, details.get('architecture', '').lower(), families,
-        capabilities, data.get('projector_info', {}))
+        capabilities, data.get('projector_info', {}), data.get('tensors', {}))
     return {
         'name': model_name,
         'source': source,
@@ -1110,6 +1128,10 @@ def get_metadata_table(metadata: dict[str, Any]) -> list[tuple[str, Any]]:
     families_display = (
         ', '.join(metadata['families']) if metadata['families'] else 'none'
     )
+    min_pixel_display = (
+        f'{int(metadata["min_pixels"] ** 0.5):,}' if metadata.get('min_pixels') else '')
+    max_pixel_display = (
+        f'{int(metadata["max_pixels"] ** 0.5):,}' if metadata.get('max_pixels') else '')
     mod_str = metadata['modified_at']
     try:
         mod_str = get_timestamp(mod_str)
@@ -1123,7 +1145,8 @@ def get_metadata_table(metadata: dict[str, Any]) -> list[tuple[str, Any]]:
         ('Format', metadata['format']),
         ('Parameter Size', metadata['parameter_size']),
         ('Parameter Count', parameter_count_display),
-        # add vision info here - DWM::
+        ('Vision Min Size', min_pixel_display),
+        ('Vision Max Size', max_pixel_display),
         ('Model Context Length', context_length_display),
         ('Quantization', metadata['quantization']),
         ('Vision (metadata)', 'yes' if metadata['has_vision'] else 'no'),
@@ -1420,6 +1443,7 @@ def add_to_summary(summary, model, metadata, test_results):
             'duration': f'{result.details.get("duration") or 0:4.2f}s',
             'tokens': result.usage['completion_tokens'] if result.usage else '',
             'output': result.details.get('extracted_answer') or result.output,
+            'timestamp': result.timestamp,
         }
 
 
@@ -1673,15 +1697,16 @@ def create_report(report_spec, output_dir, summary):
             dur = mt['duration']
             if val not in found:
                 found[val] = []
-            found[val].append((float(dur[:-1]) if dur else 9999, dur, m['metadata']['Name']))
+            found[val].append((float(dur[:-1]) if dur else 9999, dur,
+                               mt['timestamp'], m['metadata']['Name']))
             found[val].sort()
         if not len(found):
             continue
         sections.append(f'## {t}')
         for _, k, f in sorted((f[0][0], k, f) for k, f in found.items()):
-            for _, dur, mn in f:
+            for _, dur, timestamp, mn in f:
                 esc_name = mn.replace('.', '\\.')
-                sections.append(f'- **{esc_name}** ({dur})')
+                sections.append(f'- **{esc_name}** ({dur} - {timestamp})')
             sections.append(escape_markdown(k, always=True).strip())
     record = '\n'.join(sections) + '\n'
     out_path = (report_path if os.path.dirname(report_path) or
@@ -1868,6 +1893,7 @@ def main():  # noqa
             models = sort_models(args.summary, args.output, models)
     else:
         models = [args.model]
+    model_metadata = {}
     summary = {}
     for model in models:
         out_path = None
@@ -1937,6 +1963,7 @@ def main():  # noqa
                 if removed:
                     run_names = []
                 else:
+                    model_metadata[metadata['name']] = metadata
                     continue
 
             def save_func(out_path, metadata, existing_results):
@@ -1976,6 +2003,7 @@ def main():  # noqa
             path = os.path.join(args.output, filename)
             try:
                 metadata, results = load_existing_results(path)
+                metadata = model_metadata.pop(metadata['name'], metadata)
                 if args.remove_tests and (set(results) & set(args.remove_tests.split(','))):
                     sys.stderr.write(f'Removing tests from {metadata["name"]}\n')
                     for t in args.remove_tests.split(','):
