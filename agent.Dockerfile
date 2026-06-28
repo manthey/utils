@@ -45,6 +45,9 @@ RUN apt-get update && \
       vim \
       telnet \
       unzip \
+      # swe use \
+      fd-find \
+      ripgrep \
       # testing convenience \
       fonts-dejavu \
       libmagic-dev \
@@ -165,14 +168,73 @@ OPENAI_API_BASE=http://host.docker.internal:11434/v1
 OPENAI_API_KEY=ollama
 EOF
 
-RUN cat <<'EOF' > /home/ubuntu/.local/bin/yolo.sh
+RUN cat <<'EOF' > /home/ubuntu/.local/bin/mswea.sh
 #!/usr/bin/env bash
 uvx --offline mini-swe-agent --model-class litellm_textbased -c ~/.config/mini-swe-agent/mini.yaml -c model.model_kwargs.timeout=300 -c environment.timeout=300 -c agent.max_consecutive_format_errors=7 -y -m openai/"$1" -t "$2" "${@:3}"
 EOF
 
-RUN chmod a+x /home/ubuntu/.local/bin/yolo.sh && \
-    yolo.sh x x --help
+RUN chmod a+x /home/ubuntu/.local/bin/mswea.sh && \
+    mswea.sh x x --help
+
+RUN mkdir -p /home/ubuntu/.pi/agent && \
+    mkdir -p /home/ubuntu/.pi/extensions && \
+    npm install -g @earendil-works/pi-coding-agent
+
+RUN cat <<'EOF' > /home/ubuntu/.pi/agent/settings.json
+{
+  "defaultThinkingLevel": "medium",
+  "defaultModel": "qwen2.5-coder:14b",
+  "defaultProvider": "ollama",
+  "defaultProjectTrust": "always",
+  "quietStartup": false
+}
+EOF
+
+RUN cat <<'EOF' > /home/ubuntu/.pi/agent/local-providers.json
+{
+  "debug": false,
+  "syncOnStartup": true,
+  "addToScope": true,
+  "providers": {
+    "ollama": {
+      "enabled": true,
+      "baseUrl": "http://host.docker.internal:11434",
+      "cleanupStale": false,
+      "cacheTtlHours": 24
+    }
+  }
+}
+EOF
+
+RUN cat <<'EOF' > /home/ubuntu/.pi/agent/models.json
+{
+  "providers": {
+    "ollama": {
+      "baseUrl": "http://host.docker.internal:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "compat": {
+        "supportsDeveloperRole": false
+      },
+      "models": [
+        { "id": "qwen2.5-coder:14b" }
+      ]
+    }
+  }
+}
+EOF
+
+RUN pi install npm:@kylebrodeur/pi-model-discovery
+
+RUN cat <<'EOF' > /home/ubuntu/.local/bin/pidev.sh
+#!/usr/bin/env bash
+export PI_TELEMETRY=0
+pi --mode json --model "$1" "$2" "${@:3}"
+EOF
+
+RUN chmod a+x /home/ubuntu/.local/bin/pidev.sh && \
+    pidev.sh x x --help
 
 # USER root
-# Run like `docker exec -t model_card_docker bash -c "cd some_repo && uvx mini-swe-agent --model-class litellm_textbased -c ~/.config/mini-swe-agent/mini.yaml -c model.model_kwargs.timeout=300 -c environment.local.timeout=300 -t \"some requires\" -m openai/{model} -y < /dev/null | tee /tmp/mswea.log"`
-# docker build --force-rm -t manthey/mswea -f mswea.Dockerfile .
+# Run like `docker exec -t model_card_docker bash -c "cd some_repo && uvx mini-swe-agent --model-class litellm_textbased -c ~/.config/mini-swe-agent/mini.yaml -c model.model_kwargs.timeout=300 -c environment.local.timeout=300 -t \"some requires\" -m openai/{model} -y < /dev/null | tee /tmp/agent.log"`
+# docker build --force-rm -t manthey/agent -f agent.Dockerfile .

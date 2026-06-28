@@ -26,8 +26,8 @@ def list_known(docker_cmd: list[str], base_name: str):
         if len(parts) != 3:
             continue
         container_id, name, image = tuple(parts)
-        if (name != base_name and not re.search(r'^mswea_', name) and
-                not re.search(r'/mswea', image)):
+        if (name != base_name and not re.search(r'^agent_', name) and
+                not re.search(r'/agent', image)):
             continue
         found.append((name, image, container_id))
     found.sort()
@@ -56,7 +56,7 @@ def main():
     if args.src:
         os.chdir(os.path.expanduser(args.src))
     current_dir = os.path.basename(os.getcwd())
-    basename = args.name or f'mswea_{safe_filename(current_dir)}'
+    basename = args.name or f'agent_{safe_filename(current_dir)}'
     container_name = basename + (f'_{args.num}' if args.num is not None else '')
     is_windows = platform.system().lower() == 'windows'
     docker_cmd = ['wsl', 'docker'] if is_windows else ['docker']
@@ -80,7 +80,7 @@ def main():
             'run', '-d', '--rm', '--name', container_name,
             '--add-host', f'host.docker.internal:{gateway}',
             '--shm-size', '1024M'] + other_opts + [
-            '-t', 'manthey/mswea:latest', 'bash', '-c', 'while true; do sleep 86400; done',
+            '-t', 'manthey/agent:latest', 'bash', '-c', 'while true; do sleep 86400; done',
         ])
         if is_windows:
             subprocess.check_call(
@@ -102,6 +102,14 @@ def main():
             'exec', '-it', container_name, 'bash', '-c',
             'sed -i "s|^\\(.*_API_BASE=\\)https\\?://[^/]*|\\1' + host +
             '|" /home/ubuntu/.config/mini-swe-agent/.env'])
+        subprocess.run(docker_cmd + [
+            'exec', '-it', container_name, 'bash', '-c',
+            'sed -i \'s|\\("baseUrl": "\\)https\\?://[^/"]*|\\1' + host +
+            "|' /home/ubuntu/.pi/agent/local-providers.json"])
+        subprocess.run(docker_cmd + [
+            'exec', '-it', container_name, 'bash', '-c',
+            'sed -i \'s|\\("baseUrl": "\\)https\\?://[^/"]*|\\1' + host +
+            "|' /home/ubuntu/.pi/agent/models.json"])
     if args.command in {'create', 'exec'}:
         subprocess.run(docker_cmd + ['exec', '-it', container_name, 'bash'])
 
