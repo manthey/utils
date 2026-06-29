@@ -36,6 +36,8 @@ RUN apt-get update && \
       pandoc \
       # geojs convenience \
       imagemagick \
+      mesa-utils \
+      xvfb \
       # developer convenience \
       bzip2 \
       dirmngr \
