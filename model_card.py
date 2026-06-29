@@ -590,7 +590,7 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
                     env=env, cwd=test.get('cwd'), timeout=timeout,
                     encoding='utf8')
                 if stage == 'main':
-                    output = (result.stdout or '') + (result.stderr or '')
+                    output = ((result.stdout or '') + (result.stderr or ''))[:1024 * 1024]
                 return_code = result.returncode
             except Exception as exc:
                 if stage == 'main':
@@ -613,6 +613,8 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
             if stage == 'main':
                 count += 1
     answer = output if count >= needed - 1 else None
+    if answer is None and len(output) > 65536:
+        output = output[:32768] + '\n...\n' + output[-32768:]
     for exp in test.get('present', []):
         needed += 1
         if answer is None:
@@ -630,7 +632,8 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
         if not bool(found):
             count += 1
     details.update({
-        'extracted_answer': re.sub(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', output.strip()),
+        'extracted_answer': re.sub(
+            r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])', '', (answer or '').strip()),
         'commands': json.dumps(command_details),
         'duration': time.time() - start})
     return TestResult(
