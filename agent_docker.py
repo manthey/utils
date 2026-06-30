@@ -9,6 +9,8 @@ import os
 import platform
 import re
 import subprocess
+import tarfile
+import tempfile
 
 
 def safe_filename(name: str) -> str:
@@ -82,15 +84,13 @@ def main():
             '--shm-size', '1024M'] + other_opts + [
             '-t', 'manthey/agent:latest', 'bash', '-c', 'while true; do sleep 86400; done',
         ])
-        if is_windows:
-            subprocess.check_call(
-                docker_cmd + ['cp', f'../{current_dir}', f'{container_name}:/home/ubuntu/.'])
-        else:
-            tar_proc = subprocess.Popen([
-                'tar', '-cf', '-', '-C', os.path.pardir, current_dir], stdout=subprocess.PIPE)
+        with tempfile.SpooledTemporaryFile() as fp:
+            with tarfile.open(fileobj=fp, mode='w') as tf:
+                tf.add(os.path.join('..', current_dir), arcname=current_dir)
+            fp.seek(0)
             subprocess.check_call(docker_cmd + [
                 'exec', '-i', container_name, 'tar', '-xf', '-', '-C',
-                '/home/ubuntu/'], stdin=tar_proc.stdout)
+                '/home/ubuntu/'], stdin=fp)
     if args.command in {'create', 'start', 'exec'} and args.ollama:
         host = args.ollama
         if '/' not in args.ollama and ':' not in args.ollama:
