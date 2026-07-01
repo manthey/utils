@@ -161,7 +161,7 @@ RUN uvx mini-swe-agent --help
 RUN find /home/ubuntu -xdev -name mini_textbased.yaml -exec cp {} /home/ubuntu/.config/mini-swe-agent/mini.yaml \;
 RUN cat <<'EOF' > /home/ubuntu/.config/mini-swe-agent/.env
 MSWEA_CONFIGURED="true"
-MSWEA_MODEL_NAME="ollama/qwen2.5-coder:14b"
+MSWEA_MODEL_NAME="ollama/qwen3.6:35b"
 MSWEA_COST_TRACKING="ignore_errors"
 MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT="10"
 LITELLM_REQUEST_TIMEOUT="300000"
@@ -185,7 +185,7 @@ RUN mkdir -p /home/ubuntu/.pi/agent && \
 RUN cat <<'EOF' > /home/ubuntu/.pi/agent/settings.json
 {
   "defaultThinkingLevel": "medium",
-  "defaultModel": "qwen2.5-coder:14b",
+  "defaultModel": "qwen3.6:35b",
   "defaultProvider": "ollama",
   "defaultProjectTrust": "always",
   "quietStartup": false
@@ -219,7 +219,7 @@ RUN cat <<'EOF' > /home/ubuntu/.pi/agent/models.json
         "supportsDeveloperRole": false
       },
       "models": [
-        { "id": "qwen2.5-coder:14b" }
+        { "id": "qwen3.6:35b" }
       ]
     }
   }

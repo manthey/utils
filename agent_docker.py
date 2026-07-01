@@ -81,6 +81,7 @@ def main():
         subprocess.check_call(docker_cmd + [
             'run', '-d', '--rm', '--name', container_name,
             '--add-host', f'host.docker.internal:{gateway}',
+            '--log-opt', 'max-size=10m', '--log-opt', 'max-file=5',
             '--shm-size', '1024M'] + other_opts + [
             '-t', 'manthey/agent:latest', 'bash', '-c', 'while true; do sleep 86400; done',
         ])
