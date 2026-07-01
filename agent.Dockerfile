@@ -122,6 +122,7 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | b
     npm install -g npm@latest && \
     npx playwright install-deps && \
     npx playwright install chromium --with-deps && \
+    npx playwright install firefox --with-deps && \
     npx playwright install --with-deps
 RUN usermod -aG rabbitmq ubuntu && \
     chmod -R 777 /var/lib/rabbitmq/mnesia && \
