@@ -565,6 +565,7 @@ def chat_test_worker(client: OpenAI, model_name: str, test):
 def bash_test(client: OpenAI, model_name: str, test):  # noqa
     commands = test['bash']
     start_commands = test.get('start', [])
+    start_retry = test.get('start_retry', 0)
     stop_commands = test.get('stop', [])
     env = os.environ.copy()
     localenv = {str(k): str(v if v != '{model}' else model_name)
@@ -572,46 +573,53 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
     env.update(localenv)
     timeout = test.get('timeout', ClientKwargs.get('timeout', 300))
     output = ''
-    needed = len(commands)
+    needed = len(commands) + (1 if len(start_commands) > 0 else 0)
     count = 0
     command_details = []
     details = {}
     start = time.time()
     stop = False
-    for stage, cmds in [('start', start_commands), ('main', commands), ('stop', stop_commands)]:
-        if stage != 'stop' and stop:
-            continue
-        for command in cmds:
-            command_start = time.time()
-            command = command.replace('{model}', model_name)
-            try:
-                result = subprocess.run(
-                    command, shell=True, capture_output=True, text=True,
-                    env=env, cwd=test.get('cwd'), timeout=timeout,
-                    encoding='utf8')
+    for retries in range(start_retry + 1):
+        if retries:
+            time.sleep(2 ** retries)
+        for stage, cmds in [('start', start_commands), ('main', commands), ('stop', stop_commands)]:
+            if stage != 'stop' and stop:
+                continue
+            for command in cmds:
+                command_start = time.time()
+                command = command.replace('{model}', model_name)
+                try:
+                    result = subprocess.run(
+                        command, shell=True, capture_output=True, text=True,
+                        env=env, cwd=test.get('cwd'), timeout=timeout,
+                        encoding='utf8')
+                    if stage == 'main':
+                        output = ((result.stdout or '') + (result.stderr or ''))[:1024 * 1024]
+                    return_code = result.returncode
+                except Exception as exc:
+                    if stage == 'main':
+                        try:
+                            output = (result.stdout or '') + (result.stderr or '')
+                        except Exception:
+                            output = ''
+                        if len(output) > 65536:
+                            output = output[:32768] + '\n...\n' + output[-32768:]
+                        if isinstance(exc, subprocess.TimeoutExpired):
+                            output += f'\nTimeout after {timeout} seconds'
+                    return_code = None
                 if stage == 'main':
-                    output = ((result.stdout or '') + (result.stderr or ''))[:1024 * 1024]
-                return_code = result.returncode
-            except Exception as exc:
+                    command_details.append({
+                        'command': command, 'return_code': return_code,
+                        'duration': time.time() - command_start})
+                if return_code != 0:
+                    stop = True
+                    break
                 if stage == 'main':
-                    try:
-                        output = (result.stdout or '') + (result.stderr or '')
-                    except Exception:
-                        output = ''
-                    if len(output) > 65536:
-                        output = output[:32768] + '\n...\n' + output[-32768:]
-                    if isinstance(exc, subprocess.TimeoutExpired):
-                        output += f'\nTimeout after {timeout} seconds'
-                return_code = None
-            if stage == 'main':
-                command_details.append({
-                    'command': command, 'return_code': return_code,
-                    'duration': time.time() - command_start})
-            if return_code != 0:
-                stop = True
-                break
-            if stage == 'main':
+                    count += 1
+        if not stop or stage != 'start':
+            if stage != 'start':
                 count += 1
+            break
     answer = output if count >= needed - 1 else None
     if answer is None and len(output) > 65536:
         output = output[:32768] + '\n...\n' + output[-32768:]
@@ -1180,7 +1188,7 @@ def escape_markdown(text, maxlen=None, always=False):
     needed = 3
     while ('`' * needed) in text:
         needed += 1
-    if maxlen:
+    if maxlen and len(text) > maxlen:
         text = text[:maxlen] + '...'
     text = '\n' + ('`' * needed) + '\n' + text + '\n' + ('`' * needed) + '\n'
     return text
