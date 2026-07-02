@@ -8,6 +8,8 @@
 # ///
 
 import argparse
+import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -107,11 +109,60 @@ def find_gpus(min_memory_gb, secure_only):
     return compatible
 
 
+def add_weights(compatible, args):  # noqa
+    table = json.loads(requests.get(
+        'https://owensgroup.github.io/gpustats/plots/'
+        'Memory%20Bandwidth%20over%20Time.html').text.split(
+            'spec = ')[1].split('\n')[0].rstrip(';'))
+    table = table['datasets'][list(table['datasets'].keys())[0]]
+    subtable = {}
+    for m in table:
+        if m.get('Model'):
+            bw = tf = None
+            for k, v in m.items():
+                try:
+                    v = float(v)
+                except Exception:
+                    continue
+                if v is None or math.isnan(v):
+                    continue
+                if k == 'Memory Bandwidth (GB/s)':
+                    bw = v
+                if 'TFLOPS' in k and (tf is None or v * (0.5 if 'sparse' in k else 1) > tf):
+                    tf = v * (0.5 if 'sparse' in k else 1)
+            if bw is not None and tf is not None:
+                subtable[m['Model']] = {
+                    'name': m['Model'], 'bandwidth': bw, 'tflops': tf,
+                    'ws': set(m['Model'].lower().split())}
+    for cm in compatible:
+        ws = set((cm['id'] + ' ' + cm['displayName']).lower().split())
+        best = None
+        for m in subtable.values():
+            if not len(ws & m['ws']):
+                continue
+            score = len(ws & m['ws']) * 2 - len(ws - m['ws']) - len(m['ws'] - ws)
+            if best is None or score > best[0]:
+                best = score, m
+        # if best is None:
+        #     print(cm, '---')
+        # else:
+        #     print(cm, best[1])
+        if best is not None:
+            if args.weight.startswith('b'):
+                cm['weight'] = best[1]['bandwidth']
+            else:
+                cm['weight'] = best[1]['tflops']
+
+
 def cmd_check(args):
     compatible = find_gpus(args.mem, args.secure)
     if not compatible:
         print(f'No GPUs found with at least {args.mem} GB memory.')
         sys.exit(1)
+    basis = None
+    if args.weight:
+        add_weights(compatible, args)
+        basis = compatible[0].get('weight')
     print(f'GPUs with >= {args.mem} GB memory (cheapest first):')
     for gpu in compatible:
         cloud_type = 'secure+community'
@@ -120,7 +171,13 @@ def cmd_check(args):
         elif gpu['communityCloud'] and not gpu['secureCloud']:
             cloud_type = 'community'
         price = f"${gpu['lowestPrice']:.2f}/hr"
-        print(f"  {gpu['id']}: {gpu['displayName']} ({gpu['memoryGb']} GB) [{cloud_type}] {price}")
+        weight = ''
+        if basis and gpu.get('weight'):
+            factor = gpu['weight'] / basis
+            fprice = gpu['lowestPrice'] / factor
+            weight = f' ({factor:.2f}x base: ${fprice:.2f}/hr)'
+        print(f"  {gpu['id']}: {gpu['displayName']} ({gpu['memoryGb']} GB) "
+              f'[{cloud_type}] {price}{weight}')
 
 
 def cmd_start(args):
@@ -232,6 +289,9 @@ def main():
 
     check_parser = subparsers.add_parser('check', help='Check available GPUs')
     check_parser.add_argument('--mem', type=int, default=96, help='Minimum GPU memory in GB')
+    check_parser.add_argument(
+        '--weight', choices=['bandwidth', 'b', 'compute', 'c'],
+        help='Weigh pricing based on a metric')
     check_parser.add_argument('--secure', action='store_true', help='Secure cloud only')
 
     start_parser = subparsers.add_parser('start', help='Start an Ollama pod')
