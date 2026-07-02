@@ -141,7 +141,7 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | b
     nvm install 22 && \
     nvm alias default 22 && \
     npm install -g npm@latest && \
-    ln -s $(dirname `which npm`) "$NVM_DIR/current"
+    ln -s $(dirname $(which npm)) "$NVM_DIR/current"
 RUN cd /tmp && npx playwright install
 RUN uv venv --seed --no-project --python=python3.13 .env
 RUN cat <<'EOF' > /home/ubuntu/.local/bin/start_services.sh
@@ -227,9 +227,22 @@ RUN cat <<'EOF' > /home/ubuntu/.pi/agent/models.json
 }
 EOF
 
+RUN cat <<'EOF' > /home/ubuntu/.pi/agent/compaction-continue.json
+{
+  "enabled": true,
+  "appendSessionEntries": true,
+  "log": true,
+  "maxRecentEvents": 20
+}
+EOF
+
 # RUN pi install npm:@kylebrodeur/pi-model-discovery
-RUN pi install git:github.com/manthey/pi-model-discovery@dist && \
-    pip install pyyaml
+RUN pip install --no-cache-dir pyyaml && \
+    pi install git:github.com/manthey/pi-model-discovery@dist && \
+    pi install npm:@richardgill/pi-up-history && \
+    pi install npm:@alexleekt/pi-bump && \
+    pi install npm:@badliveware/pi-compaction-continue && \
+    true
 
 RUN cat <<'EOF' > /home/ubuntu/.local/bin/pidev.sh
 #!/usr/bin/env bash
