@@ -576,10 +576,10 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
     needed = len(commands) + (1 if len(start_commands) > 0 else 0)
     count = 0
     command_details = []
-    details = {}
     start = time.time()
     stop = False
     for retries in range(start_retry + 1):
+        count = 0
         if retries:
             time.sleep(2 ** retries)
         for stage, cmds in [('start', start_commands), ('main', commands), ('stop', stop_commands)]:
@@ -606,23 +606,32 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
                             output = output[:32768] + '\n...\n' + output[-32768:]
                         if isinstance(exc, subprocess.TimeoutExpired):
                             output += f'\nTimeout after {timeout} seconds'
+                        else:
+                            output += f'\nException {exc}'
+                    elif stage == 'start':
+                        output = f'Exception {exc}'
                     return_code = None
                 if stage == 'main':
                     command_details.append({
                         'command': command, 'return_code': return_code,
                         'duration': time.time() - command_start})
                 if return_code != 0:
-                    stop = True
+                    stop = stage
+                    if stage == 'main':
+                        output += f'\nReturn code {return_code}'
+                    elif stage == 'start':
+                        output = ((output or '') + f'\nReturn code {return_code}').strip()
                     break
                 if stage == 'main':
                     count += 1
-        if not stop or stage != 'start':
-            if stage != 'start':
+        if not stop or stop != 'start':
+            if stage != 'start' and len(start_commands):
                 count += 1
             break
     answer = output if count >= needed - 1 else None
     if answer is None and len(output) > 65536:
         output = output[:32768] + '\n...\n' + output[-32768:]
+    details = {}
     for exp in test.get('present', []):
         needed += 1
         if answer is None:

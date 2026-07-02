@@ -228,7 +228,8 @@ RUN cat <<'EOF' > /home/ubuntu/.pi/agent/models.json
 EOF
 
 # RUN pi install npm:@kylebrodeur/pi-model-discovery
-RUN pi install git:github.com/manthey/pi-model-discovery@dist
+RUN pi install git:github.com/manthey/pi-model-discovery@dist && \
+    pip install pyyaml
 
 RUN cat <<'EOF' > /home/ubuntu/.local/bin/pidev.sh
 #!/usr/bin/env bash

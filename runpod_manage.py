@@ -124,12 +124,15 @@ def add_weights(compatible, args):  # noqa
                     v = float(v)
                 except Exception:
                     continue
-                if v is None or math.isnan(v):
+                if v is None or math.isnan(v) or 'tracing' in k:
                     continue
                 if k == 'Memory Bandwidth (GB/s)':
                     bw = v
-                if 'TFLOPS' in k and (tf is None or v * (0.5 if 'sparse' in k else 1) > tf):
-                    tf = v * (0.5 if 'sparse' in k else 1)
+                mult = 1
+                if 'sparse' in k or 'INT8' in k or 'FP4' in k:
+                    mult = 0.5
+                if 'TFLOPS' in k and (tf is None or v * mult > tf):
+                    tf = v * mult
             if bw is not None and tf is not None:
                 subtable[m['Model']] = {
                     'name': m['Model'], 'bandwidth': bw, 'tflops': tf,
@@ -143,10 +146,6 @@ def add_weights(compatible, args):  # noqa
             score = len(ws & m['ws']) * 2 - len(ws - m['ws']) - len(m['ws'] - ws)
             if best is None or score > best[0]:
                 best = score, m
-        # if best is None:
-        #     print(cm, '---')
-        # else:
-        #     print(cm, best[1])
         if best is not None:
             if args.weight.startswith('b'):
                 cm['weight'] = best[1]['bandwidth']
