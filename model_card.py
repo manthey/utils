@@ -563,6 +563,7 @@ def chat_test_worker(client: OpenAI, model_name: str, test):
 
 
 def bash_test(client: OpenAI, model_name: str, test):  # noqa
+    testtag = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
     commands = test['bash']
     start_commands = test.get('start', [])
     start_retry = test.get('start_retry', 0)
@@ -588,16 +589,19 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
             for command in cmds:
                 command_start = time.time()
                 command = command.replace('{model}', model_name)
+                command = command.replace('{testtag}', testtag)
                 try:
                     result = subprocess.run(
                         command, shell=True, capture_output=True, text=True,
                         env=env, cwd=test.get('cwd'), timeout=timeout,
                         encoding='utf8')
-                    if stage == 'main':
+                    if stage in {'start'} and output:
+                        output += ((result.stdout or '') + (result.stderr or ''))[:1024 * 1024]
+                    elif stage in {'start', 'main'}:
                         output = ((result.stdout or '') + (result.stderr or ''))[:1024 * 1024]
                     return_code = result.returncode
                 except Exception as exc:
-                    if stage == 'main':
+                    if stage in {'start', 'main'}:
                         try:
                             output = (result.stdout or '') + (result.stderr or '')
                         except Exception:
@@ -608,8 +612,6 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
                             output += f'\nTimeout after {timeout} seconds'
                         else:
                             output += f'\nException {exc}'
-                    elif stage == 'start':
-                        output = f'Exception {exc}'
                     return_code = None
                 if stage == 'main':
                     command_details.append({
@@ -617,10 +619,8 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
                         'duration': time.time() - command_start})
                 if return_code != 0:
                     stop = stage
-                    if stage == 'main':
+                    if stage in {'start', 'main'}:
                         output += f'\nReturn code {return_code}'
-                    elif stage == 'start':
-                        output = ((output or '') + f'\nReturn code {return_code}').strip()
                     break
                 if stage == 'main':
                     count += 1
@@ -1861,12 +1861,12 @@ def main():  # noqa
         help='Raise test errors for debugging')
     parser.add_argument(
         '--missing-tests', '--missing', '-m', action='store_true',
-        help='Read an existing model card and run only missing tests plus'
+        help='Read an existing model card and run only missing tests plus '
         'first_load.')
     parser.add_argument(
         '--failed-tests', '--failed', '-f',
         choices={'false', 'partial', 'full'},
-        help='Read an existing model card and run only failed tests plus'
+        help='Read an existing model card and run only failed tests plus '
         'first_load.  Using "full" will only rerun tests with no partial '
         'success.')
     parser.add_argument(

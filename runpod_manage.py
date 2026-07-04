@@ -186,7 +186,7 @@ def cmd_start(args):
         print('No available GPU found matching criteria.', file=sys.stderr)
         sys.exit(1)
     if args.gpu:
-        gpu_info = next([g for g in compatible if g['id'] == args.gpu])
+        gpu_info = [g for g in compatible if args.gpu in {g['id'], g['displayName']}][0]
     else:
         gpu_info = compatible[0]
     gpu_type_id = gpu_info['id']

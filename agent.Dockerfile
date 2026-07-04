@@ -4,6 +4,7 @@ ARG PYTHON_VERSIONS="3.11 3.10 3.12 3.13 3.14"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=en_US.UTF-8 \
+    PI_OFFLINE=1 \
     PYENV_ROOT="/.pyenv" \
     PATH="/.pyenv/bin:/.pyenv/shims:$PATH"
 
@@ -123,7 +124,11 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | b
     npx playwright install-deps && \
     npx playwright install chromium --with-deps && \
     npx playwright install firefox --with-deps && \
-    npx playwright install --with-deps
+    npx playwright install --with-deps && \
+    apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/* && \
+    rdfind -minsize 8192 -makehardlinks true -makeresultsfile false /usr && \
+    rdfind -minsize 8192 -makehardlinks true -makeresultsfile false /var
+
 RUN usermod -aG rabbitmq ubuntu && \
     chmod -R 777 /var/lib/rabbitmq/mnesia && \
     chmod -R 777 /var/log/rabbitmq
@@ -246,8 +251,7 @@ RUN pip install --no-cache-dir pyyaml && \
 
 RUN cat <<'EOF' > /home/ubuntu/.local/bin/pidev.sh
 #!/usr/bin/env bash
-export PI_TELEMETRY=0
-pi --mode json --model "$1" "$2" "${@:3}"
+pi --mode json --model "$1" "$2" "${@:3}" | jq -c 'select(.type != "message_update")'
 EOF
 
 RUN chmod a+x /home/ubuntu/.local/bin/pidev.sh && \
