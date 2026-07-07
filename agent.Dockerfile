@@ -48,6 +48,7 @@ RUN apt-get update && \
       vim \
       telnet \
       unzip \
+      bsdmainutils \
       # swe use \
       fd-find \
       ripgrep \
