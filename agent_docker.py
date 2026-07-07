@@ -41,7 +41,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         'command',
-        choices=['create', 'start', 'stop', 'exec', 'list', 'run'],
+        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'run'],
         help='Command.  create is the same as start followed by exec.')
     parser.add_argument('--name', help='Docker container name')
     parser.add_argument('--num', type=int, help='Docker container suffix')
@@ -92,7 +92,7 @@ def main():
             subprocess.check_call(docker_cmd + [
                 'exec', '-i', container_name, 'tar', '-xf', '-', '-C',
                 '/home/ubuntu/'], stdin=fp)
-    if args.command in {'create', 'start', 'exec'} and args.ollama:
+    if args.command in {'create', 'start', 'exec', 'update'} and args.ollama:
         host = args.ollama
         if '/' not in args.ollama and ':' not in args.ollama:
             host = f'host.docker.internal:{host}'

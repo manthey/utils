@@ -48,7 +48,7 @@ def gql_query(query):
     return data['data']
 
 
-def get_all_gpu_types():
+def get_all_gpu_types(disk_in_gb):
     query = """
     query GpuTypes {
       gpuTypes {
@@ -61,12 +61,17 @@ def get_all_gpu_types():
         communityPrice
         secureSpotPrice
         communitySpotPrice
-        lowestPrice(input: {gpuCount: 1}) {
+        lowestPrice(input: {
+          gpuCount: 1
+          minDisk: %d
+        }) {
           minimumBidPrice
+          uninterruptablePrice
+          stockStatus
         }
       }
     }
-    """
+    """ % (disk_in_gb, )
     result = gql_query(query)
     return result['gpuTypes']
 
@@ -83,8 +88,8 @@ def get_effective_price(gpu, secure_only):
     return min(prices)
 
 
-def find_gpus(min_memory_gb, secure_only):
-    gpu_types = get_all_gpu_types()
+def find_gpus(min_memory_gb, secure_only, disk_in_gb):
+    gpu_types = get_all_gpu_types(disk_in_gb)
     compatible = []
     for gpu in gpu_types:
         mem_gb = gpu.get('memoryInGb', 0)
@@ -93,6 +98,8 @@ def find_gpus(min_memory_gb, secure_only):
         if secure_only and not gpu.get('secureCloud', False):
             continue
         if not gpu.get('secureCloud', False) and not gpu.get('communityCloud', False):
+            continue
+        if gpu.get('lowestPrice', {}).get('stockStatus') is None:
             continue
         lowest_price, source = get_effective_price(gpu, secure_only)
         if not lowest_price:
@@ -154,7 +161,7 @@ def add_weights(compatible, args):  # noqa
 
 
 def cmd_check(args):
-    compatible = find_gpus(args.mem, args.secure)
+    compatible = find_gpus(args.mem, args.secure, args.vol + args.disk)
     if not compatible:
         print(f'No GPUs found with at least {args.mem} GB memory.')
         sys.exit(1)
@@ -181,7 +188,7 @@ def cmd_check(args):
 
 def cmd_start(args):
     runpod.api_key = get_api_key()
-    compatible = find_gpus(args.mem, args.secure)
+    compatible = find_gpus(args.mem, args.secure, args.vol + args.disk)
     if not compatible:
         print('No available GPU found matching criteria.', file=sys.stderr)
         sys.exit(1)
@@ -204,7 +211,7 @@ def cmd_start(args):
         name=f'ollama-{gpu_type_id}',
         image_name='ollama/ollama:latest',
         gpu_type_id=gpu_type_id,
-        container_disk_in_gb=args.vol,
+        container_disk_in_gb=args.disk,
         env={'OLLAMA_CONTEXT_LENGTH': '262144'},
         ports='11434/http',
         volume_in_gb=args.vol,
@@ -288,15 +295,20 @@ def main():
 
     check_parser = subparsers.add_parser('check', help='Check available GPUs')
     check_parser.add_argument('--mem', type=int, default=96, help='Minimum GPU memory in GB')
+    check_parser.add_argument('--secure', action='store_true', help='Secure cloud only')
+    check_parser.add_argument(
+        '--disk', type=int, default=25, help='Contianer disk (nvme) volume size in GB')
+    check_parser.add_argument('--vol', type=int, default=75, help='Volume size in GB')
     check_parser.add_argument(
         '--weight', choices=['bandwidth', 'b', 'compute', 'c'],
         help='Weigh pricing based on a metric')
-    check_parser.add_argument('--secure', action='store_true', help='Secure cloud only')
 
     start_parser = subparsers.add_parser('start', help='Start an Ollama pod')
     start_parser.add_argument('--gpu', help='GPU type to use (otherwise, use cheapest available)')
     start_parser.add_argument('--mem', type=int, default=96, help='Minimum GPU memory in GB')
     start_parser.add_argument('--secure', action='store_true', help='Secure cloud only')
+    start_parser.add_argument(
+        '--disk', type=int, default=25, help='Contianer disk (nvme) volume size in GB')
     start_parser.add_argument('--vol', type=int, default=75, help='Volume size in GB')
     start_parser.add_argument(
         '--no-wait', action='store_true', help='Do not wait for pod to be ready before exiting')
