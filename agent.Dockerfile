@@ -40,31 +40,30 @@ RUN apt-get update && \
       mesa-utils \
       xvfb \
       # developer convenience \
+      bsdmainutils \
       bzip2 \
       dirmngr \
       git \
+      jq \
       less \
       locales \
-      vim \
+      shellcheck \
       telnet \
       unzip \
-      bsdmainutils \
-      # swe use \
+      vim \
+      # agent use \
       fd-find \
       ripgrep \
       # testing convenience \
       fonts-dejavu \
       libmagic-dev \
       # testing \
-      redis \
-      rabbitmq-server \
       memcached \
       openjdk-17-jdk \
-      xmlstarlet \
       optipng \
-      # tools \
-      jq \
-      shellcheck \
+      rabbitmq-server \
+      redis \
+      xmlstarlet \
       # shrink docker image \
       rdfind \
       && \
