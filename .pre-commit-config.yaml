@@ -98,8 +98,7 @@ repos:
       - id: yamlfix
         args: [-c, pyproject.toml]
         exclude: model_card.yaml
-  - repo: https://github.com/hadolint/hadolint
-    rev: v2.14.0
+  - repo: local
     hooks:
       - id: hadolint-docker
         args:
@@ -121,3 +120,20 @@ repos:
           - SC2046
           - --ignore
           - SC2086
+        name: hadolint (docker, conditional)
+        description: Run hadolint via docker, skipping when docker is unavailable
+        entry: |-
+          python3 -c "import os, shutil, subprocess, sys
+          d = shutil.which('docker')
+          if not d:
+            print('hadolint-docker: docker not found on PATH, skiping.', file=sys.stderr)
+            sys.exit(0)
+          a = sys.argv[1:]  # pre-commit merges config args + filenames here
+          fs = ['/work/' + f for f in a if os.path.isfile(f)]
+          fl = [f for f in a if not os.path.isfile(f)]
+          if not fs:
+            sys.exit(0)
+          cmd = [d, 'run', '--rm', '-v', f'{os.getcwd()}:/work', '-i', '--entrypoint', 'hadolint', 'ghcr.io/hadolint/hadolint'] + fl + ['--'] + fs
+          sys.exit(subprocess.run(cmd).returncode)"
+        language: system
+        types_or: [dockerfile]
