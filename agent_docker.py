@@ -52,6 +52,9 @@ def main():
     parser.add_argument(
         '--fuse', action='store_true',
         help='Pass options to allow fuse to work when starting a container.')
+    parser.add_argument(
+        '--gpu', '--gpus', action='store_true',
+        help='Enable gpu access when starting a container.')
     args = parser.parse_args()
 
     # add more commands: list, run <model> <text> --detach, check, log
@@ -78,6 +81,8 @@ def main():
                 '--device', '/dev/fuse:/dev/fuse',
                 '--security-opt', 'apparmor=unconfined',
                 '--cap-add', 'SYS_ADMIN'])
+        if args.gpu:
+            other_opts.extend(['--gpus', 'all'])
         subprocess.check_call(docker_cmd + [
             'run', '-d', '--rm', '--name', container_name,
             '--add-host', f'host.docker.internal:{gateway}',

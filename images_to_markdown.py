@@ -184,8 +184,8 @@ def describe_file(url: str, specs: list[dict], filepath: Path, raise_errors: boo
 
 
 def process_directory(
-    input_dir: str, suffix: str, specs: list[dict], url: str, overwrite: bool,
-    dry_run: bool, raise_errors: bool,
+    input_dir: str, out: str | None, suffix: str, specs: list[dict], url: str,
+    overwrite: bool, dry_run: bool, raise_errors: bool,
 ) -> None:
     suffix = f'.{suffix.lstrip(".")}'
     target = Path(input_dir)
@@ -195,16 +195,25 @@ def process_directory(
         if str(filepath).endswith('.pdf'):
             continue
         md_path = filepath.with_suffix(suffix)
+        if out:
+            if os.path.isdir(out):
+                md_path = Path(out) / md_path.name
+            else:
+                md_path = Path(out)
         if (not overwrite and md_path.exists() and
                 md_path.stat().st_mtime > filepath.stat().st_mtime):
             continue
+        if out and not os.path.isdir(out):
+            overwrite = False
         try:
             print(filepath)
             description = describe_file(url, specs, filepath, raise_errors)
             print(description)
             if not dry_run:
-                md_path.write_text(description)
+                md_path.write_text(description, encoding='utf-8')
                 print(f'Created {md_path.name}')
+            else:
+                print(f'Would have created {md_path.name}')
         except Exception as exc:
             print(f'Failed processing {filepath.name}: {exc}')
 
@@ -213,7 +222,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description='Generate companion markdown or text for images using an '
         'Ollama vision model.')
-    parser.add_argument('input_dir', help='Directory containing images to process')
+    parser.add_argument(
+        'input_dir',
+        help='Directory containing images to process, or a single image to process.')
     parser.add_argument(
         '--yaml', help='YAML file containing a list of prompt specifications.')
     parser.add_argument(
@@ -231,6 +242,11 @@ def main() -> None:
         '--suffix', '--ext', default='.description.md',
         help='File extension to use for description files.')
     parser.add_argument(
+        '--out', '--output',
+        help='If an existing directory, the location to store outputs.  If a '
+        'single path or non-existent path, write the first description to '
+        'this file and then stop.')
+    parser.add_argument(
         '--model', '-m', default=None, action='append',
         help='Ollama vision model name; overrides models in the yaml spec')
     parser.add_argument(
@@ -238,9 +254,9 @@ def main() -> None:
         help='Image size; overrides size in the yaml spec')
     parser.add_argument(
         '--url', default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
-        help='Ollama base URL')
+        help='Ollama base URL.  Default %(default)s.')
     parser.add_argument(
-        '--overwrite', '-o', action='store_true',
+        '--overwrite', '-y', action='store_true',
         help='Overwrite existing companion markdown files')
     parser.add_argument(
         '-n', '--dry-run', action='store_true',
@@ -268,7 +284,7 @@ def main() -> None:
         for task in sorted(spec['task'] for spec in specs):
             print(f'  {task}')
         sys.exit(0)
-    process_directory(args.input_dir, args.suffix, specs, args.url,
+    process_directory(args.input_dir, args.out, args.suffix, specs, args.url,
                       args.overwrite, args.dry_run, args.raise_errors)
 
 
