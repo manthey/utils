@@ -40,7 +40,8 @@ PICTURE_PROMPT = (
 
 def image_to_data_url(image):
     buffer = io.BytesIO()
-    image.convert('RGB').save(buffer, format='PNG')
+    image = image.convert('L' if image.mode in {'L', 'LA'} else 'RGB')
+    image.save(buffer, format='PNG')
     encoded = base64.b64encode(buffer.getvalue()).decode('utf-8')
     return f'data:image/png;base64,{encoded}'
 
@@ -136,7 +137,7 @@ def process_file(converter, client, filepath, model):
     return markdown
 
 
-def process_directory(args):
+def process_directory(args):  # noqa
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -157,46 +158,59 @@ def process_directory(args):
     )
     client = OpenAI(base_url=args.url.rstrip('/') + '/v1', api_key=args.api_key)
     suffix = f'.{args.suffix.lstrip(".")}'
-    target = Path(args.pdf)
-    for filepath in (sorted(target.rglob('*')) if not target.is_file() else [target]):
-        if not filepath.is_file():
+    for input_path in args.inputs:
+        target = Path(input_path)
+        if target.is_file():
+            file_list = [target]
+        elif target.is_dir():
+            file_list = sorted(target.rglob('*')) if args.recurse else sorted(target.iterdir())
+        else:
             continue
-        if not str(filepath).endswith('.pdf') and filepath != args.pdf:
-            continue
-        md_path = filepath.with_suffix(suffix)
-        if args.out:
-            if os.path.isdir(args.out):
-                md_path = Path(args.out) / md_path.name
-            else:
-                md_path = Path(args.out)
-        if (not args.overwrite and md_path.exists() and
-                md_path.stat().st_mtime > filepath.stat().st_mtime):
-            continue
-        if args.out and not os.path.isdir(args.out):
-            args.overwrite = False
-        try:
-            print(filepath)
-            description = process_file(converter, client, filepath, args.model)
-            print(description)
-            if not args.dry_run:
-                md_path.write_text(description, encoding='utf-8')
-                print(f'Created {md_path.name}')
-            else:
-                print(f'Would have created {md_path.name}')
-        except Exception as exc:
-            print(f'Failed processing {filepath.name}: {exc}')
-            if args.raise_errors:
-                raise
+        for filepath in file_list:
+            if not filepath.is_file():
+                continue
+            if not str(filepath).endswith('.pdf') and filepath not in args.inputs:
+                continue
+            md_path = filepath.with_suffix(suffix)
+            if args.out:
+                if os.path.isdir(args.out):
+                    md_path = Path(args.out) / md_path.name
+                else:
+                    md_path = Path(args.out)
+            if (not args.overwrite and md_path.exists() and
+                    md_path.stat().st_mtime > filepath.stat().st_mtime):
+                continue
+            if args.out and not os.path.isdir(args.out):
+                args.overwrite = False
+            if args.list:
+                print(f'{filepath} -> {md_path}')
+                continue
+            try:
+                print(filepath)
+                description = process_file(converter, client, filepath, args.model)
+                print(description)
+                if not args.dry_run:
+                    md_path.write_text(description, encoding='utf-8')
+                    print(f'Created {md_path.name}')
+                else:
+                    print(f'Would have created {md_path.name}')
+            except Exception as exc:
+                print(f'Failed processing {filepath.name}: {exc}')
+                if args.raise_errors:
+                    raise
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Convert a PDF to Markdown using Docling with LLM-based '
-                    'enrichment through an OpenAI-compatible endpoint.',
+        description='Convert PDFs to Markdown using Docling with LLM-based '
+        'image descriptions.',
     )
     parser.add_argument(
-        'pdf', type=Path,
-        help='Path to the input PDF file or directory of files.')
+        'inputs', nargs='+',
+        help='One or more files or directories to process.')
+    parser.add_argument(
+        '--recurse', '-r', action='store_true',
+        help='Recurse into input directories')
     parser.add_argument(
         '--suffix', '--ext', default='.description.md',
         help='File extension to use for description files.')
@@ -223,6 +237,9 @@ def main():
     parser.add_argument(
         '-n', '--dry-run', action='store_true',
         help='Do not actually write markdown files')
+    parser.add_argument(
+        '--list', '-l', action='store_true',
+        help='Just list what files would be processed without actually doing anything.')
     parser.add_argument(
         '--raise', dest='raise_errors', action='store_true',
         help='Raise on errors instead of ignoring them.')

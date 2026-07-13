@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import large_image
-import openai
 import PIL.Image
 import yaml
 
@@ -90,7 +89,7 @@ def prepare_image(filepath: Path, max_dim: int) -> tuple[str, int, int]:
     except Exception:
         img = PIL.Image.open(filepath)
         w, h = img.width, img.height
-    img = img.convert('RGB')
+    img = img.convert('L' if img.mode in {'L', 'LA'} else 'RGB')
     width, height = img.width, img.height
     if width > max_dim or height > max_dim:
         scale = max_dim / max(width, height)
@@ -105,6 +104,8 @@ def describe_image(
     url: str, model: str, b64_image: str, system: str, user: str,
     options: dict[str, Any] | None = None,
 ) -> str:
+    import openai
+
     client = openai.OpenAI(base_url=f'{url}/v1', api_key='ollama', timeout=300)
     messages = [{
         'role': 'system',
@@ -183,39 +184,50 @@ def describe_file(url: str, specs: list[dict], filepath: Path, raise_errors: boo
     return '\n\n---\n\n'.join(blocks)
 
 
-def process_directory(
-    input_dir: str, out: str | None, suffix: str, specs: list[dict], url: str,
-    overwrite: bool, dry_run: bool, raise_errors: bool,
+def process_directory(  # noqa
+    inputs: str, recurse: bool, out: str | None, suffix: str,
+    specs: list[dict], url: str, overwrite: bool, dry_run: bool,
+    raise_errors: bool, list_files: bool,
 ) -> None:
     suffix = f'.{suffix.lstrip(".")}'
-    target = Path(input_dir)
-    for filepath in (sorted(target.rglob('*')) if not target.is_file() else [target]):
-        if not filepath.is_file():
+    for input_path in inputs:
+        target = Path(input_path)
+        if target.is_file():
+            file_list = [target]
+        elif target.is_dir():
+            file_list = sorted(target.rglob('*')) if recurse else sorted(target.iterdir())
+        else:
             continue
-        if str(filepath).endswith('.pdf'):
-            continue
-        md_path = filepath.with_suffix(suffix)
-        if out:
-            if os.path.isdir(out):
-                md_path = Path(out) / md_path.name
-            else:
-                md_path = Path(out)
-        if (not overwrite and md_path.exists() and
-                md_path.stat().st_mtime > filepath.stat().st_mtime):
-            continue
-        if out and not os.path.isdir(out):
-            overwrite = False
-        try:
-            print(filepath)
-            description = describe_file(url, specs, filepath, raise_errors)
-            print(description)
-            if not dry_run:
-                md_path.write_text(description, encoding='utf-8')
-                print(f'Created {md_path.name}')
-            else:
-                print(f'Would have created {md_path.name}')
-        except Exception as exc:
-            print(f'Failed processing {filepath.name}: {exc}')
+        for filepath in file_list:
+            if not filepath.is_file():
+                continue
+            if str(filepath).endswith(('.pdf', '.docx', '.md')):
+                continue
+            md_path = filepath.with_suffix(suffix)
+            if out:
+                if os.path.isdir(out):
+                    md_path = Path(out) / md_path.name
+                else:
+                    md_path = Path(out)
+            if (not overwrite and md_path.exists() and
+                    md_path.stat().st_mtime > filepath.stat().st_mtime):
+                continue
+            if out and not os.path.isdir(out):
+                overwrite = False
+            if list_files:
+                print(f'{filepath} -> {md_path}')
+                continue
+            try:
+                print(filepath)
+                description = describe_file(url, specs, filepath, raise_errors)
+                print(description)
+                if not dry_run:
+                    md_path.write_text(description, encoding='utf-8')
+                    print(f'Created {md_path.name}')
+                else:
+                    print(f'Would have created {md_path.name}')
+            except Exception as exc:
+                print(f'Failed processing {filepath.name}: {exc}')
 
 
 def main() -> None:
@@ -223,8 +235,11 @@ def main() -> None:
         description='Generate companion markdown or text for images using an '
         'Ollama vision model.')
     parser.add_argument(
-        'input_dir',
-        help='Directory containing images to process, or a single image to process.')
+        'inputs', nargs='+',
+        help='One or more files or directories to process.')
+    parser.add_argument(
+        '--recurse', '-r', action='store_true',
+        help='Recurse into input directories')
     parser.add_argument(
         '--yaml', help='YAML file containing a list of prompt specifications.')
     parser.add_argument(
@@ -233,7 +248,7 @@ def main() -> None:
         '--task', '-t', action='append',
         help='Run the matching task; can be specified multiple times')
     parser.add_argument(
-        '--task-regex', '-r',
+        '--task-regex', '--filter', '-f',
         help='Regular expression to match task names')
     parser.add_argument(
         '--list-tasks', action='store_true',
@@ -259,8 +274,11 @@ def main() -> None:
         '--overwrite', '-y', action='store_true',
         help='Overwrite existing companion markdown files')
     parser.add_argument(
-        '-n', '--dry-run', action='store_true',
+        '--dry-run', '-n', action='store_true',
         help='Do not actually write markdown files')
+    parser.add_argument(
+        '--list', '-l', action='store_true',
+        help='Just list what files would be processed without actually doing anything.')
     parser.add_argument(
         '--raise', dest='raise_errors', action='store_true',
         help='Raise on errors instead of ignoring them.')
@@ -284,8 +302,9 @@ def main() -> None:
         for task in sorted(spec['task'] for spec in specs):
             print(f'  {task}')
         sys.exit(0)
-    process_directory(args.input_dir, args.out, args.suffix, specs, args.url,
-                      args.overwrite, args.dry_run, args.raise_errors)
+    process_directory(
+        args.inputs, args.recurse, args.out, args.suffix, specs, args.url,
+        args.overwrite, args.dry_run, args.raise_errors, args.list)
 
 
 if __name__ == '__main__':
