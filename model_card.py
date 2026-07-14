@@ -1845,7 +1845,7 @@ def main():  # noqa
         '--remove-tests',
         help='Comma-separated list of test names to remove')
     parser.add_argument(
-        '--list-tests', '-l', action='store_true',
+        '-l', '--list-tests', action='store_true',
         help='List available tests and exit')
     parser.add_argument(
         '--metadata-only', action='store_true',
@@ -1854,28 +1854,31 @@ def main():  # noqa
         '--timeout', type=float, default=300,
         help='Per-request timeout in seconds (default: 300)')
     parser.add_argument(
-        '--skip', '-s', action='store_true',
+        '-s', '--skip', action='store_true',
         help='Skip checking a model if the output file already exists.')
     parser.add_argument(
         '--raise', dest='raise_errors', action='store_true',
         help='Raise test errors for debugging')
     parser.add_argument(
-        '--missing-tests', '--missing', '-m', action='store_true',
+        '-m', '--missing-tests', '--missing', action='store_true',
         help='Read an existing model card and run only missing tests plus '
         'first_load.')
     parser.add_argument(
-        '--failed-tests', '--failed', '-f',
+        '-f', '--failed-tests', '--failed',
         choices={'false', 'partial', 'full'},
         help='Read an existing model card and run only failed tests plus '
         'first_load.  Using "full" will only rerun tests with no partial '
         'success.')
     parser.add_argument(
-        '--require-first-load', '-r', action='store_true',
+        '-r', '--require-first-load', action='store_true',
         help='If the first load fails, do not write a model card or proceed '
         'with other tests.')
     parser.add_argument(
         '--after', '--since',
         help='Any test older than this is considered missing.')
+    parser.add_argument(
+        '-n', '--dry-run', action='store_true',
+        help='List what models and tests would be run, but do not run them.')
     parser.add_argument(
         '--summary',
         help='If specified, the name of a summary file to write.  If this '
@@ -1900,7 +1903,8 @@ def main():  # noqa
                 continue
             sys.stdout.write(f'{t.name:25s} {t.description}{" (skip)" if t.skip else ""}\n')
         sys.exit(0)
-    restart_command(args.restart)
+    if not args.dry_run:
+        restart_command(args.restart)
     ollama_base_url = args.base_url.rstrip('/')
     if args.remove_tests and not args.tests:
         args.tests = 'skip_all_tests'
@@ -1924,7 +1928,8 @@ def main():  # noqa
                 out_path = args.output
         if args.skip and out_path and os.path.exists(out_path):
             continue
-        sys.stderr.write(f'Fetching metadata for {model}\n')
+        if not args.dry_run:
+            sys.stderr.write(f'Fetching metadata for {model}\n')
         try:
             metadata = get_model_metadata(ollama_base_url, model)
         except requests.exceptions.ConnectionError:
@@ -1985,6 +1990,11 @@ def main():  # noqa
                 else:
                     model_metadata[metadata['name']] = metadata
                     continue
+            if args.dry_run:
+                sys.stderr.write(f'Fetching metadata for {model}\n')
+                for name in run_names:
+                    sys.stderr.write(f'  {name}\n')
+                continue
 
             def save_func(out_path, metadata, existing_results):
                 def save_progress(results):
@@ -2017,7 +2027,10 @@ def main():  # noqa
         else:
             sys.stdout.write(report)
         add_to_summary(summary, model, metadata, {t.name: r for t, r in test_results})
-        restart_command(args.restart)
+        if not args.dry_run:
+            restart_command(args.restart)
+    if args.dry_run:
+        return
     if (args.summary or args.report) and args.collect and os.path.isdir(args.output):
         for filename in os.listdir(args.output):
             path = os.path.join(args.output, filename)
