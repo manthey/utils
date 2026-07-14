@@ -84,23 +84,28 @@ def enrich_formulas(doc, client, model):
     from docling_core.types.doc.labels import DocItemLabel
 
     processed = 0
+    count = len([item for item, _ in doc.iterate_items()
+                 if getattr(item, 'label', None) == DocItemLabel.FORMULA])
     for item, _ in doc.iterate_items():
         if getattr(item, 'label', None) != DocItemLabel.FORMULA:
             continue
         image = crop_item_image(doc, item)
         if image is None:
+            count -= 1
             continue
         try:
-            logger.debug('Formula %d', processed + 1)
+            logger.debug('Formula %d / %d', processed + 1, count)
             latex = query_vision_model(client, model, image, FORMULA_PROMPT)
         except Exception as error:
             msg = f'Formula enrichment failed: {error}'
             logger.warning(msg)
+            count -= 1
             continue
         item.text = latex
         processed += 1
-    msg = f'Processed {processed} formulas'
-    logger.info(msg)
+    if processed:
+        msg = f'Processed {processed} formulas'
+        logger.info(msg)
 
 
 def enrich_pictures(doc, client, model):
@@ -108,24 +113,28 @@ def enrich_pictures(doc, client, model):
                                                  PictureItem, PictureMeta)
 
     described = 0
+    count = len([item for item, _ in doc.iterate_items() if isinstance(item, PictureItem)])
     for item, _ in doc.iterate_items():
         if not isinstance(item, PictureItem):
             continue
         image = item.get_image(doc) or crop_item_image(doc, item)
         if image is None:
+            count -= 1
             continue
         try:
-            logger.debug('Picture %d', described + 1)
+            logger.debug('Picture %d / %d', described + 1, count)
             description = query_vision_model(client, model, image, PICTURE_PROMPT)
         except Exception as error:
             msg = f'Picture description failed: {error}'
             logger.warning(msg)
+            count -= 1
             continue
         item.meta = PictureMeta(description=DescriptionMetaField(
             text=description, created_by=model))
         described += 1
-    msg = f'Described {described} pictures'
-    logger.info(msg)
+    if described:
+        msg = f'Described {described} pictures'
+        logger.info(msg)
 
 
 def get_converter(args):
@@ -138,7 +147,7 @@ def get_converter(args):
     pipeline_options.generate_picture_images = True
     pipeline_options.images_scale = args.images_scale
     pipeline_options.do_picture_classification = False
-    pipeline_options.do_picture_description = True
+    pipeline_options.do_picture_description = False
     pipeline_options.do_code_enrichment = True
     pipeline_options.do_formula_enrichment = False
     converter = DocumentConverter(
@@ -169,6 +178,7 @@ def process_file(converter, client, filepath, model, args):
         enrich_pictures(doc, client, model)
         enrich_formulas(doc, client, model)
     finally:
+        result.input._backend.unload()
         if offload:
             import requests
 
