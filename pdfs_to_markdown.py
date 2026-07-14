@@ -128,20 +128,10 @@ def enrich_pictures(doc, client, model):
     logger.info(msg)
 
 
-def process_file(converter, client, filepath, model):
-    result = converter.convert(filepath)
-    doc = result.document
-    enrich_pictures(doc, client, model)
-    enrich_formulas(doc, client, model)
-    markdown = doc.export_to_markdown()
-    return markdown
-
-
-def process_directory(args):  # noqa
+def get_converter(args):
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
-    from openai import OpenAI
 
     pipeline_options = PdfPipelineOptions()
     pipeline_options.generate_page_images = True
@@ -156,6 +146,47 @@ def process_directory(args):  # noqa
             InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
         },
     )
+    return converter
+
+
+def process_file(converter, client, filepath, model, args):
+    offload = converter is None
+    if converter is None:
+        converter = get_converter(args)
+    try:
+        result = converter.convert(filepath)
+        doc = result.document
+    finally:
+        if offload:
+            converter = None
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+    try:
+        enrich_pictures(doc, client, model)
+        enrich_formulas(doc, client, model)
+    finally:
+        if offload:
+            import requests
+
+            try:
+                requests.post(args.url.rstrip('/') + '/api/chat', json={
+                    'model': args.model, 'messages': [], 'keep_alive': 0})
+            except Exception:
+                pass
+    markdown = doc.export_to_markdown()
+    return markdown
+
+
+def process_directory(args):  # noqa
+    from openai import OpenAI
+
+    converter = None
+    if not args.offload:
+        converter = get_converter(args)
     client = OpenAI(base_url=args.url.rstrip('/') + '/v1', api_key=args.api_key)
     suffix = f'.{args.suffix.lstrip(".")}'
     for input_path in args.inputs:
@@ -187,7 +218,7 @@ def process_directory(args):  # noqa
                 continue
             try:
                 print(filepath)
-                description = process_file(converter, client, filepath, args.model)
+                description = process_file(converter, client, filepath, args.model, args)
                 print(description)
                 if not args.dry_run:
                     md_path.write_text(description, encoding='utf-8')
@@ -237,6 +268,9 @@ def main():
     parser.add_argument(
         '-n', '--dry-run', action='store_true',
         help='Do not actually write markdown files')
+    parser.add_argument(
+        '--offload', '-o', action='store_true',
+        help='Offload torch models between pdfs.')
     parser.add_argument(
         '--list', '-l', action='store_true',
         help='Just list what files would be processed without actually doing anything.')
