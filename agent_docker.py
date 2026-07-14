@@ -37,6 +37,37 @@ def list_known(docker_cmd: list[str], base_name: str):
         print(name, container_id, image)
 
 
+def get_mount_args(is_windows):
+    mounts = [{
+        'src': [os.path.expanduser('~/.vimrc'), os.path.expanduser('~/_vimrc')],
+        'dst': '/home/ubuntu/.vimrc',
+        'mode': 'ro',
+    }, {
+        'src': [os.path.expanduser('~/.vim_backup')],
+        'dst': '/home/ubuntu/.vim_backup',
+        'mode': 'rw',
+    }, {
+        'src': [os.path.expanduser('~/.vim')],
+        'dst': '/home/ubuntu/.vim',
+        'mode': 'ro',
+    }, {
+        'src': [os.path.expanduser('~/.pi/agent/sessions')],
+        'dst': '/home/ubuntu/.pi/agent/sessions',
+        'mode': 'rw',
+    }]
+    args = []
+    for mount in mounts:
+        paths = [path for path in mount['src'] if os.path.exists(path)]
+        if not len(paths):
+            continue
+        path = paths[0]
+        if is_windows and path[1] == ':':
+            path = '/mnt/{path[0].lower()}/{path[2:].replace("\\". "/")}'
+        if ':' not in path:
+            args.extend(['-v', f'{path}:{mount["dst"]}:{mount["mode"]}'])
+    return args
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -55,6 +86,9 @@ def main():
     parser.add_argument(
         '--gpu', '--gpus', action='store_true',
         help='Enable gpu access when starting a container.')
+    parser.add_argument(
+        '--local', action='store_true',
+        help='Mount local utilities directories.  This removes some isolation.')
     args = parser.parse_args()
 
     # add more commands: list, run <model> <text> --detach, check, log
@@ -83,6 +117,8 @@ def main():
                 '--cap-add', 'SYS_ADMIN'])
         if args.gpu:
             other_opts.extend(['--gpus', 'all'])
+        if args.local:
+            other_opts.extend(get_mount_args(is_windows))
         subprocess.check_call(docker_cmd + [
             'run', '-d', '--rm', '--name', container_name,
             '--add-host', f'host.docker.internal:{gateway}',

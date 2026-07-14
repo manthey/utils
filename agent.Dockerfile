@@ -259,6 +259,21 @@ EOF
 RUN chmod a+x /home/ubuntu/.local/bin/pidev.sh && \
     pidev.sh x x --help
 
+RUN cat <<'EOF' >> /home/ubuntu/.bashrc
+function truncate_current_directory () {
+  echo -n "${PWD/#$HOME/\~}" | awk -F "/" '{
+    if (length($0) > 32) {
+    if (NF>4 && length($(NF-1)$NF) < 28) print $1 "/" $2 "/…/" $(NF-1) "/" $NF;
+    else if (NF>3) print $1 "/" $2 "/…/" $NF;
+    else print $1 "/…/" $NF; }
+    else print $0;}'
+}
+function parse_git_branch () {
+  git branch 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \(.*\)/ (\1)/'
+}
+PS1='\h:$(truncate_current_directory)$(parse_git_branch)$ '
+EOF
+
 # USER root
 # Run like `docker exec -t model_card_docker bash -c "cd some_repo && uvx mini-swe-agent --model-class litellm_textbased -c ~/.config/mini-swe-agent/mini.yaml -c model.model_kwargs.timeout=300 -c environment.local.timeout=300 -t \"some requires\" -m openai/{model} -y < /dev/null | tee /tmp/agent.log"`
 # docker build --force-rm -t manthey/agent -f agent.Dockerfile .
