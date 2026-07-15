@@ -260,7 +260,10 @@ def current_file_hashes_for_source(src: SourceConfig) -> dict[str, str]:
             futures[executor.submit(get_hash, p, p_size)] = p
         for future, p in futures.items():
             rel = p.relative_to(src.source_path).as_posix()
-            result[os.path.join(src.source_path, rel)] = future.result()
+            try:
+                result[os.path.join(src.source_path, rel)] = future.result()
+            except Exception:
+                pass
     return result
 
 
