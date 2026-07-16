@@ -82,8 +82,8 @@ RUN apt-get update && \
     find / -xdev -name __pycache__ -type d -exec rm -r {} \+ && \
     rm -rf /etc/ssh/ssh_host* && \
     rm -rf /usr/share/vim/vim91/doc/* /usr/share/vim/vim91/tutor/* /usr/share/doc && \
-    curl -sSL "https://github.com/universal-ctags/ctags-nightly-build/releases/download/$(curl -s https://api.github.com/repos/universal-ctags/ctags-nightly-build/releases/latest | grep '"tag_name"' | head -1 | cut -d '"' -f 4)/uctags-$(curl -s https://api.github.com/repos/universal-ctags/ctags-nightly-build/releases/latest | grep '"tag_name"' | head -1 | cut -d '"' -f 4 | cut -d '+' -f 1)-linux-x86_64.deb" -o /tmp/uctags.deb && \
-    dpkg -i /tmp/uctags.deb && \
+    curl -sSL "https://github.com/universal-ctags/ctags-nightly-build/releases/download/$(curl -s https://api.github.com/repos/universal-ctags/ctags-nightly-build/releases/latest | grep '"tag_name"' | head -1 | cut -d '"' -f 4)/uctags-$(curl -s https://api.github.com/repos/universal-ctags/ctags-nightly-build/releases/latest | grep '"tag_name"' | head -1 | cut -d '"' -f 4 | cut -d '+' -f 1)-$(uname -m | sed 's/x86_64/linux-x86_64/;s/aarch64/linux-aarch64/').deb" -o /tmp/uctags.deb && \
+    dpkg --force-architecture -i /tmp/uctags.deb && \
     rm /tmp/uctags.deb && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/* && \
     rdfind -minsize 8192 -makehardlinks true -makeresultsfile false /usr && \
@@ -196,7 +196,8 @@ RUN cat <<'EOF' > /home/ubuntu/.pi/agent/settings.json
   "defaultModel": "qwen3.6:35b",
   "defaultProvider": "ollama",
   "defaultProjectTrust": "always",
-  "quietStartup": false
+  "quietStartup": false,
+  "outputPad": 0
 }
 EOF
 
