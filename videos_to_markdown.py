@@ -12,6 +12,7 @@ import argparse
 import base64
 import io
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -20,32 +21,35 @@ from pathlib import Path
 from typing import Any
 
 import PIL.Image
-import pyffmpeg
-from faster_whisper import WhisperModel
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
-def describe_changes(
-    url: str, model: str, b64_frame1: str, b64_frame2: str, system: str, user: str,
+def describe_sequence(
+    url: str, api_key: str, model: str, frames_b64: list[str], system: str, user: str,
+    overview: str | None = None, previous: str | None = None, transcript: str | None = None,
     options: dict[str, Any] | None = None,
 ) -> str:
     import openai
 
-    client = openai.OpenAI(base_url=f'{url}/v1', api_key='ollama', timeout=300)
-    messages = [{
-        'role': 'system',
-        'content': [{'type': 'text', 'text': system}],
-    }, {
-        'role': 'user',
-        'content': [
-            {'type': 'text', 'text': f'{user}\n\nImage 1 (earlier):'},
-            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64_frame1}'}},
-            {'type': 'text', 'text': 'Image 2 (later):'},
-            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64_frame2}'}},
-        ],
-    }]
+    client = openai.OpenAI(base_url=f'{url}/v1', api_key=api_key, timeout=300)
+    content: list[dict[str, Any]] = []
+    if overview:
+        content.append({'type': 'text', 'text': f'Overall video context:\n{overview}'})
+    if previous:
+        content.append({'type': 'text', 'text': f'Previous segment description:\n{previous}'})
+    if transcript:
+        content.append({
+            'type': 'text', 'text': f'Audio transcript for this segment:\n{transcript}'})
+    content.append({'type': 'text', 'text': user})
+    for i, b64 in enumerate(frames_b64, 1):
+        content.append({'type': 'text', 'text': f'Frame {i}:'})
+        content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}})
+    messages = [
+        {'role': 'system', 'content': [{'type': 'text', 'text': system}]},
+        {'role': 'user', 'content': content},
+    ]
     if not system:
         messages[0:1] = []
     response = client.chat.completions.create(
@@ -56,55 +60,136 @@ def describe_changes(
     return message
 
 
-def describe_single_image(
-    url: str, model: str, b64_image: str, system: str, user: str,
-    options: dict[str, Any] | None = None,
-) -> str:
-    import openai
-
-    client = openai.OpenAI(base_url=f'{url}/v1', api_key='ollama', timeout=300)
-    messages = [{
-        'role': 'system',
-        'content': [{'type': 'text', 'text': system}],
-    }, {
-        'role': 'user',
-        'content': [
-            {'type': 'text', 'text': user},
-            {'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64_image}'}},
-        ],
-    }]
-    if not system:
-        messages[0:1] = []
-    response = client.chat.completions.create(
-        model=model, messages=messages, **(options or {}))
-    message = response.choices[0].message.content
-    if '```' in message:
-        message = message.split('```')[1].split('\n', 1)[-1]
-    return message
+def get_duration(video_path: Path, ffmpeg_bin: str) -> float:
+    result = subprocess.run(
+        [ffmpeg_bin, '-i', str(video_path)], capture_output=True, text=True)
+    for line in result.stderr.splitlines():
+        if 'Duration:' in line:
+            part = line.split('Duration:')[1].split(',')[0].strip()
+            hours, minutes, seconds = part.split(':')
+            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    return 0.0
 
 
-def extract_frames(video_path: Path, ffmpeg_bin: str, interval: int) -> list[tuple[float, bytes]]:
+def detect_scene_changes(video_path: Path, ffmpeg_bin: str, threshold: float) -> list[float]:
+    cmd = [
+        ffmpeg_bin, '-i', str(video_path),
+        '-vf', f"select='gt(scene,{threshold})',showinfo",
+        '-f', 'null', '-',
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    times = []
+    for line in result.stderr.splitlines():
+        if 'pts_time:' in line:
+            try:
+                times.append(float(line.split('pts_time:')[1].split()[0]))
+            except (ValueError, IndexError):
+                continue
+    return times
+
+
+def compute_keypoints(
+    duration: float, scene_times: list[float], min_interval: float, max_interval: float,
+) -> list[float]:
+    candidates = sorted({0.0} | {t for t in scene_times if 0 < t < duration})
+    keypoints = [0.0]
+    for t in candidates[1:]:
+        while t - keypoints[-1] > max_interval:
+            keypoints.append(keypoints[-1] + max_interval)
+        if t - keypoints[-1] >= min_interval:
+            keypoints.append(t)
+    while duration - keypoints[-1] > max_interval:
+        keypoints.append(keypoints[-1] + max_interval)
+    return keypoints
+
+
+def sequence_timestamps(start: float, end: float, count: int) -> list[float]:
+    if end <= start or count <= 1:
+        return [start]
+    step = (end - start) / count
+    return [start + step * (i + 0.5) for i in range(count)]
+
+
+def extract_frames_at(
+    video_path: Path, ffmpeg_bin: str, timestamps: list[float], max_size: int,
+) -> list[tuple[float, bytes]]:
     frames = []
     with tempfile.TemporaryDirectory() as temp_dir:
-        output_pattern = Path(temp_dir) / 'frame_%04d.jpg'
-        cmd = [
-            ffmpeg_bin,
-            '-y',
-            '-i', str(video_path),
-            '-vf', f'fps=1/{interval}',
-            '-vsync', 'vfr',
-            '-q:v', '2',
-            str(output_pattern),
-        ]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-        for i, frame_file in enumerate(sorted(Path(temp_dir).glob('*.jpg'))):
-            timestamp = i * interval
-            with open(frame_file, 'rb') as f:
-                frames.append((timestamp, f.read()))
+        for i, ts in enumerate(timestamps):
+            out = Path(temp_dir) / f'frame_{i:04d}.jpg'
+            cmd = [
+                ffmpeg_bin, '-y', '-ss', f'{ts:.3f}', '-i', str(video_path),
+                '-frames:v', '1', '-q:v', '2',
+            ]
+            if max_size:
+                cmd += [
+                    '-vf',
+                    f"scale='min(iw,{max_size})':'min(ih,{max_size})':"
+                    'force_original_aspect_ratio=decrease',
+                ]
+            cmd.append(str(out))
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            if out.exists():
+                frames.append((ts, out.read_bytes()))
     return frames
 
 
+def build_montage(frames_bytes: list[bytes], cols: int, cell_size: int) -> str:
+    thumbs = []
+    for data in frames_bytes:
+        img = PIL.Image.open(io.BytesIO(data)).convert('RGB')
+        img.thumbnail((cell_size, cell_size))
+        thumbs.append(img)
+    rows = math.ceil(len(thumbs) / cols)
+    cell_w = max(t.width for t in thumbs)
+    cell_h = max(t.height for t in thumbs)
+    montage = PIL.Image.new('RGB', (cols * cell_w, rows * cell_h), (0, 0, 0))
+    for i, thumb in enumerate(thumbs):
+        row, col = divmod(i, cols)
+        montage.paste(thumb, (col * cell_w, row * cell_h))
+    buf = io.BytesIO()
+    montage.save(buf, format='JPEG', quality=90)
+    return base64.b64encode(buf.getvalue()).decode('utf-8')
+
+
+def build_overviews(
+    filepath: Path, args, ffmpeg_bin: str, duration: float,
+) -> list[tuple[float, float, str]]:
+    if not args.montage:
+        return []
+    interval = args.montage_interval if args.montage_interval > 0 else max(duration, 1.0)
+    count = args.montage_grid * args.montage_grid
+    overviews = []
+    start = 0.0
+    while start < max(duration, 1.0):
+        end = min(start + interval, duration) if duration else interval
+        ts = sequence_timestamps(start, end, count)
+        frames = extract_frames_at(filepath, ffmpeg_bin, ts, args.montage_cell_size)
+        if frames:
+            montage_b64 = build_montage(
+                [b for _, b in frames], args.montage_grid, args.montage_cell_size)
+            logger.info('Describing montage for %s to %s',
+                        format_timestamp(start), format_timestamp(end))
+            text = describe_sequence(
+                url=args.url, api_key=args.api_key, model=args.model,
+                frames_b64=[montage_b64], system=args.system, user=args.montage_prompt)
+            overviews.append((start, end, text))
+        start = end
+        if not duration:
+            break
+    return overviews
+
+
+def overview_for(overviews: list[tuple[float, float, str]], timestamp: float) -> str | None:
+    for start, end, text in overviews:
+        if start <= timestamp < end:
+            return text
+    return overviews[-1][2] if overviews else None
+
+
 def transcribe_audio(video_path: Path, whisper_model: str) -> list[dict[str, Any]]:
+    from faster_whisper import WhisperModel
+
     try:
         model = WhisperModel(whisper_model, device='cpu', compute_type='int8')
         segments, _ = model.transcribe(str(video_path), beam_size=5)
@@ -114,25 +199,37 @@ def transcribe_audio(video_path: Path, whisper_model: str) -> list[dict[str, Any
         return []
 
 
+def transcript_for_window(
+    transcript: list[dict[str, Any]], start: float, end: float,
+) -> str | None:
+    segments = [s for s in transcript if s['end'] > start and s['start'] < end]
+    if not segments:
+        return None
+    return '\n'.join(
+        f'[{format_timestamp(s["start"])} - {format_timestamp(s["end"])}] {s["text"]}'
+        for s in segments)
+
+
 def format_timestamp(seconds: float) -> str:
     mins = int(seconds // 60)
     secs = int(seconds % 60)
     return f'{mins:02d}:{secs:02d}'
 
 
-def to_jpeg_base64(frame_data: bytes) -> str:
-    img = PIL.Image.open(io.BytesIO(frame_data))
-    if img.mode in {'RGBA', 'P', 'LA'}:
-        img = img.convert('RGB')
-    buf = io.BytesIO()
-    img.save(buf, format='JPEG', quality=95)
-    return base64.b64encode(buf.getvalue()).decode('utf-8')
+def to_base64(frame_data: bytes) -> str:
+    return base64.b64encode(frame_data).decode('utf-8')
 
 
 def process_file(filepath: Path, args, ffmpeg_bin: str) -> str:
     desc = [f'# Video Summary: {filepath.name}\n']
-    logger.info('Extracting frames from %s', filepath.name)
-    frames = extract_frames(filepath, ffmpeg_bin, args.frame_interval)
+    duration = get_duration(filepath, ffmpeg_bin)
+    logger.info('Duration of %s is %.1f seconds', filepath.name, duration)
+    scene_times = (
+        detect_scene_changes(filepath, ffmpeg_bin, args.scene_threshold)
+        if args.scene_threshold > 0 else [])
+    logger.info('Detected %d scene changes in %s', len(scene_times), filepath.name)
+    keypoints = compute_keypoints(duration, scene_times, args.min_interval, args.max_interval)
+    logger.info('Using %d keypoints for %s', len(keypoints), filepath.name)
     logger.info('Transcribing audio from %s', filepath.name)
     transcript = transcribe_audio(filepath, args.whisper_model)
     if transcript:
@@ -142,38 +239,39 @@ def process_file(filepath: Path, args, ffmpeg_bin: str) -> str:
                 f'[{format_timestamp(segment["start"])} - {format_timestamp(segment["end"])}]')
             desc.append(f'{time_str} {segment["text"]}')
         desc.append('')
+    overviews = build_overviews(filepath, args, ffmpeg_bin, duration)
+    if overviews:
+        desc.append('## Overview\n')
+        for start, end, text in overviews:
+            desc.append(
+                f'### Overview {format_timestamp(start)} to {format_timestamp(end)}\n\n{text}\n')
     desc.append('## Visual Timeline and Activity\n')
-    previous_b64 = None
-    for idx, (timestamp, frame_data) in enumerate(frames):
-        time_str = format_timestamp(timestamp)
-        current_b64 = to_jpeg_base64(frame_data)
-        if idx == 0:
-            logger.info('Describing initial frame at %s', time_str)
-            description = describe_single_image(
-                url=args.url,
-                model=args.model,
-                b64_image=current_b64,
-                system=args.system,
-                user=args.user,
-            )
-            desc.append(f'### Time {time_str} (Initial State)\n\n{description}\n')
-        else:
-            prev_time_str = format_timestamp(frames[idx - 1][0])
-            logger.info('Describing changes from %s to %s', prev_time_str, time_str)
-            description = describe_changes(
-                url=args.url,
-                model=args.model,
-                b64_frame1=previous_b64,
-                b64_frame2=current_b64,
-                system=args.system,
-                user=args.change_prompt,
-            )
-            desc.append(f'### Time {prev_time_str} to {time_str}\n\n{description}\n')
-        previous_b64 = current_b64
+    previous_description = None
+    for idx, start in enumerate(keypoints):
+        end = keypoints[idx + 1] if idx + 1 < len(keypoints) else duration
+        overview = overview_for(overviews, start)
+        seq_ts = sequence_timestamps(start, end, args.frames_per_window)
+        frames = extract_frames_at(filepath, ffmpeg_bin, seq_ts, args.frame_max_size)
+        frames_b64 = [to_base64(data) for _, data in frames]
+        window_transcript = transcript_for_window(transcript, start, end)
+        prompt = args.user if idx == 0 else args.change_prompt
+        logger.info('Describing segment %s to %s',
+                    format_timestamp(start), format_timestamp(end))
+        description = describe_sequence(
+            url=args.url, api_key=args.api_key, model=args.model, frames_b64=frames_b64,
+            system=args.system, user=prompt, overview=overview,
+            previous=previous_description, transcript=window_transcript)
+        label = ' (Initial State)' if idx == 0 else ''
+        desc.append(
+            f'### Time {format_timestamp(start)} to {format_timestamp(end)}{label}\n\n'
+            f'{description}\n')
+        previous_description = description
     return '\n'.join(desc)
 
 
 def process_directory(args):  # noqa
+    import pyffmpeg
+
     suffix = f'.{args.suffix.lstrip(".")}'
     ffmpeg_bin = pyffmpeg.FFmpeg().get_ffmpeg_bin()
     for input_path in args.inputs:
@@ -220,7 +318,8 @@ def process_directory(args):  # noqa
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate markdown summary of video content offline comparing adjacent frames.')
+        description='Generate markdown summary of video content offline using scene aware '
+        'keypoints, frame sequences, a montage overview, and aligned audio transcripts.')
     parser.add_argument(
         'inputs', nargs='+',
         help='One or more files or directories to process.')
@@ -246,24 +345,56 @@ def main():
         '--whisper-model', default='base',
         help='Whisper model size to use for transcriptions. Default %(default)s.')
     parser.add_argument(
-        '--frame-interval', type=int, default=10,
-        help='Extract frames every N seconds. Default %(default)s.')
+        '--scene-threshold', type=float, default=0.4,
+        help='Scene change detection threshold from 0 to 1, 0 disables. Default %(default)s.')
+    parser.add_argument(
+        '--min-interval', type=float, default=2.0,
+        help='Minimum seconds between keypoints. Default %(default)s.')
+    parser.add_argument(
+        '--max-interval', type=float, default=10.0,
+        help='Maximum seconds between keypoints regardless of scene changes. Default %(default)s.')
+    parser.add_argument(
+        '--frames-per-window', type=int, default=4,
+        help='Number of frames sampled per segment for change analysis. Default %(default)s.')
+    parser.add_argument(
+        '--frame-max-size', type=int, default=768,
+        help='Longest side in pixels for analysis frames, 0 keeps original. Default %(default)s.')
+    parser.add_argument(
+        '--montage', action=argparse.BooleanOptionalAction, default=True,
+        help='Build a montage overview to provide global context. Default enabled.')
+    parser.add_argument(
+        '--montage-grid', type=int, default=4,
+        help='Montage grid dimension, producing this value squared tiles. Default %(default)s.')
+    parser.add_argument(
+        '--montage-cell-size', type=int, default=320,
+        help='Longest side in pixels for each montage tile. Default %(default)s.')
+    parser.add_argument(
+        '--montage-interval', type=float, default=0.0,
+        help='Seconds covered by each montage, 0 uses one montage for the whole video. '
+        'Default %(default)s.')
     parser.add_argument(
         '--system',
         default='You describe images and identify actions, state changes, '
-        'and visual transitions between sequential frames. You never use '
+        'and visual transitions across sequential frames. You never use '
         'emojis, slang, or metaphors.',
-        help='System prompt for image description')
+        help='System prompt for descriptions.')
     parser.add_argument(
-        '--user', default='Describe this initial image in detail.',
-        help='User prompt for describing the first frame.')
+        '--user',
+        default='These frames are sampled in order from the opening segment of the video. '
+        'Describe the initial setting, subjects, and any activity in detail.',
+        help='User prompt for describing the opening segment.')
     parser.add_argument(
         '--change-prompt',
-        default='Compare Image 1 and Image 2. Describe what has changed, '
-        'including any movement, actions, new elements, or scene changes. '
-        'If no significant activity occurred, state that the frame is '
-        'identical or near-identical.',
-        help='User prompt for comparing sequential frames.')
+        default='These frames are sampled in order from one segment of the video. '
+        'Describe what happens across them, including movement, actions, new elements, '
+        'and scene changes. If nothing significant changes, state that the segment is static.',
+        help='User prompt for describing a segment of frames.')
+    parser.add_argument(
+        '--montage-prompt',
+        default='This image is a grid of still frames sampled in chronological order from a '
+        'segment of a video, read left to right and top to bottom. Provide a concise overview '
+        'of the setting, subjects, and overall activity.',
+        help='User prompt for describing the montage overview.')
     parser.add_argument(
         '--overwrite', '-y', action='store_true',
         help='Overwrite existing companion markdown files')
