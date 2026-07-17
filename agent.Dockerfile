@@ -60,6 +60,7 @@ RUN apt-get update && \
       fonts-dejavu \
       libmagic-dev \
       # testing \
+      lsof \
       memcached \
       openjdk-17-jdk \
       optipng \
