@@ -174,20 +174,6 @@ def extract_quantization(filename: str) -> str:
     return 'UNKNOWN'
 
 
-def estimate_memory_gb(file_size_bytes: int, quantization_bits: float | None = None) -> float:
-    """
-    Estimate memory burden in GB.
-
-    When quantization is unknown, use simple file size with overhead.
-    Otherwise, calculate based on file size scaled by quantization efficiency.
-    """
-    base_gb = (file_size_bytes / (1024**3))
-    overhead = 1.15
-    if quantization_bits is not None and quantization_bits > 0:
-        return base_gb * quantization_bits / 8.0 * overhead
-    return base_gb * overhead
-
-
 def matches_type(repo_id: str, model_type: str) -> bool:
     repo_lower = repo_id.lower()
     return any(re.search(p, repo_lower) for p in MODEL_PATTERNS[model_type]['patterns'])
@@ -337,6 +323,9 @@ def arch_params_from_ollama_model_info(model_info: dict) -> ModelArchParams:
     }
     gathered = {}
     for key, value in model_info.items():
+        if any(part in key.lower() for part in (
+                '.vision.', '.visual.', 'mmproj', 'projector')):
+            continue
         for pattern, target in TARGETS.items():
             if target not in gathered and re.fullmatch(pattern, key):
                 try:
@@ -406,21 +395,23 @@ def extract_capabilities_from_ollama(show_response: dict) -> dict:
 
 def compute_memory_burden_gb(
     arch: ModelArchParams, quantization: str, requested_context: int,
+    resident_weight_gb: float | None = None,
 ) -> float | None:
     bits_per_weight = QUANT_PRIORITY_BITS.get(quantization, (0, 16))[1]
-    if bits_per_weight is None or arch is None or arch.param_count is None:
+    weights_bytes = None if resident_weight_gb is None else resident_weight_gb * 1024 ** 3
+    if bits_per_weight is not None and arch is not None and arch.param_count is not None:
+        weights_bytes = max(weights_bytes or 0, arch.param_count * bits_per_weight / 8)
+    if weights_bytes is None:
         return None
-    weights_bytes = (arch.param_count * bits_per_weight) / 8
+    if arch is None:
+        return weights_bytes / 1024 ** 3
     effective_context = requested_context
     if arch.context_length is not None:
         effective_context = min(requested_context, arch.context_length)
     kv_bytes = 0
     if arch.num_layers is not None and arch.num_kv_heads is not None and arch.head_dim is not None:
         kv_bytes = 4 * arch.num_layers * arch.num_kv_heads * arch.head_dim * effective_context
-    embed_bytes = 0
-    if arch.embedding_length:
-        embed_bytes = 2 * effective_context * arch.embedding_length * 4
-    return (weights_bytes + kv_bytes + embed_bytes) / (1024 ** 3)
+    return (weights_bytes + kv_bytes) / (1024 ** 3)
 
 
 def estimate_ollama_memory_gb(
@@ -473,6 +464,21 @@ def fetch_gguf_file_sizes(api: huggingface_hub.HfApi, repo_id: str) -> list[tupl
     for base, total_size in chunked_groups.items():
         single_files.append((f'{base}.gguf', total_size, True))
     return single_files
+
+
+@cache.memoize(expire=86400 * 10)
+def fetch_gguf_auxiliary_size_bytes(api: huggingface_hub.HfApi, repo_id: str) -> int:
+    try:
+        files = rate_limited_call(lambda: list(api.list_repo_tree(repo_id, recursive=False)))
+    except Exception:
+        return 0
+    sizes = []
+    for f in files:
+        filename = getattr(f, 'path', '') or ''
+        if filename.endswith('.gguf') and re.search(
+                r'(^|[-_.])(mmproj|projector)([-_.]|$)', filename.lower()):
+            sizes.append(getattr(f, 'size', 0) or 0)
+    return max(sizes, default=0)
 
 
 def select_best_quantization(
@@ -572,6 +578,7 @@ def discover_models(  # noqa
             if not gguf_files:
                 skipped_no_fit += 1
                 continue
+        auxiliary_size_gb = fetch_gguf_auxiliary_size_bytes(api, model.id) / (1024 ** 3)
         gguf_meta = getattr(model, 'gguf', {}) or {}
         gguf_candidate = next((f for f, _, chunked in gguf_files if not chunked), None)
         gguf_meta_parsed = fetch_gguf_metadata_from_repo(
@@ -616,7 +623,7 @@ def discover_models(  # noqa
             quant = extract_quantization(filename)
             if quant == 'UNKNOWN':
                 continue
-            mem_gb = estimate_memory_gb(size_bytes)
+            mem_gb = size_bytes / (1024 ** 3)
             if quant not in quants or mem_gb > quants[quant]['size']:
                 quants[quant] = {'file': filename, 'size': mem_gb}
         for quant, info in quants.items():
@@ -625,7 +632,7 @@ def discover_models(  # noqa
                 repo_id=model.id,
                 repo_name=model.id,
                 filename=info['file'],
-                size_gb=info['size'],
+                size_gb=info['size'] + auxiliary_size_gb,
                 quantization=quant,
                 model_type=model_type,
                 is_chunked=False,
@@ -634,7 +641,8 @@ def discover_models(  # noqa
                 modified=getattr(model, 'last_modified', None),
                 context_size=arch.context_length,
                 arch_params=arch,
-                memory_burden_gb=compute_memory_burden_gb(arch, quant, context_memory),
+                memory_burden_gb=compute_memory_burden_gb(
+                    arch, quant, context_memory, info['size'] + auxiliary_size_gb),
                 has_tools=caps['has_tools'],
                 has_reasoning=caps['has_reasoning'],
                 has_vision=caps['has_vision'],
@@ -753,7 +761,7 @@ def discover_ollama_models(  # noqa
             quantization = ''.join(tag_part.upper().split('.GGUF')).split(
                 '.')[-1].split('-')[-1] or 'UNKNOWN'
         arch = arch_params_from_ollama_model_info(model_info_block)
-        memory_burden_gb = compute_memory_burden_gb(arch, quantization, context_memory)
+        memory_burden_gb = compute_memory_burden_gb(arch, quantization, context_memory, size_gb)
         if context_limit_gb is not None and (
                 memory_burden_gb is None or memory_burden_gb > context_limit_gb):
             continue

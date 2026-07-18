@@ -128,6 +128,7 @@ def extract_vision_information(  # noqa
         'granite': 384, 'llava': 336, 'moondream': 378,
         'bakllava': 336, 'nanollava': 384, 'obsidian': 384,
         'qwen2vl': (56 ** 2, 3584 ** 2),
+        'qwen25vl': (560 ** 2, 560 ** 2),
         'qwen35': (256 ** 2, 4096 ** 2),
         'internvl': (64 ** 2, 4096 ** 2),
         'minicpmv': (49152, 1128_960),
