@@ -8,6 +8,7 @@ import argparse
 import os
 import platform
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -99,6 +100,8 @@ def main():
     container_name = basename + (f'_{args.num}' if args.num is not None else '')
     is_windows = platform.system().lower() == 'windows'
     docker_cmd = ['wsl', 'docker'] if is_windows else ['docker']
+    if is_windows and not str(shutil.which('docker')).endswith(('.bat', '.cmd')):
+        docker_cmd = ['docker']
     if args.command in {'list'}:
         list_known(docker_cmd, container_name)
     if args.command in {'create', 'start', 'stop'}:
@@ -106,7 +109,7 @@ def main():
             'rm', '-f', container_name], stderr=subprocess.DEVNULL, check=False)
     if args.command in {'create', 'start'}:
         gateway = 'host-gateway'
-        if is_windows:
+        if is_windows and docker_cmd[0] == 'wsl':
             gateway = subprocess.check_output([
                 'wsl', 'grep', 'nameserver', '/etc/resolv.conf']).decode().split()[1].strip()
         other_opts = []
