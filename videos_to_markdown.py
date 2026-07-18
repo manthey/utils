@@ -106,8 +106,8 @@ def compute_keypoints(
 def sequence_timestamps(start: float, end: float, count: int) -> list[float]:
     if end <= start or count <= 1:
         return [start]
-    step = (end - start) / count
-    return [start + step * (i + 0.5) for i in range(count)]
+    step = (end - start) / (count - 1)
+    return [start + step * idx for idx in range(count)]
 
 
 def extract_frames_at(
@@ -342,7 +342,7 @@ def main():
         '--model', '-m', default='qwen2.5vl:7b',
         help='Vision model identifier. Default %(default)s.')
     parser.add_argument(
-        '--whisper-model', default='base',
+        '--whisper-model', default='small',
         help='Whisper model size to use for transcriptions. Default %(default)s.')
     parser.add_argument(
         '--scene-threshold', type=float, default=0.4,

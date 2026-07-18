@@ -52,6 +52,7 @@ class TestDefinition:
     name: str
     description: str
     skip: bool | str
+    category: str | None
     version: int
     run: Callable[[OpenAI, str, str], TestResult]
 
@@ -59,11 +60,15 @@ class TestDefinition:
 TEST_REGISTRY: list[TestDefinition] = []
 
 
-def register_test(name: str, description: str, skip: bool | str = False, version: int = 0):
+def register_test(
+    name: str, description: str, skip: bool | str = False, version: int = 0,
+    category: str | None = None,
+):
     def decorator(func: Callable[[OpenAI, str, str], TestResult]) -> Callable:
         func._version = version
         TEST_REGISTRY.append(TestDefinition(
-            name=name, description=description, run=func, skip=skip, version=version,
+            name=name, description=description, run=func, skip=skip,
+            category=category, version=version,
         ))
         return func
 
@@ -807,7 +812,42 @@ def test_java_simple(
     })
 
 
-@register_test('embedding', 'Embedding generation support', version=1)
+@register_test('javascript_dom', 'Javascript DOM events', version=1)
+def test_javascript_dom(
+    client: OpenAI, model_name: str, ollama_base_url: str,
+) -> TestResult:
+    system_prompt = (
+        'You are a helpful assistant who never uses metaphors, slang, emojis, '
+        'or decorative characters. You will answer only the questions asked, '
+        'and not offer to do additional work. Your code is impeccably correct '
+        'and carefully considered, using clear variable names and few to no '
+        'comments.')
+    prompt = (
+        'We have a webpage with an input element with the id "name_filter" '
+        'and a table element with the id "summary". We want to show and hide '
+        'rows in the body of the table (not the header) by toggling a '
+        '"hidden" class on the row based on the contents of the filter input '
+        'element. The first cell of the row contains a name. If the filter '
+        'does not match (case-insensitively) a substring of the name in the '
+        'cell, the row should be marked hidden. When the filter is empty, it '
+        'matches everything and all rows do not have the hidden class. Write '
+        'compact javascript to attach an appropriate event handler toggling '
+        'the hidden class on table rows. Do not use any external libraries.')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': prompt},
+        ]},
+        'present': [
+            r'summary',
+            r'name_filter',
+            r'hidden',
+            r'tbody',
+        ],
+    })
+
+
+@register_test('embedding', 'Embedding generation support', category='embedding', version=1)
 def test_embedding(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -846,7 +886,7 @@ def test_embedding(
     )
 
 
-@register_test('vision', 'Image understanding')
+@register_test('vision', 'Image understanding', category='vision')
 def test_vision(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -867,7 +907,7 @@ def test_vision(
     })
 
 
-@register_test('histology', 'Histology image understanding')
+@register_test('histology', 'Histology image understanding', category='vision')
 def test_histology(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -890,7 +930,7 @@ def test_histology(
     })
 
 
-@register_test('photo', 'Photo understanding', version=1)
+@register_test('photo', 'Photo understanding', version=1, category='vision')
 def test_photo(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -913,7 +953,7 @@ def test_photo(
     })
 
 
-@register_test('geospatial_image', 'Geospatial understanding', version=2)
+@register_test('geospatial_image', 'Geospatial understanding', category='vision', version=2)
 def test_geospatial_image(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -936,7 +976,9 @@ def test_geospatial_image(
     })
 
 
-@register_test('geospatial_analysis', 'Geospatial image description for tools', version=2)
+@register_test(
+    'geospatial_analysis', 'Geospatial image description for tools',
+    category='vision', version=2)
 def test_geospatial_analysis(
     client: OpenAI, model_name: str, ollama_base_url: str,
 ) -> TestResult:
@@ -1568,8 +1610,10 @@ def summary_table(summary, models):
 
 
 def create_summary_html(timestamp, cols, rows):
+    name_filter = '</br><input id="name_filter"/>'
     th_cells = ''.join(
-        f'<th>{html.escape(str(c))}</th>' for c in cols)
+        f'<th>{html.escape(str(c)) + ("" if idx else name_filter)}</th>'
+        for idx, c in enumerate(cols))
     th_cells += '<th data-sort-method="none"></th>'
     tr_rows = ''.join(
         '<tr>' + ''.join(f'<td>{html.escape(str(r))}</td>' for r in row) + '<td></td></tr>'
@@ -1640,6 +1684,9 @@ def create_summary_html(timestamp, cols, rows):
     td:last-child::before {
       content: counter(row-number);
     }
+    tr.hidden {
+      display: none;
+    }
   </style>
   <script src="https://cdn.jsdelivr.net/npm/tablesort@5.7.1/dist/tablesort.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/tablesort@5.7.1/dist/sorts/tablesort.number.min.js">
@@ -1657,8 +1704,20 @@ def create_summary_html(timestamp, cols, rows):
       <tbody>{tr_rows}</tbody>
     </table>
   </div>
+""" + """
   <script>
-    new Tablesort(document.getElementById('summary'), {{ descending: false }});
+    new Tablesort(document.getElementById('summary'), { descending: false });
+    ['click', 'keydown', 'mousedown'].forEach(evt => {
+      document.getElementById('name_filter').addEventListener(evt, e => e.stopPropagation());
+    });
+    document.getElementById('name_filter').addEventListener('input', function() {
+      const filter = this.value.toLowerCase();
+      document.querySelectorAll('#summary tbody tr').forEach(row => {
+        const nameCell = row.cells[0];
+        const name = nameCell.textContent.toLowerCase();
+        row.classList.toggle('hidden', !name.includes(filter));
+      });
+    });
   </script>
 </body>
 </html>
