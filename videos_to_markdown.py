@@ -27,8 +27,9 @@ logger.addHandler(logging.NullHandler())
 
 
 def describe_sequence(
-    url: str, api_key: str, model: str, frames_b64: list[str], system: str, user: str,
-    overview: str | None = None, previous: str | None = None, transcript: str | None = None,
+    url: str, api_key: str, model: str, frames_b64: list[str],
+    times: list[float], system: str, user: str, overview: str | None = None,
+    previous: str | None = None, transcript: str | None = None,
     options: dict[str, Any] | None = None,
 ) -> str:
     import openai
@@ -43,8 +44,8 @@ def describe_sequence(
         content.append({
             'type': 'text', 'text': f'Audio transcript for this segment:\n{transcript}'})
     content.append({'type': 'text', 'text': user})
-    for i, b64 in enumerate(frames_b64, 1):
-        content.append({'type': 'text', 'text': f'Frame {i}:'})
+    for i, b64 in enumerate(frames_b64):
+        content.append({'type': 'text', 'text': f'Frame at {times[i]:4.2f}s:'})
         content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}})
     messages = [
         {'role': 'system', 'content': [{'type': 'text', 'text': system}]},
@@ -172,7 +173,9 @@ def build_overviews(
                         format_timestamp(start), format_timestamp(end))
             text = describe_sequence(
                 url=args.url, api_key=args.api_key, model=args.model,
-                frames_b64=[montage_b64], system=args.system, user=args.montage_prompt)
+                frames_b64=[montage_b64], times=ts, system=args.system,
+                user=args.montage_prompt)
+            logger.debug(text)
             overviews.append((start, end, text))
         start = end
         if not duration:
@@ -194,8 +197,8 @@ def transcribe_audio(video_path: Path, whisper_model: str) -> list[dict[str, Any
         model = WhisperModel(whisper_model, device='cpu', compute_type='int8')
         segments, _ = model.transcribe(str(video_path), beam_size=5)
         return [{'start': s.start, 'end': s.end, 'text': s.text.strip()} for s in segments]
-    except Exception as exc:
-        logger.warning('Audio transcription failed or no audio present: %s', exc)
+    except Exception:
+        logger.info('No audio')
         return []
 
 
@@ -254,13 +257,15 @@ def process_file(filepath: Path, args, ffmpeg_bin: str) -> str:
         frames = extract_frames_at(filepath, ffmpeg_bin, seq_ts, args.frame_max_size)
         frames_b64 = [to_base64(data) for _, data in frames]
         window_transcript = transcript_for_window(transcript, start, end)
-        prompt = args.user if idx == 0 else args.change_prompt
+        prompt = args.user
         logger.info('Describing segment %s to %s',
                     format_timestamp(start), format_timestamp(end))
         description = describe_sequence(
-            url=args.url, api_key=args.api_key, model=args.model, frames_b64=frames_b64,
-            system=args.system, user=prompt, overview=overview,
-            previous=previous_description, transcript=window_transcript)
+            url=args.url, api_key=args.api_key, model=args.model,
+            frames_b64=frames_b64, times=seq_ts, system=args.system,
+            user=prompt, overview=overview, previous=previous_description,
+            transcript=window_transcript)
+        logger.debug(description)
         label = ' (Initial State)' if idx == 0 else ''
         desc.append(
             f'### Time {format_timestamp(start)} to {format_timestamp(end)}{label}\n\n'
@@ -343,35 +348,43 @@ def main():
         help='Vision model identifier. Default %(default)s.')
     parser.add_argument(
         '--whisper-model', default='small',
-        help='Whisper model size to use for transcriptions. Default %(default)s.')
+        help='Whisper model size to use for transcriptions. Default '
+        '%(default)s.')
     parser.add_argument(
         '--scene-threshold', type=float, default=0.4,
-        help='Scene change detection threshold from 0 to 1, 0 disables. Default %(default)s.')
+        help='Scene change detection threshold from 0 to 1, 0 disables. '
+        'Default %(default)s.')
     parser.add_argument(
         '--min-interval', type=float, default=2.0,
         help='Minimum seconds between keypoints. Default %(default)s.')
     parser.add_argument(
         '--max-interval', type=float, default=10.0,
-        help='Maximum seconds between keypoints regardless of scene changes. Default %(default)s.')
+        help='Maximum seconds between keypoints regardless of scene changes. '
+        'Default %(default)s.')
     parser.add_argument(
         '--frames-per-window', type=int, default=4,
-        help='Number of frames sampled per segment for change analysis. Default %(default)s.')
+        help='Number of frames sampled per segment for change analysis. '
+        'Default %(default)s.')
     parser.add_argument(
         '--frame-max-size', type=int, default=768,
-        help='Longest side in pixels for analysis frames, 0 keeps original. Default %(default)s.')
+        help='Longest side in pixels for analysis frames, 0 keeps original. '
+        'Default %(default)s.')
     parser.add_argument(
         '--montage', action=argparse.BooleanOptionalAction, default=True,
-        help='Build a montage overview to provide global context. Default enabled.')
+        help='Build a montage overview to provide global context. Default '
+        'enabled.')
     parser.add_argument(
         '--montage-grid', type=int, default=4,
-        help='Montage grid dimension, producing this value squared tiles. Default %(default)s.')
+        help='Montage grid dimension, producing this value squared tiles. '
+        'Default %(default)s.')
     parser.add_argument(
         '--montage-cell-size', type=int, default=320,
-        help='Longest side in pixels for each montage tile. Default %(default)s.')
+        help='Longest side in pixels for each montage tile. Default '
+        '%(default)s.')
     parser.add_argument(
         '--montage-interval', type=float, default=0.0,
-        help='Seconds covered by each montage, 0 uses one montage for the whole video. '
-        'Default %(default)s.')
+        help='Seconds covered by each montage, 0 uses one montage for the '
+        'whole video. Default %(default)s.')
     parser.add_argument(
         '--system',
         default='You describe images and identify actions, state changes, '
@@ -380,20 +393,20 @@ def main():
         help='System prompt for descriptions.')
     parser.add_argument(
         '--user',
-        default='These frames are sampled in order from the opening segment of the video. '
-        'Describe the initial setting, subjects, and any activity in detail.',
-        help='User prompt for describing the opening segment.')
-    parser.add_argument(
-        '--change-prompt',
-        default='These frames are sampled in order from one segment of the video. '
-        'Describe what happens across them, including movement, actions, new elements, '
-        'and scene changes. If nothing significant changes, state that the segment is static.',
+        default='These frames are sampled in order from one segment of the '
+        'video. Describe what happens across them, including movement, '
+        'actions, new elements, and scene changes.  Do not mention frame '
+        'numbers or repeat what was stated earlier. If nothing significant '
+        'changes, give a brief synopsis of the settings, subjects, and scene. '
+        'Do not speculate on other properties. Be precise; do not use vague '
+        'terminology or state that this is a summary.',
         help='User prompt for describing a segment of frames.')
     parser.add_argument(
         '--montage-prompt',
-        default='This image is a grid of still frames sampled in chronological order from a '
-        'segment of a video, read left to right and top to bottom. Provide a concise overview '
-        'of the setting, subjects, and overall activity.',
+        default='This image is a grid of still frames sampled in '
+        'chronological order from a segment of a video, read left to right '
+        'and top to bottom. Provide a concise overview of the setting, '
+        'subjects, and overall activity.',
         help='User prompt for describing the montage overview.')
     parser.add_argument(
         '--overwrite', '-y', action='store_true',
