@@ -57,7 +57,9 @@ def query_vision_model(client, model, image, prompt):
             ],
         }],
     )
-    return response.choices[0].message.content.strip()
+    content = response.choices[0].message.content.strip()
+    tokens = response.usage.total_tokens if response.usage else 0
+    return content, tokens
 
 
 def crop_item_image(doc, item):
@@ -83,6 +85,7 @@ def crop_item_image(doc, item):
 def enrich_formulas(doc, client, model):
     from docling_core.types.doc.labels import DocItemLabel
 
+    max_tokens = 0
     processed = 0
     count = len([item for item, _ in doc.iterate_items()
                  if getattr(item, 'label', None) == DocItemLabel.FORMULA])
@@ -95,7 +98,8 @@ def enrich_formulas(doc, client, model):
             continue
         try:
             logger.debug('Formula %d / %d', processed + 1, count)
-            latex = query_vision_model(client, model, image, FORMULA_PROMPT)
+            latex, tokens = query_vision_model(client, model, image, FORMULA_PROMPT)
+            max_tokens = max(tokens, max_tokens)
         except Exception as error:
             msg = f'Formula enrichment failed: {error}'
             logger.warning(msg)
@@ -106,12 +110,14 @@ def enrich_formulas(doc, client, model):
     if processed:
         msg = f'Processed {processed} formulas'
         logger.info(msg)
+    return max_tokens
 
 
 def enrich_pictures(doc, client, model):
     from docling_core.types.doc.document import (DescriptionMetaField,
                                                  PictureItem, PictureMeta)
 
+    max_tokens = 0
     described = 0
     count = len([item for item, _ in doc.iterate_items() if isinstance(item, PictureItem)])
     for item, _ in doc.iterate_items():
@@ -123,7 +129,8 @@ def enrich_pictures(doc, client, model):
             continue
         try:
             logger.debug('Picture %d / %d', described + 1, count)
-            description = query_vision_model(client, model, image, PICTURE_PROMPT)
+            description, tokens = query_vision_model(client, model, image, PICTURE_PROMPT)
+            max_tokens = max(tokens, max_tokens)
         except Exception as error:
             msg = f'Picture description failed: {error}'
             logger.warning(msg)
@@ -135,6 +142,7 @@ def enrich_pictures(doc, client, model):
     if described:
         msg = f'Described {described} pictures'
         logger.info(msg)
+    return max_tokens
 
 
 def get_converter(args):
@@ -175,8 +183,9 @@ def process_file(converter, client, filepath, model, args):
             except Exception:
                 pass
     try:
-        enrich_pictures(doc, client, model)
-        enrich_formulas(doc, client, model)
+        tokens = enrich_pictures(doc, client, model)
+        tokens = max(tokens, enrich_formulas(doc, client, model))
+        logger.debug('Max tokens in any vision request: %d', tokens)
     finally:
         result.input._backend.unload()
         if offload:
