@@ -14,6 +14,7 @@ import io
 import logging
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -62,14 +63,13 @@ def describe_sequence(
 
 
 def get_duration(video_path: Path, ffmpeg_bin: str) -> float:
-    result = subprocess.run(
-        [ffmpeg_bin, '-i', str(video_path)], capture_output=True, text=True)
-    for line in result.stderr.splitlines():
-        if 'Duration:' in line:
-            part = line.split('Duration:')[1].split(',')[0].strip()
-            hours, minutes, seconds = part.split(':')
-            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-    return 0.0
+    result = subprocess.run([
+        ffmpeg_bin, '-hide_banner', '-loglevel', 'info', '-i', str(video_path),
+        '-map', '0:v:0', '-vf', 'showinfo', '-f', 'null', '-',
+    ], capture_output=True, text=True)
+    matches = re.compile(r'\bpts_time:([0-9]+(?:\.[0-9]+)?)\b').findall(
+        (result.stderr or '') + '\n' + (result.stdout or ''))
+    return float(matches[-1]) if matches else 0.0
 
 
 def detect_scene_changes(video_path: Path, ffmpeg_bin: str, threshold: float) -> list[float]:
@@ -323,8 +323,9 @@ def process_directory(args):  # noqa
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate markdown summary of video content offline using scene aware '
-        'keypoints, frame sequences, a montage overview, and aligned audio transcripts.')
+        description='Generate markdown description of video content offline '
+        'using scene-aware keypoints, frame sequences, a montage overview, '
+        'and aligned audio transcripts.')
     parser.add_argument(
         'inputs', nargs='+',
         help='One or more files or directories to process.')
@@ -332,7 +333,7 @@ def main():
         '--recurse', '-r', action='store_true',
         help='Recurse into input directories')
     parser.add_argument(
-        '--suffix', '--ext', default='.summary.md',
+        '--suffix', '--ext', default='.description.md',
         help='File extension to use for description files.')
     parser.add_argument(
         '--out', '--output',
@@ -362,7 +363,7 @@ def main():
         help='Maximum seconds between keypoints regardless of scene changes. '
         'Default %(default)s.')
     parser.add_argument(
-        '--frames-per-window', type=int, default=4,
+        '--frames-per-window', type=int, default=5,
         help='Number of frames sampled per segment for change analysis. '
         'Default %(default)s.')
     parser.add_argument(
@@ -398,8 +399,9 @@ def main():
         'actions, new elements, and scene changes.  Do not mention frame '
         'numbers or repeat what was stated earlier. If nothing significant '
         'changes, give a brief synopsis of the settings, subjects, and scene. '
-        'Do not speculate on other properties. Be precise; do not use vague '
-        'terminology or state that this is a summary.',
+        'Do not speculate on other properties or on what viewers are doing. '
+        'Be precise; do not use vague terminology or state that this is a '
+        'summary.',
         help='User prompt for describing a segment of frames.')
     parser.add_argument(
         '--montage-prompt',
