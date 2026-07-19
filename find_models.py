@@ -564,7 +564,7 @@ def discover_models(  # noqa
     tw, _ = shutil.get_terminal_size()
     if model_filter != 'all':
         with_gguf = [m for m in with_gguf if matches_type(m.id, model_filter)]
-    for _, model in tqdm.contrib.tenumerate(with_gguf, ncols=tw):
+    for model in tqdm.tqdm(with_gguf, ncols=tw):
         model_type = model_filter if model_filter != 'all' else (
             'code' if matches_type(model.id, 'code') else
             'vision' if matches_type(model.id, 'vision') else None
@@ -963,7 +963,7 @@ def discover_ollama_registry_models(  # noqa
     skipped_no_fit = 0
     skipped_type_mismatch = 0
     tw, _ = shutil.get_terminal_size()
-    for _, search_model in tqdm.contrib.tenumerate(search_results, ncols=tw):
+    for search_model in tqdm.tqdm(search_results, ncols=tw):
         tag_details = scrape_ollama_tags_for_model(search_model)
         if not tag_details:
             skipped_no_fit += 1
