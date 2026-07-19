@@ -63,13 +63,15 @@ def describe_sequence(
 
 
 def get_duration(video_path: Path, ffmpeg_bin: str) -> float:
-    result = subprocess.run([
+    cmd = [
         ffmpeg_bin, '-hide_banner', '-loglevel', 'info', '-i', str(video_path),
         '-map', '0:v:0', '-vf', 'showinfo', '-f', 'null', '-',
-    ], capture_output=True, text=True)
+    ]
+    # logger.debug('Command %s', ' '.join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
     matches = re.compile(r'\bpts_time:([0-9]+(?:\.[0-9]+)?)\b').findall(
         (result.stderr or '') + '\n' + (result.stdout or ''))
-    return float(matches[-1]) if matches else 0.0
+    return max(0, float(matches[-1]) - 0.001) if matches else 0.0
 
 
 def detect_scene_changes(video_path: Path, ffmpeg_bin: str, threshold: float) -> list[float]:
@@ -78,6 +80,7 @@ def detect_scene_changes(video_path: Path, ffmpeg_bin: str, threshold: float) ->
         '-vf', f"select='gt(scene,{threshold})',showinfo",
         '-f', 'null', '-',
     ]
+    # logger.debug('Command %s', ' '.join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     times = []
     for line in result.stderr.splitlines():
@@ -118,8 +121,9 @@ def extract_frames_at(
     with tempfile.TemporaryDirectory() as temp_dir:
         for i, ts in enumerate(timestamps):
             out = Path(temp_dir) / f'frame_{i:04d}.jpg'
+            ft = math.floor(ts * 1000) / 1000
             cmd = [
-                ffmpeg_bin, '-y', '-ss', f'{ts:.3f}', '-i', str(video_path),
+                ffmpeg_bin, '-y', '-ss', f'{ft:.3f}', '-i', str(video_path),
                 '-frames:v', '1', '-q:v', '2',
             ]
             if max_size:
@@ -129,6 +133,7 @@ def extract_frames_at(
                     'force_original_aspect_ratio=decrease',
                 ]
             cmd.append(str(out))
+            # logger.debug('Command %s', ' '.join(cmd))
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
             if out.exists():
                 frames.append((ts, out.read_bytes()))
