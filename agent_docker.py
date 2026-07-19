@@ -100,7 +100,8 @@ def main():
     container_name = basename + (f'_{args.num}' if args.num is not None else '')
     is_windows = platform.system().lower() == 'windows'
     docker_cmd = ['wsl', 'docker'] if is_windows else ['docker']
-    if is_windows and not str(shutil.which('docker')).endswith(('.bat', '.cmd')):
+    if is_windows and shutil.which('docker') and not str(shutil.which(
+            'docker')).lower().endswith(('.bat', '.cmd')):
         docker_cmd = ['docker']
     if args.command in {'list'}:
         list_known(docker_cmd, container_name)
