@@ -97,15 +97,30 @@ def detect_scene_changes(video_path: Path, ffmpeg_bin: str, threshold: float) ->
 def compute_keypoints(
     duration: float, scene_times: list[float], min_interval: float, max_interval: float,
 ) -> list[float]:
+    if min_interval > max_interval / 2:
+        min_interval = max_interval / 2
     candidates = sorted({0.0} | {t for t in scene_times if 0 < t < duration})
-    keypoints = [0.0]
+    keypoints = [0]
     for t in candidates[1:]:
         while t - keypoints[-1] > max_interval:
-            keypoints.append(keypoints[-1] + max_interval)
+            parts = math.ceil((t - keypoints[-1]) / max_interval)
+            val = math.ceil(keypoints[-1] + (t - keypoints[-1]) / parts)
+            if val - keypoints[-1] < min_interval or val - keypoints[-1] > max_interval:
+                val = math.floor(keypoints[-1] + (t - keypoints[-1]) / parts)
+            if val - keypoints[-1] < min_interval or val - keypoints[-1] > max_interval:
+                val = keypoints[-1] + (t - keypoints[-1]) / parts
+            keypoints.append(val)
         if t - keypoints[-1] >= min_interval:
             keypoints.append(t)
     while duration - keypoints[-1] > max_interval:
-        keypoints.append(keypoints[-1] + max_interval)
+        t = duration
+        parts = math.ceil((t - keypoints[-1]) / max_interval)
+        val = math.ceil(keypoints[-1] + (t - keypoints[-1]) / parts)
+        if val - keypoints[-1] < min_interval or val - keypoints[-1] > max_interval:
+            val = math.floor(keypoints[-1] + (t - keypoints[-1]) / parts)
+        if val - keypoints[-1] < min_interval or val - keypoints[-1] > max_interval:
+            val = keypoints[-1] + (t - keypoints[-1]) / parts
+        keypoints.append(val)
     return keypoints
 
 
@@ -236,13 +251,14 @@ def to_base64(frame_data: bytes) -> str:
 def process_file(filepath: Path, args, ffmpeg_bin: str) -> str:
     desc = [f'# Video Summary: {filepath.name}\n']
     duration = get_duration(filepath, ffmpeg_bin)
-    logger.info('Duration of %s is %.1f seconds', filepath.name, duration)
+    logger.info('Duration of %s is %.2f seconds', filepath.name, duration)
     scene_times = (
         detect_scene_changes(filepath, ffmpeg_bin, args.scene_threshold)
         if args.scene_threshold > 0 else [])
     logger.info('Detected %d scene changes in %s', len(scene_times), filepath.name)
     keypoints = compute_keypoints(duration, scene_times, args.min_interval, args.max_interval)
     logger.info('Using %d keypoints for %s', len(keypoints), filepath.name)
+    logger.debug('Keypoints %r', keypoints)
     logger.info('Transcribing audio from %s', filepath.name)
     max_tokens = 0
     transcript = transcribe_audio(filepath, args.whisper_model)
@@ -291,6 +307,7 @@ def process_file(filepath: Path, args, ffmpeg_bin: str) -> str:
 def process_directory(args):  # noqa
     import pyffmpeg
 
+    logging.getLogger('pyffmpeg').setLevel(logging.WARNING)
     suffix = f'.{args.suffix.lstrip(".")}'
     ffmpeg_bin = pyffmpeg.FFmpeg().get_ffmpeg_bin()
     for input_path in args.inputs:
