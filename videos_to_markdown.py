@@ -32,7 +32,7 @@ def describe_sequence(
     times: list[float], system: str, user: str, overview: str | None = None,
     previous: str | None = None, transcript: str | None = None,
     options: dict[str, Any] | None = None,
-) -> str:
+) -> tuple[str, int]:
     import openai
 
     client = openai.OpenAI(base_url=f'{url}/v1', api_key=api_key, timeout=300)
@@ -46,7 +46,8 @@ def describe_sequence(
             'type': 'text', 'text': f'Audio transcript for this segment:\n{transcript}'})
     content.append({'type': 'text', 'text': user})
     for i, b64 in enumerate(frames_b64):
-        content.append({'type': 'text', 'text': f'Frame at {times[i]:4.2f}s:'})
+        t = f'{times[i]:4.2f}'.rstrip('0').rstrip('.')
+        content.append({'type': 'text', 'text': f'Frame at {t}s:'})
         content.append({'type': 'image_url', 'image_url': {'url': f'data:image/jpeg;base64,{b64}'}})
     messages = [
         {'role': 'system', 'content': [{'type': 'text', 'text': system}]},
@@ -59,7 +60,8 @@ def describe_sequence(
     message = response.choices[0].message.content
     if '```' in message:
         message = message.split('```')[1].split('\n', 1)[-1]
-    return message
+    tokens = response.usage.total_tokens if response.usage else 0
+    return message, tokens
 
 
 def get_duration(video_path: Path, ffmpeg_bin: str) -> float:
@@ -160,32 +162,35 @@ def build_montage(frames_bytes: list[bytes], cols: int, cell_size: int) -> str:
 
 def build_overviews(
     filepath: Path, args, ffmpeg_bin: str, duration: float,
-) -> list[tuple[float, float, str]]:
+) -> tuple[list[tuple[float, float, str]], int]:
     if not args.montage:
         return []
     interval = args.montage_interval if args.montage_interval > 0 else max(duration, 1.0)
     count = args.montage_grid * args.montage_grid
+    cell_size = args.montage_max_size // args.montage_grid
     overviews = []
     start = 0.0
+    max_tokens = 0
     while start < max(duration, 1.0):
         end = min(start + interval, duration) if duration else interval
         ts = sequence_timestamps(start, end, count)
-        frames = extract_frames_at(filepath, ffmpeg_bin, ts, args.montage_cell_size)
+        frames = extract_frames_at(filepath, ffmpeg_bin, ts, cell_size)
         if frames:
             montage_b64 = build_montage(
-                [b for _, b in frames], args.montage_grid, args.montage_cell_size)
+                [b for _, b in frames], args.montage_grid, cell_size)
             logger.info('Describing montage for %s to %s',
                         format_timestamp(start), format_timestamp(end))
-            text = describe_sequence(
+            text, tokens = describe_sequence(
                 url=args.url, api_key=args.api_key, model=args.model,
                 frames_b64=[montage_b64], times=ts, system=args.system,
                 user=args.montage_prompt)
+            max_tokens = max(tokens, max_tokens)
             logger.debug(text)
             overviews.append((start, end, text))
         start = end
         if not duration:
             break
-    return overviews
+    return overviews, tokens
 
 
 def overview_for(overviews: list[tuple[float, float, str]], timestamp: float) -> str | None:
@@ -207,7 +212,7 @@ def transcribe_audio(video_path: Path, whisper_model: str) -> list[dict[str, Any
         return []
 
 
-def transcript_for_window(
+def transcript_for_segment(
     transcript: list[dict[str, Any]], start: float, end: float,
 ) -> str | None:
     segments = [s for s in transcript if s['end'] > start and s['start'] < end]
@@ -239,6 +244,7 @@ def process_file(filepath: Path, args, ffmpeg_bin: str) -> str:
     keypoints = compute_keypoints(duration, scene_times, args.min_interval, args.max_interval)
     logger.info('Using %d keypoints for %s', len(keypoints), filepath.name)
     logger.info('Transcribing audio from %s', filepath.name)
+    max_tokens = 0
     transcript = transcribe_audio(filepath, args.whisper_model)
     if transcript:
         desc.append('## Audio Transcript\n')
@@ -247,7 +253,8 @@ def process_file(filepath: Path, args, ffmpeg_bin: str) -> str:
                 f'[{format_timestamp(segment["start"])} - {format_timestamp(segment["end"])}]')
             desc.append(f'{time_str} {segment["text"]}')
         desc.append('')
-    overviews = build_overviews(filepath, args, ffmpeg_bin, duration)
+    overviews, tokens = build_overviews(filepath, args, ffmpeg_bin, duration)
+    max_tokens = max(tokens, max_tokens)
     if overviews:
         desc.append('## Overview\n')
         for start, end, text in overviews:
@@ -258,24 +265,26 @@ def process_file(filepath: Path, args, ffmpeg_bin: str) -> str:
     for idx, start in enumerate(keypoints):
         end = keypoints[idx + 1] if idx + 1 < len(keypoints) else duration
         overview = overview_for(overviews, start)
-        seq_ts = sequence_timestamps(start, end, args.frames_per_window)
+        seq_ts = sequence_timestamps(start, end, args.frames_per_segment)
         frames = extract_frames_at(filepath, ffmpeg_bin, seq_ts, args.frame_max_size)
         frames_b64 = [to_base64(data) for _, data in frames]
-        window_transcript = transcript_for_window(transcript, start, end)
+        segment_transcript = transcript_for_segment(transcript, start, end)
         prompt = args.user
         logger.info('Describing segment %s to %s',
                     format_timestamp(start), format_timestamp(end))
-        description = describe_sequence(
+        description, tokens = describe_sequence(
             url=args.url, api_key=args.api_key, model=args.model,
             frames_b64=frames_b64, times=seq_ts, system=args.system,
             user=prompt, overview=overview, previous=previous_description,
-            transcript=window_transcript)
+            transcript=segment_transcript)
+        max_tokens = max(tokens, max_tokens)
         logger.debug(description)
         label = ' (Initial State)' if idx == 0 else ''
         desc.append(
             f'### Time {format_timestamp(start)} to {format_timestamp(end)}{label}\n\n'
             f'{description}\n')
         previous_description = description
+    logger.info('Maximum tokens used in any one query: %d', max_tokens)
     return '\n'.join(desc)
 
 
@@ -361,14 +370,14 @@ def main():
         help='Scene change detection threshold from 0 to 1, 0 disables. '
         'Default %(default)s.')
     parser.add_argument(
-        '--min-interval', type=float, default=2.0,
+        '--min-interval', type=float, default=2,
         help='Minimum seconds between keypoints. Default %(default)s.')
     parser.add_argument(
-        '--max-interval', type=float, default=10.0,
+        '--max-interval', type=float, default=10,
         help='Maximum seconds between keypoints regardless of scene changes. '
         'Default %(default)s.')
     parser.add_argument(
-        '--frames-per-window', type=int, default=5,
+        '--frames-per-segment', type=int, default=5,
         help='Number of frames sampled per segment for change analysis. '
         'Default %(default)s.')
     parser.add_argument(
@@ -384,8 +393,8 @@ def main():
         help='Montage grid dimension, producing this value squared tiles. '
         'Default %(default)s.')
     parser.add_argument(
-        '--montage-cell-size', type=int, default=320,
-        help='Longest side in pixels for each montage tile. Default '
+        '--montage-max-size', type=int, default=1280,
+        help='Longest side in pixels of the composited montage. Default '
         '%(default)s.')
     parser.add_argument(
         '--montage-interval', type=float, default=0.0,
