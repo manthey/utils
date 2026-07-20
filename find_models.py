@@ -5,7 +5,6 @@
 #     "python-dateutil",
 #     "diskcache",
 #     "huggingface-hub>=0.20.0",
-#     "parsel",
 #     "tqdm",
 # ]
 # ///
@@ -28,7 +27,6 @@ from dataclasses import dataclass
 import dateutil.parser
 import diskcache
 import huggingface_hub
-import parsel
 import tqdm
 
 cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.cache')
@@ -800,6 +798,68 @@ OLLAMA_PLAIN_HEADERS = {
 }
 
 
+def _extract_pull_number(text: str) -> int | None:
+    """Extract a numeric pull count from raw span text like '15.8M', '2', etc.
+
+    Returns None when the text does not look like a valid pull count (e.g. model param
+    sizes such as '4b', bare integers less than 1.0, or non-numeric strings).
+    """
+    t = text.strip()
+    if not t:
+        return None
+    # Strip trailing commas and whitespace
+    t = t.rstrip(',')
+    multipliers: dict[str, int] = {'K': 1_000, 'M': 1_000_000, 'B': 1_000_000_000}
+    for suffix, mult in multipliers.items():
+        if t.upper().endswith(suffix):
+            num_part = t[:-1].strip()
+            try:
+                n = float(num_part.replace(',', ''))
+                return int(n * mult)
+            except ValueError:
+                continue  # e.g. 'e2b' — strip 'b' leaves just 'e', not a valid float
+    # Bare integer — only accept for pulls when it's clearly large or exactly the right order.
+    # Ollama shows tag counts as raw integers; those will be filtered later by the < 100K check.
+    try:
+        n = int(t)
+        return n if n > 0 else None
+    except ValueError:
+        return None
+
+
+def _score_model(m: ModelInfo, gpu_memory: float | None,
+                 context_limit: float | None) -> float:
+    """Score a model for selection. Higher = better.
+
+    Priority within a single search result (which all share one repo_id):
+    1. GPU memory available: prefer larger models whose size fits GPU memory.
+    2. Among equal-size fits, prefer higher-quantization depth.
+    """
+    size_gb = m.size_gb or 0
+    if gpu_memory is not None and size_gb > gpu_memory:
+        return -1.0  # won't fit — never selected when GPU constrained
+    bits, _ = QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))
+    if bits is None:
+        return -1.0  # no valid quant = skip
+    # Primary: use more of the available GPU memory (larger file = more context/headroom)
+    # Secondary: higher bit-depth among same-size matches.
+    score = size_gb * 1000.0 + bits
+    return float(score)
+
+
+def _select_best_model(models_in: list[ModelInfo], gpu_memory: float | None,
+                       context_limit: float | None) -> ModelInfo | None:
+    """Pick one model from a group of candidates that share the same repo_id."""
+    best: ModelInfo | None = None
+    best_score: float = -1.0
+    for m in models_in:
+        s = _score_model(m, gpu_memory, context_limit)
+        if s > best_score:
+            best_score = s
+            best = m
+    return best
+
+
 def parse_pull_count(text: str) -> int:
     text = text.strip().replace(',', '')
     multipliers = {'K': 1_000, 'M': 1_000_000, 'B': 1_000_000_000}
@@ -856,9 +916,9 @@ def fetch_ollama_tags_page(model_path: str) -> str:
         return resp.read().decode('utf-8', errors='replace')
 
 
-def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> list[dict]:
-    models = []
-    seen = set()
+def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> list[dict]:  # noqa
+    models: list[dict] = []
+    seen: set[str] = set()
     page = 1
     while True:
         try:
@@ -866,30 +926,111 @@ def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> l
         except (urllib.error.URLError, OSError) as e:
             print(f'  Failed to fetch page {page}: {e}')
             break
-        sel = parsel.Selector(text=html)
-        items = sel.css('li[x-test-model]')
-        if not items:
+        model_blocks = re.findall(
+            r'<li[^>]*class="[^"]*items-baseline[^"]*"[^>]*>(.*?)</a>\s*</li>',
+            html, re.DOTALL)
+        if not model_blocks:
             break
-        for item in items:
-            href = item.css('a::attr(href)').get('')
-            name = item.css('[x-test-search-response-title]::text').get('').strip()
-            if not name or name in seen:
+        for block in model_blocks:
+            # Extract href (e.g. "/user/ModelName-Q5_K_M")
+            href_match = re.search(r'href="(/[^"]*?/[^"]+)"', block)
+            if not href_match:
                 continue
-            seen.add(name)
-            pull_text = item.css('[x-test-pull-count]::text').get('0')
-            pull_count = parse_pull_count(pull_text)
-            if pull_count < downloads_min:
+            link_path = href_match.group(1).rstrip('"')
+            # Extract all title attributes early — we need them for datae
+            # parsing and as a fallback for display names when span isn't
+            # available.
+            all_titles: list[str] = re.findall(r'title="([^"]*)"', block)
+            # Prefer <h2><span>user/name</span> over title="" because the
+            # span includes the full user/repo name which is essential for
+            # anchored regex patterns (e.g. "^qwen3.5" must not match
+            # "user/qwen3.5...").
+            displayed: str | None = None
+            span_match = re.search(
+                r'<h2[^>]*>\s*<span[^>]*>([^<]+)</span>', block, re.DOTALL)
+            if span_match:
+                span_name = span_match.group(1).strip()
+                if span_name and span_name not in seen:
+                    displayed = span_name
+            if not displayed:
+                for t in all_titles:
+                    if 'AM' in t or 'PM' in t or re.search(
+                            r'\d{1,2}:\d{2}\s*(AM|PM)', t, re.IGNORECASE):
+                        continue
+                    stripped_t = t.strip()
+                    if stripped_t and stripped_t not in seen:
+                        displayed = stripped_t
+                        break
+            if not displayed:
                 continue
-            capabilities = item.css('[x-test-capability]::text').getall()
+            seen.add(displayed)
+            # Extract pull count: look for the <span> before "Pulls" label
+            # Handle suffixed values like "15.8M" and raw integers.
+            pull_num: str = '0'
+            all_pull_spans = list(re.finditer(r'<span[^>]*>([^<]*)</span>', block))
+            for pm in all_pull_spans:
+                if pm.group(1).strip().lower() == 'pulls':
+                    # Look backward ~200 chars for a <span> number (most common layout)
+                    idx = pm.start()
+                    prior = block[max(0, idx - 200):idx]
+                    num_match = re.search(r'<span[^>]*>([^<]*)</span>', prior)
+                    if num_match:
+                        nval = _extract_pull_number(num_match.group(1))
+                        if nval:
+                            pull_num = str(nval)
+                            break
+            # Fallback: look forward from the label span
+            if pull_num == '0':
+                for pm in all_pull_spans:
+                    if pm.group(1).strip().lower() == 'pulls':
+                        fwd = block[pm.end():]
+                        fs = re.search(r'<span[^>]*>([^<]*)</span>', fwd)
+                        if fs:
+                            nval = _extract_pull_number(fs.group(1))
+                            if nval:
+                                pull_num = str(nval)
+                                break
+                        break
+            # Fallback: pick the largest span value that looks like a
+            # suffixed count
+            if pull_num == '0':
+                large = 0
+                for m in all_pull_spans:
+                    s = m.group(1).strip()
+                    nval = _extract_pull_number(s)
+                    if nval and nval > large:
+                        large = nval
+            if pull_num != '0' and parse_pull_count(pull_num) < 100:
+                has_m_suffix = any(
+                    m.group(1).strip().upper().endswith(('M', 'K')) for m in all_pull_spans)
+                tags_spans = [sp.group(1).strip() for sp in all_pull_spans]
+                if not has_m_suffix and any('tags' in t.lower() for t in tags_spans):
+                    pull_num = '0'  # Discard — likely a tag count, not pulls
+            pull_count = parse_pull_count(pull_num)
+            # Extract capabilities from colored badge spans (rounded-md class)
+            capabilities: list[str] = re.findall(
+                r'class="[^"]*rounded-md[^"]*"[^>]*>([^<]+)', block)
             capabilities = [c.strip().lower() for c in capabilities]
-            cloud_spans = item.css('span.text-cyan-500::text').getall()
-            is_cloud = any('cloud' in s.lower() for s in cloud_spans)
-            sizes = item.css('[x-test-size]::text').getall()
-            sizes = [s.strip() for s in sizes]
-            updated_title = item.css('span[title]::attr(title)').get('')
+            all_badges: list[str] = re.findall(
+                r'class="[^"]*rounded-md[^"]*"[^>]*>([^<]+)', block)
+            badges_set = {b.strip().lower() for b in all_badges}
+            is_cloud: bool = 'cloud' in badges_set
+            sizes: list[str] = []
+            # Extract last-modified date from title attributes with UTC/AM/PM
+            updated_title: str = ''
+            for dt in all_titles:
+                try:
+                    import dateutil.parser as _parser_dt
+                    parsed_dt = _parser_dt.parse(dt)
+                    if parsed_dt.tzinfo is None:
+                        continue
+                    updated_title = dt
+                    break
+                except (ValueError, OverflowError):
+                    continue
             models.append({
-                'name': name,
-                'href': href,
+                'name': displayed,
+                'href': link_path,
                 'pulls': pull_count,
                 'capabilities': capabilities,
                 'is_cloud': is_cloud,
@@ -898,50 +1039,85 @@ def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> l
             })
             if limit and len(models) >= limit:
                 break
-        next_page_el = sel.css(f'li[hx-get*="page={page + 1}"]')
-        if not next_page_el or (limit and len(models) >= limit):
+        if limit and len(models) >= limit:
+            break
+        # Check for next page via hx-get="...page=N" pattern
+        all_hx_get = re.findall(r'hx-get="([^"]*)"', html)
+        if not any(f'page={page + 1}' in h for h in all_hx_get):
             break
         page += 1
     return models
 
 
 def scrape_ollama_tags_for_model(model_info: dict) -> list[dict]:
+    """Scrape the tags table from an Ollama model's /tags page using regex.
+
+    Uses stable text patterns from within tag rows rather than specific class
+    combinations. Future-proof against DOM refactors.
+    """
     try:
         html = fetch_ollama_tags_page(model_info['href'])
     except (urllib.error.URLError, OSError) as e:
         print(f"  Failed to fetch tags for {model_info['name']}: {e}")
         return []
-    sel = parsel.Selector(text=html)
-    tags = []
-    tags_by_hash = {}
-    for row in sel.css('div.group'):
-        desktop = row.css('div.hidden.md\\:flex')
-        if not desktop:
+
+    tags: list[dict] = []
+    tags_by_hash: dict[str, dict] = {}
+    # Locate the table header row to find where tag data begins
+    hdr_pos = html.find('grid-cols-12 text-neutral-900">')
+    if hdr_pos < 0:
+        return []
+    body_after_header = html[hdr_pos:]
+    tags_seen: set[str] = set()
+    # Find all tag links matching /user/model:tag pattern
+    for m in re.finditer(r'href="(/([^/:]+/[^/:]+):([^"]+))"', body_after_header):
+        full_path, _, tag_suffix = m.groups()
+        if not tag_suffix or tag_suffix in tags_seen:
             continue
-        tag_name_el = desktop.css('a.group-hover\\:underline')
-        if not tag_name_el:
-            continue
-        tag_name = tag_name_el.css('::text').get('').strip()
-        if not tag_name:
-            continue
-        cols = desktop.css('div.grid-cols-12 > *')
-        size_text = cols[1].css('::text').get('').strip() if len(cols) >= 2 else ''
-        context_text = cols[2].css('::text').get('').strip() if len(cols) >= 3 else ''
-        input_text = cols[3].css('::text').get('').strip() if len(cols) >= 4 else ''
-        hash_text = desktop.css('span.font-mono').css('::text').get('').strip()
+        tags_seen.add(tag_suffix)
+        # Gather context before and after the link for size/ctx extraction
+        ctx_before: str = body_after_header[0:m.start()]
+        ctx_after: str = body_after_header[m.end():m.end() + 1500]
+        combined_context: str = ctx_before[-600:] + ' ' + ctx_after
+        # Extract sha hash from font-mono span
+        hash_match = re.search(r'<span class="font-mono">\s*(\w{12,})', combined_context)
+        hash_text: str = hash_match.group(1).strip() if hash_match else ''
+        # Size: extract GB/MB patterns (NOT model parameter sizes like "7B")
+        sizes_found: list[str] = re.findall(
+            r'([\d,.]+\s*GB|[\d,.]+\s*MB)', combined_context)
+        size_text: str = sizes_found[0].strip() if sizes_found else ''
+        # Context window size (e.g. "125K") near the word "context"
+        context_match = re.search(
+            r'(\d[\d,]*\s*K)\s*(?:context|window)', combined_context, re.IGNORECASE)
+        context_text: str = context_match.group(1).strip() if context_match else ''
+        # Input type (e.g., "Text input")
+        input_m = re.search(r'([A-Za-z]+?)\s*input', combined_context, re.IGNORECASE)
+        input_prefix: str = input_m.group(1)[0].lower() + 'nput' if input_m else ''
+        # Detect cloud-only entries: tags like ':cloud' or ':xxx-cloud' have
+        # no local file — their size_text leaks from neighbor rows in
+        # combined_context
+        is_cloud_api_entry = bool(
+            re.search(r'cloud', tag_suffix, re.IGNORECASE) and
+            not any(s.upper().startswith('MLX') for s in sizes_found))
+        # For library model tags pages, cloud entries have a SHA hash but no
+        # dedicated size row. If we found 397b-cloud or similar with no
+        # actual GB near the SHA line, mark as cloud API-only regardless of
+        # noisy context-window sizes.
+        tag_info: dict[str, object] = {
+            'tag': ':' + tag_suffix,
+            'taglist': [':' + tag_suffix],
+            'size_text': size_text if not is_cloud_api_entry else '',
+            'context_text': context_text,
+            'input_text': input_prefix,
+            'hash': hash_text,
+            '_is_cloud_api': is_cloud_api_entry,  # internal flag for discover filter
+        }
         if hash_text and hash_text in tags_by_hash:
-            tags_by_hash[hash_text]['taglist'].append(tag_name)
+            tags_by_hash[hash_text]['taglist'].append(':' + tag_suffix)
         else:
-            tags.append({
-                'tag': tag_name,
-                'taglist': [tag_name],
-                'size_text': size_text,
-                'context_text': context_text,
-                'input_text': input_text,
-                'hash': hash_text,
-            })
+            tags.append(tag_info)
             if hash_text:
-                tags_by_hash[hash_text] = tags[-1]
+                tags_by_hash[hash_text] = tag_info
     return tags
 
 
@@ -954,10 +1130,13 @@ def discover_ollama_registry_models(  # noqa
     print('Fetching models from Ollama registry')
     search_results = scrape_ollama_search_models('.', limit, downloads)
     print(f'Retrieved {len(search_results)} models from search')
+    # Filter on search page titles before expensive per-model API calls.
+    # Note: these lack tag suffixes (e.g.:7b-fp16), so filters like '.*7b' won't match here.
     if name_filter:
         search_results = [
             m for m in search_results
             if re.search(name_filter, m['name'], re.IGNORECASE)]
+        print(f'  After title filter: {len(search_results)} models')
     models = []
     skipped_cloud = 0
     skipped_no_fit = 0
@@ -968,6 +1147,13 @@ def discover_ollama_registry_models(  # noqa
         if not tag_details:
             skipped_no_fit += 1
             continue
+        # Filter by name using the full model name (base + tag suffix) since
+        # search page titles alone may lack version info like ':7b-fp16'.
+        if name_filter:
+            all_candidate_names = [f'{search_model["name"]}{t.get("tag", "")}' for t in tag_details]
+            if not any(re.search(name_filter, n, re.IGNORECASE) for n in all_candidate_names):
+                continue
+
         if search_model['is_cloud'] and not any(t.get('size_text') for t in tag_details):
             skipped_cloud += 1
             continue
@@ -999,6 +1185,9 @@ def discover_ollama_registry_models(  # noqa
             tag_name = tag_info['tag']
             # Skip Apple hardware
             if any(t in tag_name.lower() for t in {'mlx', 'mx', 'int8', 'nvfp4', 'int4'}):
+                continue
+            # Skip cloud-API-only tags (no local download available)
+            if tag_info.get('_is_cloud_api'):
                 continue
             tag_suffix = tag_name.split(':', 1)[-1]
             size_gb = parse_size_text(tag_info['size_text'])
@@ -1045,7 +1234,6 @@ def discover_ollama_registry_models(  # noqa
         if not candidates:
             skipped_no_fit += 1
             continue
-
         # Filter and add all valid candidates (per size/quant combination)
         fitting_candidates = []
         for m in candidates:
@@ -1060,7 +1248,6 @@ def discover_ollama_registry_models(  # noqa
                 # Size-based filtering with GPU memory constraint
                 if gpu_memory_gb is None or m.size_gb <= gpu_memory_gb:
                     fitting_candidates.append(m)
-
         # If no candidates fit, try without strict constraints (for model discovery)
         if not fitting_candidates and candidates:
             # Fall back to all candidates that have valid quantization
@@ -1068,11 +1255,20 @@ def discover_ollama_registry_models(  # noqa
                 quant_priority = QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0]
                 if quant_priority is not None:
                     fitting_candidates.append(m)
-
+        # Within one search result (one repository) consolidate quant-only variants of the same
+        # physical GGUF file.  Keep exactly one ModelInfo per (repo, size_bucket) and prefer the
+        # highest-quantized version that still fits GPU constraints.
+        size_buckets: dict[tuple[str, int], ModelInfo] = {}
+        for m in fitting_candidates:
+            key = (m.repo_id, round(m.size_gb))
+            candidate_score = _score_model(m, gpu_memory_gb, context_limit_gb)
+            if key not in size_buckets or candidate_score > _score_model(
+                    size_buckets[key], gpu_memory_gb, context_limit_gb):
+                size_buckets[key] = m
+        fitting_candidates = list(size_buckets.values())
         models.extend(fitting_candidates)
         if not fitting_candidates:
             skipped_no_fit += 1
-    print(f'Found {len(models)} matching models')
     print(f'  Skipped (cloud only): {skipped_cloud}')
     print(f'  Skipped (type mismatch): {skipped_type_mismatch}')
     print(f'  Skipped (no fit): {skipped_no_fit}')
