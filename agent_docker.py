@@ -79,8 +79,9 @@ def main():
     parser.add_argument('--num', type=int, help='Docker container suffix')
     parser.add_argument('--src', help='Source path.  Defaults to current working directory.')
     parser.add_argument(
-        '--ollama', help='Replacement url for ollama.  This can be just a '
-        'port, a host and port, or a full base url.')
+        '--ollama', '--url',
+        help='Replacement url for ollama.  This can be just a port, a host '
+        'and port, or a full base url.')
     parser.add_argument(
         '--fuse', action='store_true',
         help='Pass options to allow fuse to work when starting a container.')
@@ -146,16 +147,7 @@ def main():
         host = host.rstrip('/')
         subprocess.run(docker_cmd + [
             'exec', '-it', container_name, 'bash', '-c',
-            'sed -i "s|^\\(.*_API_BASE=\\)https\\?://[^/]*|\\1' + host +
-            '|" /home/ubuntu/.config/mini-swe-agent/.env'])
-        subprocess.run(docker_cmd + [
-            'exec', '-it', container_name, 'bash', '-c',
-            'sed -i \'s|\\("baseUrl": "\\)https\\?://[^/"]*|\\1' + host +
-            "|' /home/ubuntu/.pi/agent/local-providers.json"])
-        subprocess.run(docker_cmd + [
-            'exec', '-it', container_name, 'bash', '-c',
-            'sed -i \'s|\\("baseUrl": "\\)https\\?://[^/"]*|\\1' + host +
-            "|' /home/ubuntu/.pi/agent/models.json"])
+            'set_ollama.sh "' + host + '"'])
     if args.command in {'create', 'exec'}:
         subprocess.run(docker_cmd + ['exec', '-it', container_name, 'bash'])
 

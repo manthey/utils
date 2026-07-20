@@ -568,7 +568,7 @@ def chat_test_worker(client: OpenAI, model_name: str, test):
     )
 
 
-def bash_test(client: OpenAI, model_name: str, test):  # noqa
+def bash_test(client: OpenAI, model_name: str, ollama_base_url: str, test):  # noqa
     testtag = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
     commands = test['bash']
     start_commands = test.get('start', [])
@@ -596,6 +596,7 @@ def bash_test(client: OpenAI, model_name: str, test):  # noqa
                 command_start = time.time()
                 command = command.replace('{model}', model_name)
                 command = command.replace('{testtag}', testtag)
+                command = command.replace('{ollamaurl}', ollama_base_url)
                 try:
                     result = subprocess.run(
                         command, shell=True, capture_output=True, text=True,
@@ -1821,7 +1822,7 @@ def load_yaml_tests():
             ) -> TestResult:
                 if 'chat' in test['test']:
                     return chat_test(client, model_name, test['test'])
-                return bash_test(client, model_name, test['test'])
+                return bash_test(client, model_name, ollama_base_url, test['test'])
 
             register_test(test['name'], test['description'],
                           test.get('skip', False), test.get('version', 0))(test_func)
@@ -1888,7 +1889,7 @@ def main():  # noqa
     parser.add_argument(
         '--restart', help='Shell command to run between models')
     parser.add_argument(
-        '--base-url',
+        '--base-url', '--url',
         default='http://localhost:11434',
         help='Ollama server base URL (default: http://localhost:11434)')
     parser.add_argument(

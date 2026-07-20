@@ -350,7 +350,7 @@ def main():
         '--api-key', default='ollama',
         help='API key sent to the endpoint. Default %(default)s.')
     parser.add_argument(
-        '--model', '-m', default='qwen2.5vl:7b',
+        '--model', '-m', default='qwen3.6:35b',
         help='Vision model identifier. Default %(default)s.')
     parser.add_argument(
         '--whisper-model', default='small',
@@ -372,7 +372,7 @@ def main():
         help='Number of frames sampled per segment for change analysis. '
         'Default %(default)s.')
     parser.add_argument(
-        '--frame-max-size', type=int, default=768,
+        '--frame-max-size', type=int, default=1024,
         help='Longest side in pixels for analysis frames, 0 keeps original. '
         'Default %(default)s.')
     parser.add_argument(

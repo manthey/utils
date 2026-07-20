@@ -261,6 +261,15 @@ EOF
 RUN chmod a+x /home/ubuntu/.local/bin/pidev.sh && \
     pidev.sh x x --help
 
+RUN cat <<'EOF' > /home/ubuntu/.local/bin/set_ollama.sh
+#!/usr/bin/env bash
+sed -i 's|^\(.*_API_BASE=\)https\?://[^/]*|\1'"$1"'|' /home/ubuntu/.config/mini-swe-agent/.env
+sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"$1"'|' /home/ubuntu/.pi/agent/local-providers.json
+sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"$1"'|' /home/ubuntu/.pi/agent/models.json
+EOF
+
+RUN chmod a+x /home/ubuntu/.local/bin/set_ollama.sh
+
 RUN cat <<'EOF' >> /home/ubuntu/.bashrc
 function truncate_current_directory () {
   echo -n "${PWD/#$HOME/\~}" | awk -F "/" '{
