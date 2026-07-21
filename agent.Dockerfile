@@ -193,7 +193,8 @@ RUN mkdir -p /home/ubuntu/.pi/agent && \
 
 RUN cat <<'EOF' > /home/ubuntu/.pi/agent/settings.json
 {
-  "defaultThinkingLevel": "medium",
+  "defaultThinkingLevel": "minimal",
+  "hideThinkingBlock": true,
   "defaultModel": "qwen3.6:35b",
   "defaultProvider": "ollama",
   "defaultProjectTrust": "always",
