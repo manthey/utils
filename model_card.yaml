@@ -28,5 +28,7 @@
   description: "Show ollama model information"
   version: 1
   test:
+    env:
+      OLLAMA_HOST: '{ollamaurl}'
     bash:
       - 'ollama show "{model}"'

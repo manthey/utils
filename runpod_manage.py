@@ -308,8 +308,11 @@ def main():
     start_parser.add_argument('--mem', type=int, default=96, help='Minimum GPU memory in GB')
     start_parser.add_argument('--secure', action='store_true', help='Secure cloud only')
     start_parser.add_argument(
-        '--disk', type=int, default=25, help='Contianer disk (nvme) volume size in GB')
-    start_parser.add_argument('--vol', type=int, default=75, help='Volume size in GB')
+        '--disk', type=int, default=25,
+        help='Contianer disk (nvme) volume size in GB')
+    start_parser.add_argument(
+        '--vol', type=int, default=75,
+        help='Volume size in GB (where models are stored)')
     start_parser.add_argument(
         '--no-wait', action='store_true', help='Do not wait for pod to be ready before exiting')
 

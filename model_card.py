@@ -426,7 +426,7 @@ def extract_answer_from_reasoning(content: str) -> str:
 
 @register_test('first_load', 'First load and memory use')
 def test_first_load(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     try:
         result = chat_completion(
@@ -568,14 +568,20 @@ def chat_test_worker(client: OpenAI, model_name: str, test):
     )
 
 
-def bash_test(client: OpenAI, model_name: str, ollama_base_url: str, test):  # noqa
+def bash_test(client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str, test):  # noqa
     testtag = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d_%H%M%S_%f')
     commands = test['bash']
     start_commands = test.get('start', [])
     start_retry = test.get('start_retry', 0)
     stop_commands = test.get('stop', [])
+    repdict = {
+        '{model}': model_name,
+        '{testtag}': testtag,
+        '{ollamaurl}': ollama_base_url,
+        '{dockerurl}': ollama_docker_url,
+    }
     env = os.environ.copy()
-    localenv = {str(k): str(v if v != '{model}' else model_name)
+    localenv = {str(k): str(repdict.get(v, v))
                 for k, v in test.get('env', {}).items()}
     env.update(localenv)
     timeout = test.get('timeout', ClientKwargs.get('timeout', 300))
@@ -594,9 +600,8 @@ def bash_test(client: OpenAI, model_name: str, ollama_base_url: str, test):  # n
                 continue
             for command in cmds:
                 command_start = time.time()
-                command = command.replace('{model}', model_name)
-                command = command.replace('{testtag}', testtag)
-                command = command.replace('{ollamaurl}', ollama_base_url)
+                for k, v in repdict.items():
+                    command = command.replace(k, v)
                 try:
                     result = subprocess.run(
                         command, shell=True, capture_output=True, text=True,
@@ -668,7 +673,7 @@ def bash_test(client: OpenAI, model_name: str, ollama_base_url: str, test):  # n
 
 @register_test('basic_question', 'Basic question answering', version=1)
 def test_basic_question(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     return chat_test(client, model_name, {
         'chat': {'messages': [{
@@ -681,7 +686,7 @@ def test_basic_question(
 
 @register_test('coding', 'Basic code generation')
 def test_coding(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     system_prompt = (
         'You are a helpful assistant who never uses metaphors, slang, emojis, '
@@ -705,7 +710,7 @@ def test_coding(
 
 @register_test('python_argparse', 'Python argparse use', version=1)
 def test_code_python_argparse(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     system_prompt = (
         'You are a helpful assistant who never uses metaphors, slang, emojis, '
@@ -731,7 +736,7 @@ def test_code_python_argparse(
 
 @register_test('python_yaml', 'Python yaml library use', version=1)
 def test_code_python_yaml(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     system_prompt = (
         'You are a helpful assistant who never uses metaphors, slang, emojis, '
@@ -757,7 +762,7 @@ def test_code_python_yaml(
 
 @register_test('code_editing', 'Code editing', version=1)
 def test_code_editing(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     system_prompt = (
         'You are a helpful assistant who never uses metaphors, slang, emojis, '
@@ -790,7 +795,7 @@ def test_code_editing(
 
 @register_test('java_simple', 'Basic java question')
 def test_java_simple(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     system_prompt = (
         'You are a helpful assistant who never uses metaphors, slang, emojis, '
@@ -816,7 +821,7 @@ def test_java_simple(
 
 @register_test('javascript_dom', 'Javascript DOM events', version=1)
 def test_javascript_dom(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     system_prompt = (
         'You are a helpful assistant who never uses metaphors, slang, emojis, '
@@ -851,7 +856,7 @@ def test_javascript_dom(
 
 @register_test('embedding', 'Embedding generation support', category='embedding', version=1)
 def test_embedding(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     sys.stdout.write('.')
     sys.stdout.flush()
@@ -890,7 +895,7 @@ def test_embedding(
 
 @register_test('vision', 'Image understanding', category='vision')
 def test_vision(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     return chat_test(client, model_name, {
         'chat': {'messages': [{
@@ -911,7 +916,7 @@ def test_vision(
 
 @register_test('histology', 'Histology image understanding', category='vision')
 def test_histology(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     img = base64.b64encode(open(os.path.join(os.path.dirname(
         __file__), 'model_card_test_image.png'), 'rb').read()).decode('utf-8')
@@ -934,7 +939,7 @@ def test_histology(
 
 @register_test('photo', 'Photo understanding', version=1, category='vision')
 def test_photo(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     img = base64.b64encode(open(os.path.join(os.path.dirname(
         __file__), 'model_card_test_image2.png'), 'rb').read()).decode('utf-8')
@@ -957,7 +962,7 @@ def test_photo(
 
 @register_test('geospatial_image', 'Geospatial understanding', category='vision', version=2)
 def test_geospatial_image(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     img = base64.b64encode(open(os.path.join(os.path.dirname(
         __file__), 'model_card_test_image3.jpg'), 'rb').read()).decode('utf-8')
@@ -982,7 +987,7 @@ def test_geospatial_image(
     'geospatial_analysis', 'Geospatial image description for tools',
     category='vision', version=2)
 def test_geospatial_analysis(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     img = base64.b64encode(open(os.path.join(os.path.dirname(
         __file__), 'model_card_test_image3.jpg'), 'rb').read()).decode('utf-8')
@@ -1013,7 +1018,7 @@ def test_geospatial_analysis(
 
 @register_test('tool_use', 'Tool use')
 def test_tool_use(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     tools = [
         {
@@ -1068,7 +1073,7 @@ def test_tool_use(
 
 @register_test('temperature_variation', 'Response variation across temperatures')
 def test_temperature_variation(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     prompt = ('List three types of fruit that are yellow; just give their '
               'names without commentary or numbering')
@@ -1118,7 +1123,7 @@ def test_temperature_variation(
 
 @register_test('knowledge_recency', 'Knowledge recency')
 def test_knowledge_recenecy(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     system_prompt = (
         'You are a helpful assistant who never uses metaphors, slang, emojis, '
@@ -1139,7 +1144,7 @@ def test_knowledge_recenecy(
 
 @register_test('storytelling', 'Storytelling', skip=True, version=1)
 def test_storytelling(
-    client: OpenAI, model_name: str, ollama_base_url: str,
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     system_prompt = (
         'You are a creative storytelling agent.  Your stories are novel and '
@@ -1391,6 +1396,7 @@ def run_tests(
     client: OpenAI,
     model_name: str,
     ollama_base_url: str,
+    ollama_docker_url: str,
     test_names: list[str] | None,
     save_progress: Callable[[list[tuple[TestDefinition, TestResult]]], None] | None = None,
     raise_errors: bool = False,
@@ -1404,7 +1410,7 @@ def run_tests(
         sys.stderr.flush()
         start = time.time()
         try:
-            result = test_def.run(client, model_name, ollama_base_url)
+            result = test_def.run(client, model_name, ollama_base_url, ollama_docker_url)
         except Exception as exc:
             result = TestResult(passed=False, output=f'Error: {exc}',
                                 timestamp=get_timestamp())
@@ -1818,11 +1824,12 @@ def load_yaml_tests():
                         m.pop('append')
 
             def test_func(
-                client: OpenAI, model_name: str, ollama_base_url: str,
+                client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
             ) -> TestResult:
                 if 'chat' in test['test']:
                     return chat_test(client, model_name, test['test'])
-                return bash_test(client, model_name, ollama_base_url, test['test'])
+                return bash_test(
+                    client, model_name, ollama_base_url, ollama_docker_url, test['test'])
 
             register_test(test['name'], test['description'],
                           test.get('skip', False), test.get('version', 0))(test_func)
@@ -1890,8 +1897,12 @@ def main():  # noqa
         '--restart', help='Shell command to run between models')
     parser.add_argument(
         '--base-url', '--url',
-        default='http://localhost:11434',
         help='Ollama server base URL (default: http://localhost:11434)')
+    parser.add_argument(
+        '--docker-url',
+        help='The url from inside of docker containers (default: '
+        'http://host.docker.internal:11434).  If base-url is specified but '
+        'this is not, this will be the same as base-url.')
     parser.add_argument(
         '-o', '--output', help='Output file path (default: stdout) or directory')
     parser.add_argument(
@@ -1966,7 +1977,9 @@ def main():  # noqa
         sys.exit(0)
     if not args.dry_run:
         restart_command(args.restart)
-    ollama_base_url = args.base_url.rstrip('/')
+    ollama_base_url = (args.base_url or 'http://localhost:11434').rstrip('/')
+    ollama_docker_url = (
+        args.docker_url or args.base_url or 'http://host.docker.internal:11434').rstrip('/')
     if args.remove_tests and not args.tests:
         args.tests = 'skip_all_tests'
     if not args.model or args.models is not None:
@@ -2069,9 +2082,10 @@ def main():  # noqa
                         metadata, [r for r in merged if r[1] is not None]))
                 return save_progress
 
-            new_results = run_tests(client, model, ollama_base_url, run_names, save_func(
-                out_path, metadata, existing_results), args.raise_errors,
-                args.require_first_load)
+            new_results = run_tests(
+                client, model, ollama_base_url, ollama_docker_url, run_names,
+                save_func(out_path, metadata, existing_results),
+                args.raise_errors, args.require_first_load)
             if new_results is None:
                 restart_command(args.restart)
                 continue
