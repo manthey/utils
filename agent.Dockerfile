@@ -111,6 +111,7 @@ RUN for ver in $PYTHON_VERSIONS; do \
     pyenv local $ver && \
     python -m pip install --no-cache-dir -U pip && \
     python -m pip install --no-cache-dir tox wheel && \
+    python -m pip install --no-cache-dir coverage && \
     pyenv local --unset; \
     done && \
     pyenv rehash && \
@@ -136,7 +137,8 @@ RUN usermod -aG rabbitmq ubuntu && \
     chmod -R 777 /var/lib/rabbitmq/mnesia && \
     chmod -R 777 /var/log/rabbitmq
 COPY .vimrc /home/ubuntu/.vimrc
-RUN chown ubuntu:ubuntu /home/ubuntu/.vimrc
+COPY cover.py /home/ubuntu/.local/bin/cover.py
+RUN chown -R ubuntu:ubuntu /home/ubuntu
 USER ubuntu
 WORKDIR /home/ubuntu
 # hadolint ignore=SC2016
