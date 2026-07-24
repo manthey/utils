@@ -1246,14 +1246,7 @@ def discover_ollama_registry_models(  # noqa
                     fitting_candidates.append(m)
             else:
                 # Size-based filtering with GPU memory constraint
-                if gpu_memory_gb is None or m.size_gb <= gpu_memory_gb:
-                    fitting_candidates.append(m)
-        # If no candidates fit, try without strict constraints (for model discovery)
-        if not fitting_candidates and candidates:
-            # Fall back to all candidates that have valid quantization
-            for m in candidates:
-                quant_priority = QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0]
-                if quant_priority is not None:
+                if (min_memory or 0) <= m.size_gb <= (gpu_memory_gb or math.inf):
                     fitting_candidates.append(m)
         # Within one search result (one repository) consolidate quant-only variants of the same
         # physical GGUF file.  Keep exactly one ModelInfo per (repo, size_bucket) and prefer the
