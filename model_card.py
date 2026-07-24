@@ -1566,6 +1566,47 @@ def covered_by(model, summary):
     return ''
 
 
+def ranked_models(tests, models):
+    mid = {m['metadata']['Name']: m for m in models}
+    mranks = {m['metadata']['Name']: [] for m in models}
+    # for each test:
+    #   for each model in that test:
+    #     rank is position in the sorted set of
+    #        (-(passed=1 or fraction or -1), time)
+    #     normrank = (# models that did the test - (0 based rank)) /
+    #                (# models that did the test)
+    #     -- this isn't really the # models that did the test, but the number
+    #        of distinct values in the list, or perhaps the LAST position it
+    #        matches (note that any test gets _some_ non-zero position here)
+    # for each model:
+    #  score = mean(all normranks of tests it was in) * (2(# tests) - # tests missed) / 2(#tests)
+    #  -- the 2 affects how much to weight missing tests
+    # sort by score (higher better)
+    for t in tests:
+        mval = {}
+        values = []
+        for m, model in mid.items():
+            if t not in model['tests']:
+                continue
+            s = model['tests'][t].get('status', '')
+            if not s:
+                continue
+            st = model['tests'][t].get('duration', '')
+            stime = 10000 if not st else float(st[:-1])
+            sval = ((0 if s == 'PASSED' else 2 if s == 'Failed' else
+                     1 - int(s.split('/')[0]) / int(s.split('/')[1])), stime)
+            values.append(sval)
+            mval[m] = sval
+        values = sorted(values)
+        for m, sval in mval.items():
+            mranks[m].append((values[::-1].index(sval) + 1) / len(mval))
+    w_miss = 1.3
+    scores = sorted([
+        (sum(mranks[m]) / len(mranks[m]) * (w_miss - 1 + len(mranks[m]) / len(tests)) / w_miss, m)
+        for m in mranks], reverse=True)
+    return [mid[score[-1]] for score in scores]
+
+
 def model_rank(model, summary):
     passed = 0
     ptime = 0
@@ -1596,9 +1637,7 @@ def summary_table(summary, models):
     for t in summary['tests']:
         cols += [f'{known.get(t, t)}', 'Duration', 'Tokens']
     cols += ['Covered', 'Present', 'Rank']
-    for idx, model in enumerate([m[-1] for m in sorted([
-            (model_rank(m, summary), m['metadata']['Name'], m)
-            for m in summary['models'].values()])]):
+    for idx, model in enumerate(ranked_models(summary['tests'], summary['models'].values())):
         row = [model['metadata'].get(col, '') for col in summary['columns']]
         for t in summary['tests']:
             tval = model['tests'].get(t, {})
