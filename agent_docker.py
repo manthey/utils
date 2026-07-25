@@ -63,7 +63,7 @@ def get_mount_args(is_windows):
             continue
         path = paths[0]
         if is_windows and path[1] == ':':
-            path = '/mnt/{path[0].lower()}/{path[2:].replace("\\". "/")}'
+            path = '/mnt/' + path[0].lower() + '/' + path[2:].replace('\\', '/')
         if ':' not in path:
             args.extend(['-v', f'{path}:{mount["dst"]}:{mount["mode"]}'])
     return args
@@ -91,8 +91,7 @@ def main():  # noqa
     parser.add_argument(
         '--ssh',
         help='Add the specified public key for the ubuntu user and expose '
-        'port 2222.  You must still manually start the sshd daemon '
-        '(/usr/sbin/sshd)')
+        'port 2222.')
     parser.add_argument(
         '--local', action='store_true',
         help='Mount local utilities directories.  This removes some isolation.')
@@ -131,13 +130,14 @@ def main():  # noqa
             other_opts.extend(get_mount_args(is_windows))
         if args.ssh:
             other_opts.extend(['-p', '2222:2222'])
-        subprocess.check_call(docker_cmd + [
+        cmd = docker_cmd + [
             'run', '-d', '--rm', '--name', container_name,
             '--add-host', f'host.docker.internal:{gateway}',
             '--log-opt', 'max-size=10m', '--log-opt', 'max-file=5',
             '--shm-size', '1024M'] + other_opts + [
             '-t', 'manthey/agent:latest', 'bash', '-c', 'while true; do date; sleep 300; done',
-        ])
+        ]
+        subprocess.check_call(cmd)
         with tempfile.SpooledTemporaryFile() as fp:
             with tarfile.open(fileobj=fp, mode='w') as tf:
                 tf.add(os.path.join('..', current_dir), arcname=current_dir)
