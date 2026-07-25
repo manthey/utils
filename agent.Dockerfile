@@ -49,6 +49,7 @@ RUN apt-get update && \
       jq \
       less \
       locales \
+      openssh-server \
       shellcheck \
       telnet \
       unzip \
@@ -138,7 +139,14 @@ RUN usermod -aG rabbitmq ubuntu && \
     chmod -R 777 /var/log/rabbitmq
 COPY .vimrc /home/ubuntu/.vimrc
 COPY cover.py /home/ubuntu/.local/bin/cover.py
+RUN mkdir -p /run/sshd /home/ubuntu/.ssh && \
+    chmod 700 /run/sshd /home/ubuntu/.ssh  && \
+    sed -i 's/^#Port 22$/Port 2222/' /etc/ssh/sshd_config && \
+    sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config && \
+    sed -i 's/^PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config && \
+    /usr/bin/ssh-keygen -A
 RUN chown -R ubuntu:ubuntu /home/ubuntu
+
 USER ubuntu
 WORKDIR /home/ubuntu
 # hadolint ignore=SC2016

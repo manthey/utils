@@ -69,7 +69,7 @@ def get_mount_args(is_windows):
     return args
 
 
-def main():
+def main():  # noqa
     parser = argparse.ArgumentParser()
     parser.add_argument(
         'command',
@@ -88,6 +88,11 @@ def main():
     parser.add_argument(
         '--gpu', '--gpus', action='store_true',
         help='Enable gpu access when starting a container.')
+    parser.add_argument(
+        '--ssh',
+        help='Add the specified public key for the ubuntu user and expose '
+        'port 2222.  You must still manually start the sshd daemon '
+        '(/usr/sbin/sshd)')
     parser.add_argument(
         '--local', action='store_true',
         help='Mount local utilities directories.  This removes some isolation.')
@@ -124,12 +129,14 @@ def main():
             other_opts.extend(['--gpus', 'all'])
         if args.local:
             other_opts.extend(get_mount_args(is_windows))
+        if args.ssh:
+            other_opts.extend(['-p', '2222:2222'])
         subprocess.check_call(docker_cmd + [
             'run', '-d', '--rm', '--name', container_name,
             '--add-host', f'host.docker.internal:{gateway}',
             '--log-opt', 'max-size=10m', '--log-opt', 'max-file=5',
             '--shm-size', '1024M'] + other_opts + [
-            '-t', 'manthey/agent:latest', 'bash', '-c', 'while true; do sleep 86400; done',
+            '-t', 'manthey/agent:latest', 'bash', '-c', 'while true; do date; sleep 300; done',
         ])
         with tempfile.SpooledTemporaryFile() as fp:
             with tarfile.open(fileobj=fp, mode='w') as tf:
@@ -148,6 +155,16 @@ def main():
         subprocess.run(docker_cmd + [
             'exec', '-it', container_name, 'bash', '-c',
             'set_ollama.sh "' + host + '"'])
+    if args.command in {'create', 'start'} and args.ssh:
+        subprocess.check_call(docker_cmd + [
+            'cp', args.ssh, container_name + ':/home/ubuntu/.ssh/authorized_keys'])
+        subprocess.check_call(docker_cmd + [
+            'exec', '-it', '--user', 'root', container_name, 'bash', '-c',
+            'chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys && '
+            'chmod 0600 /home/ubuntu/.ssh/authorized_keys'])
+        subprocess.check_call(docker_cmd + [
+            'exec', '-it', '--user', 'root', container_name, 'bash', '-c',
+            '/usr/sbin/sshd'])
     if args.command in {'create', 'exec'}:
         subprocess.run(docker_cmd + ['exec', '-it', container_name, 'bash'])
 
