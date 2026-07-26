@@ -49,6 +49,7 @@ def gql_query(query):
 
 
 def get_all_gpu_types(disk_in_gb):
+
     query = """
     query GpuTypes {
       gpuTypes {
@@ -61,17 +62,27 @@ def get_all_gpu_types(disk_in_gb):
         communityPrice
         secureSpotPrice
         communitySpotPrice
-        lowestPrice(input: {
+        maxGpuCountCommunityCloud
+        maxGpuCountSecureCloud
+        lowestPrice: lowestPrice(input: {
           gpuCount: 1
           minDisk: %d
+          secureCloud: true
         }) {
-          minimumBidPrice
+          uninterruptablePrice
+          stockStatus
+        }
+        communityLowestPrice: lowestPrice(input: {
+          gpuCount: 1
+          minDisk: %d
+          secureCloud: false
+        }) {
           uninterruptablePrice
           stockStatus
         }
       }
     }
-    """ % (disk_in_gb, )
+    """ % (disk_in_gb, disk_in_gb)
     result = gql_query(query)
     return result['gpuTypes']
 
@@ -99,6 +110,13 @@ def find_gpus(min_memory_gb, secure_only, disk_in_gb):
             continue
         if not gpu.get('secureCloud', False) and not gpu.get('communityCloud', False):
             continue
+        if gpu.get('lowestPrice', {}).get('stockStatus') is None or (
+                not secure_only and gpu.get('communityLowestPrice', {}).get(
+                    'stockStatus') is not None):
+            if gpu.get('lowestPrice', {}).get('stockStatus') is None or (
+                    gpu['communityLowestPrice']['uninterruptablePrice'] <
+                    gpu['lowestPrice']['uninterruptablePrice']):
+                gpu['lowestPrice'] = gpu['communityLowestPrice']
         if gpu.get('lowestPrice', {}).get('stockStatus') is None:
             continue
         lowest_price, source = get_effective_price(gpu, secure_only)

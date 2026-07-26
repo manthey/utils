@@ -52,6 +52,7 @@ RUN apt-get update && \
       openssh-server \
       shellcheck \
       telnet \
+      tmux \
       unzip \
       vim \
       # agent use \
