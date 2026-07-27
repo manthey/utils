@@ -110,6 +110,7 @@ def find_gpus(min_memory_gb, secure_only, disk_in_gb):
             continue
         if not gpu.get('secureCloud', False) and not gpu.get('communityCloud', False):
             continue
+        comm = False
         if gpu.get('lowestPrice', {}).get('stockStatus') is None or (
                 not secure_only and gpu.get('communityLowestPrice', {}).get(
                     'stockStatus') is not None):
@@ -117,6 +118,9 @@ def find_gpus(min_memory_gb, secure_only, disk_in_gb):
                     gpu['communityLowestPrice']['uninterruptablePrice'] <
                     gpu['lowestPrice']['uninterruptablePrice']):
                 gpu['lowestPrice'] = gpu['communityLowestPrice']
+                comm = True
+        if not comm and gpu.get('communityCloud', False):
+            gpu['communityCloud'] = False
         if gpu.get('lowestPrice', {}).get('stockStatus') is None:
             continue
         lowest_price, source = get_effective_price(gpu, secure_only)
@@ -252,7 +256,8 @@ def cmd_start(args):
     print(f'\n  Use {url}')
     while not args.no_wait:
         try:
-            if requests.head(url, timeout=5).status_code < 400:
+            resp = requests.get(f'{url}/api/tags', timeout=5)
+            if resp.status_code == 200 and 'models' in resp.json():
                 break
         except Exception:
             pass
