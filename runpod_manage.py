@@ -10,6 +10,8 @@
 import argparse
 import json
 import math
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -49,7 +51,6 @@ def gql_query(query):
 
 
 def get_all_gpu_types(disk_in_gb):
-
     query = """
     query GpuTypes {
       gpuTypes {
@@ -208,7 +209,7 @@ def cmd_check(args):
               f'[{cloud_type}] {price}{weight}')
 
 
-def cmd_start(args):
+def cmd_start(args):  # noqa
     runpod.api_key = get_api_key()
     compatible = find_gpus(args.mem, args.secure, args.vol + args.disk)
     if not compatible:
@@ -223,7 +224,6 @@ def cmd_start(args):
                  if gpu_info['lowestPrice'] is not None else '-')
     print(f"Starting pod with GPU: {gpu_info['displayName']} "
           f"({gpu_info['memoryGb']} GB) - {price_str}")
-
     cloud_type = 'COMMUNITY'
     if args.secure:
         cloud_type = 'SECURE'
@@ -241,6 +241,8 @@ def cmd_start(args):
         cloud_type=cloud_type,
     )
     print(f'Pod created: {pod["id"]}')
+    if getattr(args, 'model', []):
+        args.no_wait = False
     status = pod
     while True:
         try:
@@ -263,6 +265,14 @@ def cmd_start(args):
             pass
         time.sleep(5)
     print(f'  Status: {status.get("desiredStatus", "unknown")}')
+    models_to_pull = getattr(args, 'model', [])
+    if models_to_pull:
+        pod_env = os.environ.copy()
+        pod_env['OLLAMA_HOST'] = url
+        for model in models_to_pull:
+            print(f'  Pulling {model}')
+            subprocess.run(['ollama', 'pull', model], env=pod_env)
+            print(f'  Pulled {model}')
 
 
 def cmd_list(args):
@@ -338,6 +348,9 @@ def main():
         help='Volume size in GB (where models are stored)')
     start_parser.add_argument(
         '--no-wait', action='store_true', help='Do not wait for pod to be ready before exiting')
+    start_parser.add_argument(
+        '--model', action='append', default=[],
+        help='Model to pull after creation (can be used multiple times)')
 
     subparsers.add_parser('list', help='List running pods')
 
@@ -347,7 +360,6 @@ def main():
     stop_group.add_argument('--all', action='store_true', help='Stop all pods')
 
     args = parser.parse_args()
-
     if args.command == 'check':
         cmd_check(args)
     elif args.command == 'start':
