@@ -229,13 +229,14 @@ def cmd_start(args):  # noqa
         cloud_type = 'SECURE'
     elif gpu_info.get('secureCloud'):
         cloud_type = 'SECURE'
+    env_vars = {'OLLAMA_CONTEXT_LENGTH': '262144'}
     pod = runpod.create_pod(
         name=f'ollama-{gpu_type_id}',
         image_name='ollama/ollama:latest',
         gpu_type_id=gpu_type_id,
         container_disk_in_gb=args.disk,
-        env={'OLLAMA_CONTEXT_LENGTH': '262144'},
-        ports='11434/http',
+        env=env_vars,
+        ports='11434/http',  # add ',22/tcp' to open ssh
         volume_in_gb=args.vol,
         volume_mount_path='/root/.ollama',
         cloud_type=cloud_type,
@@ -252,10 +253,10 @@ def cmd_start(args):  # noqa
                 break
             time.sleep(5)
         except Exception as e:
-            print(f'\nError checking pod status: {e}')
+            print(f'Error checking pod status: {e}')
             break
     url = f'https://{pod["id"]}-11434.proxy.runpod.net'
-    print(f'\n  Use {url}')
+    print(f'  Use {url}')
     while not args.no_wait:
         try:
             resp = requests.get(f'{url}/api/tags', timeout=5)
@@ -265,6 +266,11 @@ def cmd_start(args):  # noqa
             pass
         time.sleep(5)
     print(f'  Status: {status.get("desiredStatus", "unknown")}')
+    # sshport = None
+    # for port in status['runtime']['port']:
+    #     if port['privatePort'] == 22:
+    #         sshport = port['ip'], port['publicPort']
+    # print(f'  ssh to {sshport[0]} {sshport[1]}')
     models_to_pull = getattr(args, 'model', [])
     if models_to_pull:
         pod_env = os.environ.copy()
