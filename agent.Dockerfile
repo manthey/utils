@@ -6,6 +6,7 @@ ARG PYTHON_VERSIONS="3.11 3.10 3.12 3.13 3.14"
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=en_US.UTF-8 \
     PI_OFFLINE=1 \
+    PI_SKIP_VERSION_CHECK=1 \
     PYENV_ROOT="/.pyenv" \
     CFLAGS="-std=gnu17 -march=native" \
     PATH="/.pyenv/bin:/.pyenv/shims:$PATH"
@@ -204,13 +205,16 @@ RUN mkdir -p /home/ubuntu/.pi/agent && \
 
 RUN cat <<'EOF' > /home/ubuntu/.pi/agent/settings.json
 {
-  "defaultThinkingLevel": "minimal",
-  "hideThinkingBlock": true,
   "defaultModel": "qwen3.6:35b",
-  "defaultProvider": "ollama",
   "defaultProjectTrust": "always",
-  "quietStartup": false,
-  "outputPad": 0
+  "defaultProvider": "ollama",
+  "defaultThinkingLevel": "minimal",
+  "enableInstallTelemetry": false,
+  "followUpMode": "all",
+  "hideThinkingBlock": true,
+  "httpIdleTimeoutMs": 0,
+  "outputPad": 0,
+  "quietStartup": true
 }
 EOF
 
