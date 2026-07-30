@@ -276,8 +276,13 @@ def cmd_start(args):  # noqa
         pod_env = os.environ.copy()
         pod_env['OLLAMA_HOST'] = url
         for model in models_to_pull:
-            print(f'  Pulling {model}')
-            subprocess.run(['ollama', 'pull', model], env=pod_env)
+            for _ in range(5):
+                print(f'  Pulling {model}')
+                try:
+                    subprocess.check_call(['ollama', 'pull', model], env=pod_env)
+                    break
+                except Exception:
+                    time.sleep(5)
             print(f'  Pulled {model}')
 
 

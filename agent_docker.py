@@ -38,7 +38,7 @@ def list_known(docker_cmd: list[str], base_name: str):
         print(name, container_id, image)
 
 
-def get_mount_args(is_windows):
+def get_mount_args(is_windows, more=None):
     mounts = [{
         'src': [os.path.expanduser('~/.vimrc'), os.path.expanduser('~/_vimrc')],
         'dst': '/home/ubuntu/.vimrc',
@@ -56,6 +56,13 @@ def get_mount_args(is_windows):
         'dst': '/home/ubuntu/.pi/agent/sessions',
         'mode': 'rw',
     }]
+    for entry in (more or []):
+        mode = 'ro'
+        parts = entry.split(':')
+        if parts[-1] in {'ro', 'rw'}:
+            mode = parts[-1]
+            parts = parts[:-1]
+        mounts.append({'src': [':'.join(parts[:-1])], 'dst': parts[-1], 'mode': mode})
     args = []
     for mount in mounts:
         paths = [path for path in mount['src'] if os.path.exists(path)]
@@ -98,6 +105,9 @@ def main():  # noqa
     parser.add_argument(
         '--docker', action='store_true',
         help='Mount docker sock with appropriate permissions.')
+    parser.add_argument(
+        '--mount', action='append', default=[],
+        help='Mount a folder into the docker.  Recommended format is local:inside:ro')
     args = parser.parse_args()
 
     # add more commands: list, run <model> <text> --detach, check, log
@@ -130,7 +140,7 @@ def main():  # noqa
         if args.gpu:
             other_opts.extend(['--gpus', 'all'])
         if args.local:
-            other_opts.extend(get_mount_args(is_windows))
+            other_opts.extend(get_mount_args(is_windows, args.mount))
         if args.docker:
             other_opts.extend(['-v', '/var/run/docker.sock:/var/run/docker.sock'])
         if args.ssh:
