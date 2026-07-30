@@ -95,6 +95,9 @@ def main():  # noqa
     parser.add_argument(
         '--local', action='store_true',
         help='Mount local utilities directories.  This removes some isolation.')
+    parser.add_argument(
+        '--docker', action='store_true',
+        help='Mount docker sock with appropriate permissions.')
     args = parser.parse_args()
 
     # add more commands: list, run <model> <text> --detach, check, log
@@ -128,6 +131,8 @@ def main():  # noqa
             other_opts.extend(['--gpus', 'all'])
         if args.local:
             other_opts.extend(get_mount_args(is_windows))
+        if args.docker:
+            other_opts.extend(['-v', '/var/run/docker.sock:/var/run/docker.sock'])
         if args.ssh:
             other_opts.extend(['-p', '2222:2222'])
         cmd = docker_cmd + [
@@ -165,6 +170,10 @@ def main():  # noqa
         subprocess.check_call(docker_cmd + [
             'exec', '-it', '--user', 'root', container_name, 'bash', '-c',
             '/usr/sbin/sshd'])
+        if args.docker:
+            subprocess.check_call(docker_cmd + [
+                'exec', '-it', '--user', 'root', container_name, 'bash', '-c',
+                'chmod 0777 /var/run/docker.sock'])
     if args.command in {'create', 'exec'}:
         subprocess.run(docker_cmd + ['exec', '-it', container_name, 'bash'])
 

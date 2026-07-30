@@ -63,6 +63,7 @@ RUN apt-get update && \
       fonts-dejavu \
       libmagic-dev \
       # testing \
+      docker-cli \
       lsof \
       memcached \
       openjdk-17-jdk \
