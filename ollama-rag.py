@@ -11,7 +11,7 @@
 #   "httpx>=0.27",
 #   "llama-index-embeddings-ollama>=0.8",
 #   "llama-index-readers-file>=0.5",
-#   "mcp[cli]>=1.9",
+#   "mcp[cli]>=2.0",
 #   "msgpack>=1.0",
 #   "pathspec",
 #   "pypdf>=4.0",
@@ -50,7 +50,6 @@ import git
 import httpx
 import mcp.server.stdio
 import mcp.server.streamable_http_manager
-import mcp.types
 import msgpack
 import pathspec
 import rank_bm25
@@ -62,6 +61,8 @@ from llama_index.core.node_parser import CodeSplitter
 from llama_index.core.schema import Document
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.readers.file import DocxReader, MarkdownReader, PDFReader
+from mcp.server import Server
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
 os.environ['CHROMA_TELEMETRY'] = 'False'
@@ -1154,17 +1155,14 @@ def mcp_get_file(path: str) -> str:
     return doc.text
 
 
-def create_mcp_server() -> mcp.server.Server:
-    server = mcp.server.Server('ollama-rag')
-
-    @server.list_tools()
-    async def list_tools() -> list[mcp.types.Tool]:
-        return [
-            mcp.types.Tool(
+def create_mcp_server() -> Server:
+    def list_tools_handler(ctx, params) -> ListToolsResult:
+        return ListToolsResult(tools=[
+            Tool(
                 name='search_codebase',
                 description='Search the indexed codebase using semantic '
                 'similarity. Returns relevant code or document chunks.',
-                inputSchema={
+                input_schema={
                     'type': 'object',
                     'properties': {
                         'query': {'type': 'string', 'description': 'The search query'},
@@ -1178,10 +1176,10 @@ def create_mcp_server() -> mcp.server.Server:
                     'required': ['query'],
                 },
             ),
-            mcp.types.Tool(
+            Tool(
                 name='list_files',
                 description='List indexed file paths, optionally filtered by a path prefix.',
-                inputSchema={
+                input_schema={
                     'type': 'object',
                     'properties': {
                         'path_prefix': {
@@ -1189,10 +1187,10 @@ def create_mcp_server() -> mcp.server.Server:
                     },
                 },
             ),
-            mcp.types.Tool(
+            Tool(
                 name='get_file',
                 description='Retrieve the full contents of a single indexed file by its path.',
-                inputSchema={
+                input_schema={
                     'type': 'object',
                     'properties': {
                         'path': {
@@ -1202,10 +1200,12 @@ def create_mcp_server() -> mcp.server.Server:
                     'required': ['path'],
                 },
             ),
-        ]
+        ])
 
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict) -> list[mcp.types.TextContent]:
+    async def call_tool_handler(ctx, params) -> CallToolResult:
+        name = params.name
+        arguments = params.arguments or {}
+
         dispatch = {
             'search_codebase': lambda a: mcp_search_codebase(
                 a['query'], a.get('path_filter'), a.get('top_k')),
@@ -1213,9 +1213,13 @@ def create_mcp_server() -> mcp.server.Server:
             'get_file': lambda a: mcp_get_file(a['path']),
         }
         result = await asyncio.to_thread(dispatch[name], arguments)
-        return [mcp.types.TextContent(type='text', text=result)]
+        return CallToolResult(content=[TextContent(type='text', text=result)])
 
-    return server
+    return Server(
+        'ollama-rag',
+        on_list_tools=list_tools_handler,
+        on_call_tool=call_tool_handler,
+    )
 
 
 def extract_query_text(messages: list[dict]) -> str:

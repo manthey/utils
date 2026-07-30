@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "mcp[cli]>=1.9.0",
+#   "mcp[cli]>=2.0.0",
 #   "esprima>=4.0.1",
 #   "javalang>=0.13.0",
 #   "mermaid-py>=0.5.0",
@@ -23,12 +23,10 @@ from typing import Any
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp.types import CallToolResult, TextContent, Tool
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
-
-app = Server('syntax-validator')
 
 
 def validate_bash(code: str) -> dict[str, Any]:
@@ -280,32 +278,31 @@ VALIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 def tool_result(content: dict[str, Any]) -> CallToolResult:
-    """Return a CallToolResult with both structuredContent and a TextContent fallback."""
+    """Return a CallToolResult with both structured_content and a TextContent fallback."""
     logger.info('  Result: %s', repr(content)[:60])
     text = json.dumps(content)
     logger.debug('  Full result\n%s', text)
     return CallToolResult(
         content=[TextContent(type='text', text=text)],
-        structuredContent=content,
-        isError=not content.get('valid', True) if 'valid' in content else False,
+        structured_content=content,
+        is_error=not content.get('valid', True) if 'valid' in content else False,
     )
 
 
-@app.list_tools()
-async def list_tools() -> list[Tool]:
+async def list_tools_handler(ctx, params) -> ListToolsResult:
     logger.info('Listing tools')
-    return [
+    return ListToolsResult(tools=[
         Tool(
             name='list_supported_languages',
             description=(
                 'List all languages supported by the validate_syntax tool. '
                 'Use this if you are unsure whether a specific language is supported.'
             ),
-            inputSchema={
+            input_schema={
                 'type': 'object',
                 'properties': {},
             },
-            outputSchema={
+            output_schema={
                 'type': 'object',
                 'properties': {
                     'languages': {
@@ -324,7 +321,7 @@ async def list_tools() -> list[Tool]:
                 'Validate the syntax of code in a given language. '
                 f"Common languages include languages: {', '.join(REPORTED_LANGUAGES)}.  "
             ),
-            inputSchema={
+            input_schema={
                 'type': 'object',
                 'properties': {
                     'language': {
@@ -341,13 +338,15 @@ async def list_tools() -> list[Tool]:
                 },
                 'required': ['language', 'code'],
             },
-            outputSchema=VALIDATE_OUTPUT_SCHEMA,
+            output_schema=VALIDATE_OUTPUT_SCHEMA,
         ),
-    ]
+    ])
 
 
-@app.call_tool()
-async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
+async def call_tool_handler(ctx, params) -> CallToolResult:
+    name = params.name
+    arguments = params.arguments or {}
+
     if name == 'list_supported_languages':
         logger.info(name)
         return tool_result({'languages': SUPPORTED_LANGUAGES})
@@ -365,13 +364,15 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     if language not in VALIDATORS:
         logger.info('  Unknown langauge')
-        return [
-            TextContent(
-                type='text',
-                text=f"Unsupported language '{language}'. Supported: "
-                     f"{', '.join(SUPPORTED_LANGUAGES)}",
-            ),
-        ]
+        return tool_result({
+            'valid': False,
+            'errors': [{
+                'line': None,
+                'column': None,
+                'message': f"Unsupported language '{language}'. Supported: "
+                f"{', '.join(SUPPORTED_LANGUAGES)}",
+            }],
+        })
 
     try:
         result = VALIDATORS[language](code)
@@ -389,88 +390,79 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     return tool_result(result)
 
 
-async def run_stdio() -> None:
+async def run_stdio(server):
     async with stdio_server() as (read_stream, write_stream):
-        await app.run(
+        await server.run(
             read_stream,
             write_stream,
-            app.create_initialization_options(),
+            server.create_initialization_options(),
         )
 
 
-async def run_http(host: str, port: int) -> None:
+async def run_http(local_app, host, port):
     from starlette.applications import Starlette
     from starlette.middleware import Middleware
     from starlette.middleware.cors import CORSMiddleware
     from starlette.routing import Mount
 
     session_manager = StreamableHTTPSessionManager(
-        app=app,
+        app=local_app,
         event_store=None,
         json_response=False,
         stateless=True,
     )
 
-    async def lifespan(app_: Any):
+    async def lifespan(app_ctx):
         async with session_manager.run():
             yield
 
     starlette_app = Starlette(
-        routes=[
-            Mount('/mcp', app=session_manager.handle_request),
-        ],
+        routes=[Mount('/mcp', app=session_manager.handle_request)],
         lifespan=lifespan,
         middleware=[
-            Middleware(
-                CORSMiddleware,
-                allow_origins=['*'],
-                allow_methods=['*'],
-                allow_headers=['*'],
-            ),
+            Middleware(CORSMiddleware, allow_origins=['*'],
+                       allow_methods=['*'], allow_headers=['*']),
         ],
     )
 
     import uvicorn
-
-    config = uvicorn.Config(
-        starlette_app,
-        host=host,
-        port=port,
-        log_level='info',
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
+    config = uvicorn.Config(starlette_app, host=host, port=port, log_level='info')
+    server_uvicorn = uvicorn.Server(config)
+    await server_uvicorn.serve()
 
 
-def main() -> None:
+def main():
     parser = argparse.ArgumentParser(description='MCP syntax validator server')
-    parser.add_argument(
-        '--transport', '-t',
-        choices=['stdio', 'http'],
-        default='stdio',
-        help='Transport mode (default: stdio)',
-    )
-    parser.add_argument('--host', default='127.0.0.1', help='HTTP host (default: 127.0.0.1)')
-    parser.add_argument('--port', '-p', type=int, default=3000, help='HTTP port (default: 3000)')
-    parser.add_argument('--languages', action='store_true', help='Show known languages')
-    parser.add_argument('--log', help='Append logs to the specified path')
-    parser.add_argument('--verbose', '-v', action='count', default=0,
-                        help='Increase verbosity')
+    parser.add_argument('--transport', '-t', choices=['stdio', 'http'], default='stdio')
+    parser.add_argument('--host', default='127.0.0.1')
+    parser.add_argument('--port', '-p', type=int, default=3000)
+    parser.add_argument('--languages', action='store_true')
+    parser.add_argument('--log', help='Log file path')
+    parser.add_argument('--verbose', '-v', action='count', default=0)
     args = parser.parse_args()
+
     if args.log:
         handler = logging.FileHandler(args.log, mode='a')
         handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
         logger.addHandler(handler)
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
 
+    server = Server(
+        'syntax-validator',
+        on_list_tools=list_tools_handler,
+        on_call_tool=call_tool_handler,
+    )
+
     if args.languages:
         for key in SUPPORTED_LANGUAGES:
             print(key)
     elif args.transport == 'stdio':
-        asyncio.run(run_stdio())
+        asyncio.run(run_stdio(server))
     else:
-        asyncio.run(run_http(args.host, args.port))
+        asyncio.run(run_http(server, args.host, args.port))
 
 
+if __name__ == '__main__':
+    main()
 if __name__ == '__main__':
     main()
