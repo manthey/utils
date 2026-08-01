@@ -44,6 +44,19 @@ def list_known(docker_cmd: list[str], base_name: str):
         print(name, container_id, image)
 
 
+def rename_if_exists(docker_cmd, container_name):
+    cmd = docker_cmd + ['ps', '-a', '--format', '{{.ID}}\t{{.Names}}']
+    logger.info(cmd)
+    output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
+    for line in output.strip().split('\n'):
+        parts = tuple(line.split('\t'))
+        if len(parts) == 2 and parts[1] == container_name:
+            cmd = docker_cmd + ['rename', container_name, parts[0]]
+            logger.info(cmd)
+            subprocess.run(cmd, stderr=subprocess.DEVNULL, check=False)
+            return parts[0]
+
+
 def get_mount_args(is_windows, more=None):
     mounts = [{
         'src': [os.path.expanduser('~/.vimrc'), os.path.expanduser('~/_vimrc')],
@@ -136,9 +149,11 @@ def main():  # noqa
     if args.command in {'list'}:
         list_known(docker_cmd, container_name)
     if args.command in {'create', 'start', 'stop'}:
-        cmd = docker_cmd + ['rm', '-f', container_name]
-        logger.info(cmd)
-        subprocess.run(cmd, stderr=subprocess.DEVNULL, check=False)
+        renamed_id = rename_if_exists(docker_cmd, container_name)
+        if renamed_id:
+            cmd = docker_cmd + ['rm', '-f', renamed_id]
+            logger.info(cmd)
+            subprocess.run(cmd, stderr=subprocess.DEVNULL, check=False)
     if args.command in {'create', 'start'}:
         gateway = 'host-gateway'
         if is_windows and docker_cmd[0] == 'wsl':
