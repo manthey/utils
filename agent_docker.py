@@ -5,13 +5,18 @@
 # ///
 
 import argparse
+import logging
 import os
 import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 def safe_filename(name: str) -> str:
@@ -22,6 +27,7 @@ def safe_filename(name: str) -> str:
 
 def list_known(docker_cmd: list[str], base_name: str):
     cmd = docker_cmd + ['ps', '-a', '--format', '{{.ID}}\t{{.Names}}\t{{.Image}}']
+    logger.info(cmd)
     output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL)
     found = []
     for line in output.strip().split('\n'):
@@ -108,7 +114,13 @@ def main():  # noqa
     parser.add_argument(
         '--mount', action='append', default=[],
         help='Mount a folder into the docker.  Recommended format is local:inside:ro')
+    parser.add_argument(
+        '--verbose', '-v', action='count', default=0,
+        help='Increase verbosity')
     args = parser.parse_args()
+    logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
+    logger.addHandler(logging.StreamHandler(sys.stderr))
+    logger.debug('Parsed arguments: %r', args)
 
     # add more commands: list, run <model> <text> --detach, check, log
     if args.src:
@@ -124,13 +136,15 @@ def main():  # noqa
     if args.command in {'list'}:
         list_known(docker_cmd, container_name)
     if args.command in {'create', 'start', 'stop'}:
-        subprocess.run(docker_cmd + [
-            'rm', '-f', container_name], stderr=subprocess.DEVNULL, check=False)
+        cmd = docker_cmd + ['rm', '-f', container_name]
+        logger.info(cmd)
+        subprocess.run(cmd, stderr=subprocess.DEVNULL, check=False)
     if args.command in {'create', 'start'}:
         gateway = 'host-gateway'
         if is_windows and docker_cmd[0] == 'wsl':
-            gateway = subprocess.check_output([
-                'wsl', 'grep', 'nameserver', '/etc/resolv.conf']).decode().split()[1].strip()
+            cmd = ['wsl', 'grep', 'nameserver', '/etc/resolv.conf']
+            logger.info(cmd)
+            gateway = subprocess.check_output(cmd).decode().split()[1].strip()
         other_opts = []
         if args.fuse:
             other_opts.extend([
@@ -152,14 +166,16 @@ def main():  # noqa
             '--shm-size', '1024M'] + other_opts + [
             '-t', 'manthey/agent:latest', 'bash', '-c', 'while true; do date; sleep 300; done',
         ]
+        logger.info(cmd)
         subprocess.check_call(cmd)
         with tempfile.SpooledTemporaryFile() as fp:
             with tarfile.open(fileobj=fp, mode='w') as tf:
                 tf.add(os.path.join('..', current_dir), arcname=current_dir)
             fp.seek(0)
-            subprocess.check_call(docker_cmd + [
-                'exec', '-i', container_name, 'tar', '-xf', '-', '-C',
-                '/home/ubuntu/'], stdin=fp)
+            cmd = docker_cmd + [
+                'exec', '-i', container_name, 'tar', '-xf', '-', '-C', '/home/ubuntu/']
+            logger.info(cmd)
+            subprocess.check_call(cmd, stdin=fp)
     if args.command in {'create', 'start', 'exec', 'update'} and args.ollama:
         host = args.ollama
         if '/' not in args.ollama and ':' not in args.ollama:
@@ -167,25 +183,37 @@ def main():  # noqa
         if '/' not in host:
             host = f'http://{host}'
         host = host.rstrip('/')
-        subprocess.run(docker_cmd + [
+        cmd = docker_cmd + [
             'exec', '-it', container_name, 'bash', '-c',
-            'set_ollama.sh "' + host + '"'])
+            'set_ollama.sh "' + host + '"']
+        logger.info(cmd)
+        subprocess.run(cmd)
     if args.command in {'create', 'start'} and args.ssh:
-        subprocess.check_call(docker_cmd + [
-            'cp', args.ssh, container_name + ':/home/ubuntu/.ssh/authorized_keys'])
-        subprocess.check_call(docker_cmd + [
+        cmd = docker_cmd + [
+            'cp', args.ssh, container_name + ':/home/ubuntu/.ssh/authorized_keys']
+        logger.info(cmd)
+        subprocess.check_call(cmd)
+        cmd = docker_cmd + [
             'exec', '-it', '--user', 'root', container_name, 'bash', '-c',
             'chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys && '
-            'chmod 0600 /home/ubuntu/.ssh/authorized_keys'])
-        subprocess.check_call(docker_cmd + [
+            'chmod 0600 /home/ubuntu/.ssh/authorized_keys']
+        logger.info(cmd)
+        subprocess.check_call(cmd)
+        cmd = docker_cmd + [
             'exec', '-it', '--user', 'root', container_name, 'bash', '-c',
-            '/usr/sbin/sshd'])
+            '/usr/sbin/sshd']
+        logger.info(cmd)
+        subprocess.check_call(cmd)
         if args.docker:
-            subprocess.check_call(docker_cmd + [
+            cmd = docker_cmd + [
                 'exec', '-it', '--user', 'root', container_name, 'bash', '-c',
-                'chmod 0777 /var/run/docker.sock'])
+                'chmod 0777 /var/run/docker.sock']
+            logger.info(cmd)
+            subprocess.check_call(cmd)
     if args.command in {'create', 'exec'}:
-        subprocess.run(docker_cmd + ['exec', '-it', container_name, 'bash'])
+        cmd = docker_cmd + ['exec', '-it', container_name, 'bash']
+        logger.info(cmd)
+        subprocess.check_call(cmd)
 
 
 if __name__ == '__main__':
