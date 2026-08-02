@@ -5,6 +5,7 @@
 # ///
 
 import argparse
+import fnmatch
 import logging
 import os
 import platform
@@ -128,6 +129,13 @@ def main():  # noqa
         '--mount', action='append', default=[],
         help='Mount a folder into the docker.  Recommended format is local:inside:ro')
     parser.add_argument(
+        '--skip',
+        action='append',
+        dest='skips',
+        help='Files or folders to exclude from the copy. '
+             'Use commas for multiple patterns in one --skip (e.g., ".venv,*.pyc"). '
+             'Repeat --skip for separate groups.')
+    parser.add_argument(
         '--verbose', '-v', action='count', default=0,
         help='Increase verbosity')
     args = parser.parse_args()
@@ -155,6 +163,10 @@ def main():  # noqa
             logger.info(cmd)
             subprocess.run(cmd, stderr=subprocess.DEVNULL, check=False)
     if args.command in {'create', 'start'}:
+        skip_patterns = []
+        if args.skips:
+            for s in args.skips:
+                skip_patterns.extend(p.rstrip('/') for p in s.split(','))
         gateway = 'host-gateway'
         if is_windows and docker_cmd[0] == 'wsl':
             cmd = ['wsl', 'grep', 'nameserver', '/etc/resolv.conf']
@@ -183,9 +195,21 @@ def main():  # noqa
         ]
         logger.info(cmd)
         subprocess.check_call(cmd)
+
+        def tar_exclusion_filter(tarinfo):
+            basename = os.path.basename(tarinfo.name)
+            for pat in skip_patterns:
+                if fnmatch.fnmatch(basename, pat):
+                    return None
+                parts = tarinfo.name.split('/')
+                if any(fnmatch.fnmatch(part, pat) for part in parts):
+                    return None
+            return tarinfo
+
         with tempfile.SpooledTemporaryFile() as fp:
             with tarfile.open(fileobj=fp, mode='w') as tf:
-                tf.add(os.path.join('..', current_dir), arcname=current_dir)
+                tf.add(os.path.join('..', current_dir), filter=tar_exclusion_filter,
+                       arcname=current_dir)
             fp.seek(0)
             cmd = docker_cmd + [
                 'exec', '-i', container_name, 'tar', '-xf', '-', '-C', '/home/ubuntu/']
