@@ -365,6 +365,25 @@ let g:lsp_document_highlight_enabled = 0
 let g:asyncomplete_auto_popup = 1
 let g:asyncomplete_auto_completeopt = 0
 
+let g:lsp_is_on = 1
+function! ToggleLSPCompletions() abort
+  if expand('%') == ''
+    return
+  endif
+  silent! pclose
+  if g:lsp_is_on ==# 1
+    call lsp#disable()
+    let g:lsp_is_on = 0
+    echom 'LSP Disabled'
+  else
+    call lsp#enable()
+    let g:lsp_is_on = 1
+    echom 'LSP Enabled'
+  endif
+endfunction
+nnoremap <F4> :call ToggleLSPCompletions()<CR>
+inoremap <F4> <Esc>:call ToggleLSPCompletions()<CR>a
+
 " Ensure Tab cycles the popup
 inoremap <expr> <Tab> pumvisible() ? "\<C-n>" : "\<Tab>"
 inoremap <expr> <S-Tab> pumvisible() ? "\<C-p>" : "\<S-Tab>"
