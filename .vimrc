@@ -182,7 +182,7 @@ augroup END
 " maximum of 2500 files in the backup directory
 set backupdir=$HOME/.vim_backup
 if strlen(finddir(&g:backupdir))==0
-    call mkdir(&g:backupdir, "p", 0770)
+    call mkdir(&g:backupdir, "p", 02777)
 endif
 if has("win32")
     call system("for /f \"tokens=* skip=2500\" \%F in ('dir ".shellescape(&g:backupdir)." /o-d /tc /b') do del ".shellescape(&g:backupdir."\\\%F"))
