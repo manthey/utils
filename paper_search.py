@@ -26,6 +26,10 @@ import requests
 import yaml
 from ratelimit import limits, sleep_and_retry
 
+# Silence noisy WARNING-level messages from paperscraper's download helpers
+# (missing local dumps are not user-errors, they just mean the API will be used)
+logging.getLogger('paperscraper.load_dumps').setLevel(logging.WARNING + 1)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
@@ -262,7 +266,6 @@ class ArxivBackend(ArchiveBackend):
             get_and_dump_arxiv_papers(
                 query_terms,
                 output_filepath=tmp_path,
-                sort_by='relevance',
                 max_results=max_results,
             )
             with open(tmp_path) as f:
@@ -426,6 +429,7 @@ class MedrxivBackend(ArchiveBackend):
 
 class ChemrxivBackend(ArchiveBackend):
     name = 'chemrxiv'
+    _logged_api_key_warning = False
 
     @sleep_and_retry
     @limits(calls=1, period=5)
@@ -436,9 +440,19 @@ class ChemrxivBackend(ArchiveBackend):
             flat_terms.extend(group)
         query_string = ' AND '.join(flat_terms)
         try:
+            # Check if we have been rate-limited / need auth
             url = 'https://chemrxiv.org/engage/chemrxiv/public-api/v1/items'
             params = {'term': query_string, 'limit': min(max_results, 50)}
             resp = requests.get(url, params=params, timeout=30)
+            if resp.status_code == 403:
+                if not ChemrxivBackend._logged_api_key_warning:
+                    log.warning(
+                        'Chemrxiv search returned 403 (Forbidden). '
+                        'This backend may require an api_key in your config; '
+                        'skipping chemrxiv for this session.',
+                    )
+                    ChemrxivBackend._logged_api_key_warning = True
+                return papers  # Return empty results instead of retrying
             resp.raise_for_status()
             data = resp.json()
             for rec in data.get('itemHits', []):
