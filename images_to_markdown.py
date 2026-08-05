@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 IMAGE_SIZE = 1024
-DEFAULT_MODEL = 'qwen3.5:4b'
+DEFAULT_MODEL = 'qwen2.5vl:7b'
 DEFAULT_SYSTEM = (
     'You are an image analyst who describes images so that other tools know '
     'their contents.  You never use emojis, slang, or metaphors.')
@@ -220,14 +220,18 @@ def process_directory(  # noqa
             try:
                 print(filepath)
                 description = describe_file(url, specs, filepath, raise_errors)
-                print(description)
+                logger.info(description)
                 if not dry_run:
+                    md_path.parent.mkdir(parents=True, exist_ok=True)
                     md_path.write_text(description, encoding='utf-8')
                     print(f'Created {md_path.name}')
                 else:
                     print(f'Would have created {md_path.name}')
             except Exception as exc:
-                print(f'Failed processing {filepath.name}: {exc}')
+                msg = f'Failed processing {filepath.name}: {exc}'
+                logger.debug(msg)
+                if raise_errors:
+                    raise
 
 
 def main() -> None:

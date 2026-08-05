@@ -163,14 +163,16 @@ def process_directory(args):  # noqa
             try:
                 print(filepath)
                 description = process_file(filepath, args)
-                print(description)
+                logger.info(description)
                 if not args.dry_run:
+                    md_path.parent.mkdir(parents=True, exist_ok=True)
                     md_path.write_text(description, encoding='utf-8')
                     print(f'Created {md_path.name}')
                 else:
                     print(f'Would have created {md_path.name}')
             except Exception as exc:
-                print(f'Failed processing {filepath.name}: {exc}')
+                msg = f'Failed processing {filepath.name}: {exc}'
+                logger.debug(msg)
                 if args.raise_errors:
                     raise
 
