@@ -280,7 +280,11 @@ def cmd_start(args):  # noqa
                 print(f'  Pulling {model}')
                 try:
                     subprocess.check_call(['ollama', 'pull', model], env=pod_env)
-                    break
+                    resp = requests.get(f'{url}/api/tags', timeout=5)
+                    resp.raise_for_status()
+                    models_found = [m['name'] for m in resp.json().get('models', [])]
+                    if any(model in found or found.startswith(found) for found in models_found):
+                        break
                 except Exception:
                     time.sleep(5)
             print(f'  Pulled {model}')
