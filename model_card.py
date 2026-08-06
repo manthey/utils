@@ -1924,7 +1924,7 @@ def main():  # noqa
         help='Collect metadata only, skip all tests')
     parser.add_argument(
         '--timeout', type=float, default=300,
-        help='Per-request timeout in seconds (default: 300)')
+        help='Per-request timeout in seconds (default: %(default)s)')
     parser.add_argument(
         '-s', '--skip', action='store_true',
         help='Skip checking a model if the output file already exists.')
