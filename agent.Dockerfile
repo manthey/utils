@@ -208,9 +208,10 @@ RUN mkdir -p /home/ubuntu/.pi/agent && \
 RUN cat <<'EOF' > /home/ubuntu/.pi/agent/global-guidelines.js
 export default function addGuidelines(pi) {
   pi.on("before_agent_start", async (event) => {
-    const customRule = "\n\n## Global Professionalism Guidelines:\n" +
+    const customRule = "\n\n## Global Guidelines:\n" +
       "- Never use emojis, slang, or metaphors.\n" +
-      "- Never claim code is verified unless you have actually run it.\n";
+      "- Never claim code is verified unless you have actually run it.\n" +
+      "- Always use up-to-date versions (e.g., python 3.10-3.14) when possible.\n";
     if (!event.systemPrompt) return event;
       return { ...event, systemPrompt: event.systemPrompt + customRule };
     });

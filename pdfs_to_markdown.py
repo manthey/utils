@@ -166,6 +166,25 @@ def get_converter(args):
     return converter
 
 
+def offload_ollama(url):
+    import requests
+
+    url = url.rstrip('/')
+    resp = requests.get(f'{url}/api/ps')
+    try:
+        resp.raise_for_status()
+        models = resp.json().get('models', [])
+    except Exception:
+        return
+    for entry in models:
+        try:
+            model = entry['model']
+            requests.post(f'{url}/api/chat', json={
+                'model': model, 'messages': [], 'keep_alive': 0})
+        except Exception:
+            pass
+
+
 def process_file(converter, client, filepath, model, args):
     offload = converter is None
     if converter is None:
@@ -189,13 +208,7 @@ def process_file(converter, client, filepath, model, args):
     finally:
         result.input._backend.unload()
         if offload:
-            import requests
-
-            try:
-                requests.post(args.url.rstrip('/') + '/api/chat', json={
-                    'model': args.model, 'messages': [], 'keep_alive': 0})
-            except Exception:
-                pass
+            offload_ollama(args.url)
     markdown = doc.export_to_markdown()
     return markdown
 
