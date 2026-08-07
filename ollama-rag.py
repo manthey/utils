@@ -1156,7 +1156,7 @@ def mcp_get_file(path: str) -> str:
 
 
 def create_mcp_server() -> Server:
-    def list_tools_handler(ctx, params) -> ListToolsResult:
+    async def list_tools_handler(ctx, params) -> ListToolsResult:
         return ListToolsResult(tools=[
             Tool(
                 name='search_codebase',
