@@ -798,7 +798,7 @@ OLLAMA_PLAIN_HEADERS = {
 }
 
 
-def _extract_pull_number(text: str) -> int | None:
+def extract_pull_number(text: str) -> int | None:
     """Extract a numeric pull count from raw span text like '15.8M', '2', etc.
 
     Returns None when the text does not look like a valid pull count (e.g. model param
@@ -827,8 +827,8 @@ def _extract_pull_number(text: str) -> int | None:
         return None
 
 
-def _score_model(m: ModelInfo, gpu_memory: float | None,
-                 context_limit: float | None) -> float:
+def score_model(m: ModelInfo, gpu_memory: float | None,
+                context_limit: float | None) -> float:
     """Score a model for selection. Higher = better.
 
     Priority within a single search result (which all share one repo_id):
@@ -853,7 +853,7 @@ def _select_best_model(models_in: list[ModelInfo], gpu_memory: float | None,
     best: ModelInfo | None = None
     best_score: float = -1.0
     for m in models_in:
-        s = _score_model(m, gpu_memory, context_limit)
+        s = score_model(m, gpu_memory, context_limit)
         if s > best_score:
             best_score = s
             best = m
@@ -975,7 +975,7 @@ def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> l
                     prior = block[max(0, idx - 200):idx]
                     num_match = re.search(r'<span[^>]*>([^<]*)</span>', prior)
                     if num_match:
-                        nval = _extract_pull_number(num_match.group(1))
+                        nval = extract_pull_number(num_match.group(1))
                         if nval:
                             pull_num = str(nval)
                             break
@@ -986,7 +986,7 @@ def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> l
                         fwd = block[pm.end():]
                         fs = re.search(r'<span[^>]*>([^<]*)</span>', fwd)
                         if fs:
-                            nval = _extract_pull_number(fs.group(1))
+                            nval = extract_pull_number(fs.group(1))
                             if nval:
                                 pull_num = str(nval)
                                 break
@@ -997,7 +997,7 @@ def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> l
                 large = 0
                 for m in all_pull_spans:
                     s = m.group(1).strip()
-                    nval = _extract_pull_number(s)
+                    nval = extract_pull_number(s)
                     if nval and nval > large:
                         large = nval
             if pull_num != '0' and parse_pull_count(pull_num) < 100:
@@ -1060,7 +1060,6 @@ def scrape_ollama_tags_for_model(model_info: dict) -> list[dict]:
     except (urllib.error.URLError, OSError) as e:
         print(f"  Failed to fetch tags for {model_info['name']}: {e}")
         return []
-
     tags: list[dict] = []
     tags_by_hash: dict[str, dict] = {}
     # Locate the table header row to find where tag data begins
@@ -1153,7 +1152,6 @@ def discover_ollama_registry_models(  # noqa
             all_candidate_names = [f'{search_model["name"]}{t.get("tag", "")}' for t in tag_details]
             if not any(re.search(name_filter, n, re.IGNORECASE) for n in all_candidate_names):
                 continue
-
         if search_model['is_cloud'] and not any(t.get('size_text') for t in tag_details):
             skipped_cloud += 1
             continue
@@ -1254,8 +1252,8 @@ def discover_ollama_registry_models(  # noqa
         size_buckets: dict[tuple[str, int], ModelInfo] = {}
         for m in fitting_candidates:
             key = (m.repo_id, round(m.size_gb))
-            candidate_score = _score_model(m, gpu_memory_gb, context_limit_gb)
-            if key not in size_buckets or candidate_score > _score_model(
+            candidate_score = score_model(m, gpu_memory_gb, context_limit_gb)
+            if key not in size_buckets or candidate_score > score_model(
                     size_buckets[key], gpu_memory_gb, context_limit_gb):
                 size_buckets[key] = m
         fitting_candidates = list(size_buckets.values())

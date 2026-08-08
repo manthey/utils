@@ -137,3 +137,8 @@ repos:
           sys.exit(subprocess.run(cmd).returncode)"
         language: system
         types_or: [dockerfile]
+  - repo: https://github.com/manthey/manthey-precommit-hooks
+    rev: v1.0.3
+    hooks:
+      - id: trim-underscores
+        args: [--underscores, --blanks]

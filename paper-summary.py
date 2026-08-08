@@ -43,7 +43,6 @@ document. Include exactly these fields:
   purpose, methods, results, and conclusions in sufficient detail to be
   useful; if more than four or five sentences, this may be multiple
   paragraphs.
-
 The entire output must be between {min_chars} and {max_chars} characters. Do
 not truncate any section to meet this limit; instead balance the length
 across all sections, with the summary being the longest section.  It must be
@@ -55,7 +54,6 @@ information rather than Example and 1234-56.
 
 Document text:
 {document_text}"""
-
 RETRY_PROMPT_TEMPLATE = """Your previous response was {actual} characters long, but the required length is between {min_chars} and {max_chars} characters. Please rewrite your response so that it falls within that range. {direction}Keep all required sections. The entire output must be between {min_chars} and {max_chars} characters."""  # noqa
 
 
@@ -105,7 +103,6 @@ def lookup_doi(reference: str, title: str = '', author: str = '', source: str = 
                 'https://api.crossref.org/works'
                 f'?query.bibliographic={quote(reference)}&rows=5',
             )
-
         for url in queries:
             response = client.get(
                 url,

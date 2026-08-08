@@ -21,7 +21,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
-
 logging.getLogger('transformers').setLevel(logging.ERROR)
 logging.getLogger('torch').setLevel(logging.ERROR)
 
@@ -116,7 +115,6 @@ def enrich_formulas(doc, client, model):
 def enrich_pictures(doc, client, model):
     from docling_core.types.doc.document import (DescriptionMetaField,
                                                  PictureItem, PictureMeta)
-
     max_tokens = 0
     described = 0
     count = len([item for item, _ in doc.iterate_items() if isinstance(item, PictureItem)])

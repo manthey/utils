@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 import os
 import subprocess
 import sys
@@ -21,7 +20,6 @@ class CronSvc(win32serviceutil.ServiceFramework):
     _svc_display_name_ = 'Cron for Windows Service'
     _svc_description_ = (
         'Provide cron for Windows.')
-
     # import crond
     # svcPath = (os.path.splitext(os.path.abspath(crond.__file__))[0] + '.' +
     #            _svc_name_)
@@ -209,10 +207,8 @@ if __name__ == '__main__':
             help = True
     if (help and not windowsService) or help == 'help':
         print("""Run a cron service on windows.
-
 Syntax: cron.py install|remove|start|stop
   -q -v
-
 A crontab.txt file must be in the same directory as this python script.
 
 If one of 'install', 'remove', 'start', or 'stop' is used, this program will be

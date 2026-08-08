@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import argparse
 import os
 import sys
@@ -34,7 +33,6 @@ def age_pypi(liststr, ageInDays=0, onlyDifferent=False, pyversion=None, onlyBina
 
     if pyversion:
         pyversion = packaging.version.Version(pyversion)
-
     header = False
     for package, val in sorted(packages.items()):
         req = requests.get('https://pypi.org/pypi/%s/json' % package)
@@ -101,11 +99,9 @@ def age_pypi(liststr, ageInDays=0, onlyDifferent=False, pyversion=None, onlyBina
             verlen = max(verlen, len(dstamp) if dstamp is not None else verlen)
         if instdate and instdate < then:
             once = (0, 0, None)
-
         if (onlyDifferent and (not instdate or (not once[2] or once[2] == val)) and
                 (not latest[2] or latest[2] == val or (once[2] and latest[2] == once[2]))):
             continue
-
         header = show_header(header, namelen, verlen)
         sys.stdout.write(('%-' + str(namelen) + 's') % package)
         sys.stdout.write((' %-' + str(verlen) + 's %s') % (

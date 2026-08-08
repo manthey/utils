@@ -26,7 +26,6 @@ import PIL.Image
 import yaml
 
 os.environ['GDAL_PAM_ENABLED'] = 'NO'
-
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 

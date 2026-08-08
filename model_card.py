@@ -1830,7 +1830,6 @@ def load_yaml_tests():
                     return chat_test(client, model_name, test['test'])
                 return bash_test(
                     client, model_name, ollama_base_url, ollama_docker_url, test['test'])
-
             register_test(test['name'], test['description'],
                           test.get('skip', False), test.get('version', 0))(test_func)
 

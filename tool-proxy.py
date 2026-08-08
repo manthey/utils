@@ -101,7 +101,6 @@ class StdioConnection:
         if request_id is not None:
             response_queue = queue.Queue(maxsize=1)
             self.pending[request_id] = response_queue
-
         try:
             self.process.stdin.write(body)
             if not body.endswith(b'\n'):

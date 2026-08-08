@@ -66,7 +66,6 @@ from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
 os.environ['CHROMA_TELEMETRY'] = 'False'
-
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 chat_logger = logging.getLogger(__name__ + '_chat_log')
@@ -928,7 +927,6 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
             current_byte_end = chunk_end
             current_line_start = line_start
             current_line_end = line_end
-
     flush()
     return '\n\n'.join(parts)
 
@@ -1100,7 +1098,6 @@ def retrieve_context(  # noqa
                 all_bm25_results.extend(
                     bm25_search(bm25_idx, query, max_top_k, path_filter))
                 break
-
     all_bm25_results.sort(key=lambda x: x[2], reverse=True)
     bm25_scores = [s for _, _, s in all_bm25_results]
     if bm25_scores:

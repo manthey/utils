@@ -468,12 +468,10 @@ if __name__ == '__main__':  # noqa
             files.append(arg)
     if help:
         print("""Combine python and javascript coverage reports.
-
 Syntax: cover.py [--report|--show] [--build=(build path)] [--js|--py] [--all]
                  [--local|--global] [--diff[=(diff options)] [--full]]
                  [--branch|--line] [--include=(regex)] [--exclude=(regex)]
                  [--alt=(path)] [(files ...)]
-
 --all annotates all files.  Otherwise, only files that have missed statements
   are annotated.  This doesn't have any effect on reports.
 --alt specifies a directory where files may exist if they aren't where they are

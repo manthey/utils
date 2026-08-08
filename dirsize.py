@@ -1,5 +1,4 @@
 #!/usr/bin/python
-
 import os
 import sys
 
@@ -44,7 +43,6 @@ if __name__ == '__main__':  # noqa
             help = True
     if help:
         print("""Find the size of all items in the current path.
-
 Syntax: dirsize.py [(root directory) ...] --depth=(depth) --size -v
 
 If no directory is specified, the current directory is used.

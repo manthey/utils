@@ -1,5 +1,4 @@
 #!/usr/bin/python
-
 import os
 import re
 import subprocess
@@ -115,14 +114,12 @@ if __name__ == '__main__':  # noqa
         Help = True
     if Help:
         print("""Convert a video using ffmpeg and some preferred settings.
-
 Syntax: convert.py (input file) [(output file)] -v --format=(format)
         --duration=(seconds) --start=(seconds) --end=(seconds) --ifps=(fps)
         --seq=(start number) --quiet --maxwidth=(width) --width=(width)
         --faster=(factor) --rotate=(90|-90|180) --ofps=(fps) --delay=(seconds)
         --kbps=(rate) --factor=(rate factor) --outdir=(path) --autolevels
         --crop[=w:h:x:y]
-
 The input file can be any ffmpeg-readable video format.  The output file will
 be an mp4 unless otherwise specified.  If the output file is a directory, then
 the original filename with a modified extension is placed in that directory
@@ -218,7 +215,6 @@ the original filename with a modified extension is placed in that directory
         opts['files'].append(opts['files'][0].rsplit('.', 1)[0] + '.out.%s' % format)
     if 'outdir' in opts:
         opts['files'][1] = os.path.join(opts['outdir'], os.path.split(opts['files'][1])[1])
-
     # Get real frame count and duration
     if 'seq' not in opts:
         cmd = [os.path.join(ProgramRoot, 'ffmpeg')]
@@ -240,7 +236,6 @@ the original filename with a modified extension is placed in that directory
                 print('Scan duration: %4.2fs' % origdur)
                 print('Scan frames: %d' % origframes)
                 print('Scan frame rate: %4.2f' % (float(origframes) / origdur))
-
     crop = None
     if opts.get('crop', False) not in (False, True):
         crop = 'crop=' + opts.get('crop')
@@ -432,7 +427,6 @@ the original filename with a modified extension is placed in that directory
     cmd.append(opts['files'][1])
     if Verbose >= 3:
         print(' '.join(cmd))
-
     timedone = None
     starttime = time.time()
     pptr = subprocess.Popen(cmd, stderr=subprocess.PIPE).stderr

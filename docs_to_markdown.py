@@ -18,7 +18,6 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
-
 PICTURE_PROMPT = (
     'Describe exactly what you see in this image. Be literal and concise. '
     'Describe the visual composition faithfully (e.g., layout, subjects) and '

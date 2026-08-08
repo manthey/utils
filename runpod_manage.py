@@ -350,7 +350,6 @@ def main():
     check_parser.add_argument(
         '--weight', choices=['bandwidth', 'b', 'compute', 'c'],
         help='Weigh pricing based on a metric')
-
     start_parser = subparsers.add_parser('start', help='Start an Ollama pod')
     start_parser.add_argument('--gpu', help='GPU type to use (otherwise, use cheapest available)')
     start_parser.add_argument('--mem', type=int, default=96, help='Minimum GPU memory in GB')
@@ -366,7 +365,6 @@ def main():
     start_parser.add_argument(
         '--model', action='append', default=[],
         help='Model to pull after creation (can be used multiple times)')
-
     subparsers.add_parser('list', help='List running pods')
 
     stop_parser = subparsers.add_parser('stop', help='Stop a pod')

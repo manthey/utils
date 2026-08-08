@@ -88,7 +88,7 @@ def validate_css(code: str) -> dict[str, Any]:
 def validate_java(code: str) -> dict[str, Any]:
     import javalang
 
-    def _parse(source: str) -> tuple[bool, list[dict]]:
+    def parse(source: str) -> tuple[bool, list[dict]]:
         try:
             javalang.parse.parse(source)
             return True, []
@@ -103,14 +103,14 @@ def validate_java(code: str) -> dict[str, Any]:
         except Exception as e:
             return False, [{'line': None, 'column': None, 'message': str(e)}]
 
-    success, errors = _parse(code)
+    success, errors = parse(code)
     if success:
         return {'valid': True, 'errors': []}
     wrapped = 'public class _Wrapper_ {\n' + code + '\n}'
-    if _parse(wrapped)[0]:
+    if parse(wrapped)[0]:
         return {'valid': True, 'errors': []}
     wrapped_method = 'public class _Wrapper_ {\n  public void _wrapper_() {\n' + code + '\n  }\n}'
-    if _parse(wrapped_method)[0]:
+    if parse(wrapped_method)[0]:
         return {'valid': True, 'errors': []}
     return {'valid': False, 'errors': errors}
 
@@ -147,7 +147,7 @@ def validate_mermaid(code: str) -> dict[str, Any]:
         mermaid.Mermaid(code.rstrip() + '\n')
         return {'valid': True, 'errors': []}
     except (ImportError, OSError, requests.exceptions.RequestException):
-        return _tree_sitter_validate('mermaid', code)
+        return tree_sitter_validate('mermaid', code)
     except Exception as exc:
         return {
             'valid': False,
@@ -173,7 +173,7 @@ def validate_python(code: str) -> dict[str, Any]:
         }
 
 
-def _tree_sitter_validate(language_name: str, code: str) -> dict[str, Any]:
+def tree_sitter_validate(language_name: str, code: str) -> dict[str, Any]:
     import tree_sitter
     import tree_sitter_language_pack
 
@@ -182,14 +182,13 @@ def _tree_sitter_validate(language_name: str, code: str) -> dict[str, Any]:
     tree = parser.parse((code.rstrip() + '\n').encode('utf-8'))
 
     errors = []
-    _collect_tree_sitter_errors(tree.root_node, errors)
-
+    collect_tree_sitter_errors(tree.root_node, errors)
     if errors:
         return {'valid': False, 'errors': errors}
     return {'valid': True, 'errors': []}
 
 
-def _collect_tree_sitter_errors(node: Any, errors: list) -> None:
+def collect_tree_sitter_errors(node: Any, errors: list) -> None:
     if node.type == 'ERROR' or node.is_missing:
         for child in node.children:
             if child.type == 'ERROR' or child.is_missing:
@@ -208,10 +207,10 @@ def _collect_tree_sitter_errors(node: Any, errors: list) -> None:
         )
         return
     for child in node.children:
-        _collect_tree_sitter_errors(child, errors)
+        collect_tree_sitter_errors(child, errors)
 
 
-def _populate_tree_sitter_validators(validators: dict[str, Any]) -> None:
+def populate_tree_sitter_validators(validators: dict[str, Any]) -> None:
     try:
         import typing
 
@@ -219,7 +218,7 @@ def _populate_tree_sitter_validators(validators: dict[str, Any]) -> None:
 
         for lang in typing.get_args(tree_sitter_language_pack.SupportedLanguage):
             if lang not in validators:
-                validators[lang] = lambda code, l=lang: _tree_sitter_validate(l, code)
+                validators[lang] = lambda code, l=lang: tree_sitter_validate(l, code)
     except Exception:
         pass
 
@@ -234,7 +233,7 @@ VALIDATORS = {
 }
 
 REPORTED_LANGUAGES = set(VALIDATORS)
-_populate_tree_sitter_validators(VALIDATORS)
+populate_tree_sitter_validators(VALIDATORS)
 SUPPORTED_LANGUAGES = sorted(VALIDATORS)
 REPORTED_LANGUAGES = sorted(REPORTED_LANGUAGES | (set(SUPPORTED_LANGUAGES) & {
     'typescript', 'cmake', 'c', 'cpp', 'csv', 'dockerfile', 'json',
@@ -353,7 +352,6 @@ async def call_tool_handler(ctx, params) -> CallToolResult:
     if name != 'validate_syntax':
         msg = f'Unknown tool: {name}'
         raise ValueError(msg)
-
     language = arguments.get('language', '').lower()
     code = arguments.get('code', '')
     logger.info('%s: %s - %d bytes', name, language, len(code))
@@ -361,7 +359,6 @@ async def call_tool_handler(ctx, params) -> CallToolResult:
     logger.debug(code)
     if code.startswith('```') and code.endswith('```'):
         code = code.split('\n', 1)[1].rstrip('`')
-
     if language not in VALIDATORS:
         logger.info('  Unknown langauge')
         return tool_result({
@@ -373,7 +370,6 @@ async def call_tool_handler(ctx, params) -> CallToolResult:
                 f"{', '.join(SUPPORTED_LANGUAGES)}",
             }],
         })
-
     try:
         result = VALIDATORS[language](code)
     except Exception:

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 import hashlib
 import os
 import re
@@ -41,7 +40,6 @@ if __name__ == '__main__':  # noqa
             help = True
     if help:
         print("""Walk directories and make all identical files hardlinks of each other.
-
 Syntax: dedup_via_hardlink.py [(root directory) ...] -s -v --exclude=(regex)
 
 If no directory is specified, the current directory is used.
