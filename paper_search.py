@@ -88,7 +88,6 @@ class PaperDatabase:
                 ON seen_papers(search_name, reported);
             CREATE INDEX IF NOT EXISTS idx_seen_doi
                 ON seen_papers(doi);
-
             CREATE TABLE IF NOT EXISTS download_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 identity TEXT NOT NULL,
@@ -205,13 +204,11 @@ def compute_score(paper: Paper, config: dict) -> float:
     w_recency = weights.get('recency_weight', 0.05)
 
     relevance_component = paper.relevance_score
-
     citation_log = 0.0
     if paper.citation_count > 0:
         import math
         citation_log = math.log1p(paper.citation_count) / math.log1p(1000)
         citation_log = min(citation_log, 1.0)
-
     access_component = 1.0 if paper.is_open_access else 0.2
 
     review_component = 0.0
@@ -219,7 +216,6 @@ def compute_score(paper: Paper, config: dict) -> float:
         review_component = 1.0
     elif paper.source in ('arxiv', 'biorxiv', 'medrxiv', 'chemrxiv'):
         review_component = 0.5
-
     recency_component = 0.0
     if paper.published_date:
         try:
@@ -228,7 +224,6 @@ def compute_score(paper: Paper, config: dict) -> float:
             recency_component = max(0.0, 1.0 - days_old / 365.0)
         except ValueError:
             pass
-
     score = (
         w_relevance * relevance_component +
         w_citations * citation_log +
@@ -1204,13 +1199,11 @@ def main():
     )
 
     subparsers = parser.add_subparsers(dest='command', required=True)
-
     subparsers.add_parser('search', help='run configured searches and report top-k new papers')
     subparsers.add_parser('download', help='download top-l undownloaded papers per search')
 
     ack_parser = subparsers.add_parser('acknowledge', help='mark papers as acknowledged')
     ack_parser.add_argument('identities', nargs='+', help='paper identity strings to acknowledge')
-
     list_parser = subparsers.add_parser('list', help='list known papers')
     list_parser.add_argument('-s', '--search-name', default=None, help='filter by search name')
     list_parser.add_argument(
@@ -1225,17 +1218,14 @@ def main():
     init_parser.add_argument('-f', '--force', action='store_true')
 
     args = parser.parse_args()
-
     if args.command == 'init':
         cmd_init_config(args, {})
         return
-
     config_path = Path(args.config)
     if not config_path.exists():
         print(f'config file not found: {config_path}', file=sys.stderr)
         print('run "paper_search init" to generate a sample config', file=sys.stderr)
         sys.exit(1)
-
     config = load_config(config_path)
 
     commands = {
