@@ -9,6 +9,7 @@
 #     "ratelimit>=2.2",
 # ]
 # ///
+"""Discover, rank, and download scientific papers from multiple academic archives."""
 
 import argparse
 import hashlib
@@ -26,10 +27,7 @@ import requests
 import yaml
 from ratelimit import limits, sleep_and_retry
 
-# Silence noisy WARNING-level messages from paperscraper's download helpers
-# (missing local dumps are not user-errors, they just mean the API will be used)
 logging.getLogger('paperscraper.load_dumps').setLevel(logging.WARNING + 1)
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
@@ -348,7 +346,6 @@ class BiorxivBackend(ArchiveBackend):
         flat_terms = []
         for group in query_terms:
             flat_terms.extend(group)
-        query_string = ' '.join(flat_terms)
         try:
             base_url = 'https://api.biorxiv.org/details/biorxiv'
             yesterday = (datetime.now(UTC) - timedelta(days=30)).strftime('%Y-%m-%d')
@@ -357,7 +354,6 @@ class BiorxivBackend(ArchiveBackend):
             resp = requests.get(url, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-            query_lower = [t.lower() for t in flat_terms]
             for rec in data.get('collection', []):
                 title_lower = (rec.get('title', '') + ' ' + rec.get('abstract', '')).lower()
                 if all(any(t in title_lower for t in group_lower)
@@ -374,7 +370,10 @@ class BiorxivBackend(ArchiveBackend):
                         citation_count=0,
                         is_open_access=True,
                         is_peer_reviewed=False,
-                        pdf_url=f'https://www.biorxiv.org/content/{doi}v1.full.pdf' if doi else None,
+                        pdf_url=(
+                            f'https://www.biorxiv.org/content/{doi}v1.full.pdf'
+                            if doi else None,
+                        ),
                         relevance_score=0.85,
                     )
                     papers.append(paper)
@@ -413,7 +412,10 @@ class MedrxivBackend(ArchiveBackend):
                         citation_count=0,
                         is_open_access=True,
                         is_peer_reviewed=False,
-                        pdf_url=f'https://www.medrxiv.org/content/{doi}v1.full.pdf' if doi else None,
+                        pdf_url=(
+                            f'https://www.medrxiv.org/content/{doi}v1.full.pdf'
+                            if doi else None,
+                        ),
                         relevance_score=0.85,
                     )
                     papers.append(paper)
@@ -573,7 +575,11 @@ class SemanticScholarBackend(ArchiveBackend):
             params = {
                 'query': query_string,
                 'limit': min(max_results, 100),
-                'fields': 'title,authors,abstract,doi,url,year,citationCount,isOpenAccess,openAccessPdf,publicationTypes',
+                'fields': (
+                    'title,authors,abstract,doi,url,'
+                    'year,citationCount,isOpenAccess,'
+                    'openAccessPdf,publicationTypes'
+                ),
             }
             api_key = self.config.get('api_key')
             headers = {}
@@ -788,7 +794,8 @@ class EuropePMCBackend(ArchiveBackend):
                 pmcid = rec.get('pmcid')
                 pdf_url = None
                 if pmcid:
-                    pdf_url = f'https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmcid}&blobtype=pdf'
+                    base_url = 'https://europepmc.org/backend/ptpmcrender.fcgi'
+                    pdf_url = f'{base_url}?accid={pmcid}&blobtype=pdf'
                 paper = Paper(
                     title=rec.get('title', ''),
                     authors=[
@@ -829,7 +836,13 @@ BACKEND_REGISTRY: dict[str, type[ArchiveBackend]] = {
 
 
 class PaperDownloader:
-    def __init__(self, download_dir: Path, min_free_bytes: int, email: str, allow_scihub: bool = True):
+    def __init__(
+        self,
+        download_dir: Path,
+        min_free_bytes: int,
+        email: str,
+        allow_scihub: bool = True,
+    ):
         self.download_dir = download_dir
         self.min_free_bytes = min_free_bytes
         self.email = email
@@ -1104,8 +1117,11 @@ def cmd_list(args, config):
         elif args.status == 'acknowledged':
             status_filter = ' AND acknowledged = 1'
         rows = db.conn.execute(
-            f'SELECT * FROM seen_papers WHERE {filter_clause}{status_filter} ORDER BY score DESC LIMIT ?',
-            params + [args.limit],
+            (
+                'SELECT * FROM seen_papers WHERE '
+                f'{filter_clause}{status_filter}'
+                ' ORDER BY score DESC LIMIT ?'
+            ), params + [args.limit],
         ).fetchall()
         for i, row in enumerate(rows, 1):
             row = dict(row)
@@ -1117,7 +1133,9 @@ def cmd_list(args, config):
             if row['downloaded']:
                 flags.append('D')
             flag_str = ','.join(flags) if flags else '-'
-            print(f'{i:3d}. [{flag_str}] (score={row["score"]:.4f}) [{row["source"]}] {row["title"]}')
+            score_val = row['score']
+            line_a = f'{i:3d}. [{flag_str}] (score={score_val:.4f}) '
+            print(line_a + f'[{row["source"]}] {row["title"]}')
             print(f'     id: {row["identity"]}')
     finally:
         db.close()
