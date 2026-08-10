@@ -285,6 +285,7 @@ RUN pip install --no-cache-dir pyyaml && \
     pi install npm:@richardgill/pi-up-history && \
     pi install npm:@alexleekt/pi-bump && \
     pi install npm:@badliveware/pi-compaction-continue && \
+    pi install npm:pi-loop-police && \
     true
 
 RUN cat <<'EOF' > /home/ubuntu/.local/bin/pidev.sh
