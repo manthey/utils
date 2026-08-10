@@ -10,7 +10,6 @@
 # This can be run via something like
 # uv run --index-strategy unsafe-best-match --with torch==2.13.0+cu132
 # --index https://download.pytorch.org/whl/cu132 ..scriptname.. ..options..
-
 import argparse
 import base64
 import io
@@ -186,6 +185,7 @@ def offload_ollama(url):
 def process_file(converter, client, filepath, model, args):
     offload = converter is None
     if converter is None:
+        offload_ollama(args.url)
         converter = get_converter(args)
     try:
         result = converter.convert(filepath)

@@ -137,8 +137,8 @@ repos:
           sys.exit(subprocess.run(cmd).returncode)"
         language: system
         types_or: [dockerfile]
-  - repo: https://github.com/manthey/manthey-precommit-hooks
-    rev: v1.0.7
+  - repo: https://github.com/manthey/agent-reformat
+    rev: v1.0.9
     hooks:
       - id: agent-reformat
         args: [--fix]

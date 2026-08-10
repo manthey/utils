@@ -10,7 +10,6 @@
 #   'large-image[pil]; sys_platform == "android"',
 # ]
 # ///
-
 import argparse
 import base64
 import io
@@ -161,6 +160,7 @@ def describe_file(url: str, specs: list[dict], filepath: Path, raise_errors: boo
     for spec in specs:
         if spec['max_dim'] not in cache:
             cache[spec['max_dim']] = prepare_image(filepath, spec['max_dim'])
+            print(filepath)
         b64_image, width, height, w, h = cache[spec['max_dim']]
         user = spec['user'].format(w=w, h=h)
         logger.info(' Asking on %d x %d image: %s', w, h, user)
@@ -217,7 +217,6 @@ def process_directory(  # noqa
                 print(f'{filepath} -> {md_path}')
                 continue
             try:
-                print(filepath)
                 description = describe_file(url, specs, filepath, raise_errors)
                 logger.info(description)
                 if not dry_run:
