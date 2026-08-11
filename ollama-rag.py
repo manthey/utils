@@ -3,7 +3,7 @@
 # requires-python = ">=3.12,<3.13"
 # dependencies = [
 #   "cachetools",
-#   "chromadb>=0.5",
+#   "chromadb>=1.5",
 #   "docx2txt",
 #   "fastapi>=0.111",
 #   "filelock",
