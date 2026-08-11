@@ -1445,7 +1445,8 @@ def restart_command(cmd):
     if not cmd:
         return
     # try
-    # 'pkill -f "[o]llama" || true; nohup ollama serve >/dev/null 2>&1 & sleep 5'
+    # 'pkill -f "[o]llama" || true; nohup ollama serve >/dev/null 2>&1 &
+    #   sleep 5'
     # "taskkill /F /IM ollama.exe >NUL & ollama ls >NUL"
     subprocess.check_call(cmd, shell=True, start_new_session=True)
 
@@ -1802,13 +1803,15 @@ def create_report(report_spec, output_dir, summary):
         f.write(record)
 
 
-def load_yaml_tests():
+def load_yaml_tests(files=None):
     dirname = os.path.dirname(__file__)
     paths = [
         os.path.join(dirname, name) for name in os.listdir(dirname)
         if name.startswith(os.path.splitext(os.path.basename(__file__))[0]) and
         os.path.splitext(name)[1] in {'.yml', '.yaml'} and
         os.path.isfile(os.path.join(dirname, name))]
+    if files:
+        paths += files
     for path in sorted(paths):
         tests = yaml.safe_load(open(path, encoding='utf-8').read())
 
@@ -1905,6 +1908,9 @@ def main():  # noqa
     parser.add_argument(
         '-o', '--output', help='Output file path (default: stdout) or directory')
     parser.add_argument(
+        '--yaml', '--yml', action='append', default=[],
+        help='Additional yaml files with tests.')
+    parser.add_argument(
         '-t', '--tests',
         help='Comma-separated list of test names to run.  Defaults to all '
         'tests not marked "skip".  Add "all" to include all tests, "default" '
@@ -1967,7 +1973,7 @@ def main():  # noqa
         '--collect', action='store_true',
         help='Collect older model cards for the summary and report.')
     args = parser.parse_args()
-    load_yaml_tests()
+    load_yaml_tests(args.yaml)
     if args.list_tests:
         for t in TEST_REGISTRY:
             if t.skip == 'always':

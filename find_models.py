@@ -818,8 +818,6 @@ def extract_pull_number(text: str) -> int | None:
                 return int(n * mult)
             except ValueError:
                 continue  # e.g. 'e2b' — strip 'b' leaves just 'e', not a valid float
-    # Bare integer — only accept for pulls when it's clearly large or exactly the right order.
-    # Ollama shows tag counts as raw integers; those will be filtered later by the < 100K check.
     try:
         n = int(t)
         return n if n > 0 else None
@@ -841,7 +839,7 @@ def score_model(m: ModelInfo, gpu_memory: float | None,
     bits, _ = QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))
     if bits is None:
         return -1.0  # no valid quant = skip
-    # Primary: use more of the available GPU memory (larger file = more context/headroom)
+    # Primary: use more of the available GPU memory
     # Secondary: higher bit-depth among same-size matches.
     score = size_gb * 1000.0 + bits
     return float(score)
@@ -970,7 +968,7 @@ def scrape_ollama_search_models(query: str, limit: int, downloads_min: int) -> l
             all_pull_spans = list(re.finditer(r'<span[^>]*>([^<]*)</span>', block))
             for pm in all_pull_spans:
                 if pm.group(1).strip().lower() == 'pulls':
-                    # Look backward ~200 chars for a <span> number (most common layout)
+                    # Look backward ~200 chars for a <span> number
                     idx = pm.start()
                     prior = block[max(0, idx - 200):idx]
                     num_match = re.search(r'<span[^>]*>([^<]*)</span>', prior)
@@ -1130,7 +1128,8 @@ def discover_ollama_registry_models(  # noqa
     search_results = scrape_ollama_search_models('.', limit, downloads)
     print(f'Retrieved {len(search_results)} models from search')
     # Filter on search page titles before expensive per-model API calls.
-    # Note: these lack tag suffixes (e.g.:7b-fp16), so filters like '.*7b' won't match here.
+    # Note: these lack tag suffixes (e.g.:7b-fp16), so filters like '.*7b'
+    # won't match here.
     if name_filter:
         search_results = [
             m for m in search_results
@@ -1246,9 +1245,10 @@ def discover_ollama_registry_models(  # noqa
                 # Size-based filtering with GPU memory constraint
                 if (min_memory or 0) <= m.size_gb <= (gpu_memory_gb or math.inf):
                     fitting_candidates.append(m)
-        # Within one search result (one repository) consolidate quant-only variants of the same
-        # physical GGUF file.  Keep exactly one ModelInfo per (repo, size_bucket) and prefer the
-        # highest-quantized version that still fits GPU constraints.
+        # Within one search result (one repository) consolidate quant-only
+        # variants of the same physical GGUF file.  Keep exactly one ModelInfo
+        # per (repo, size_bucket) and prefer the highest-quantized version that
+        # still fits GPU constraints.
         size_buckets: dict[tuple[str, int], ModelInfo] = {}
         for m in fitting_candidates:
             key = (m.repo_id, round(m.size_gb))

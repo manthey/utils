@@ -142,7 +142,6 @@ def main():  # noqa
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
     logger.addHandler(logging.StreamHandler(sys.stderr))
     logger.debug('Parsed arguments: %r', args)
-
     # add more commands: list, run <model> <text> --detach, check, log
     if args.src:
         os.chdir(os.path.expanduser(args.src))
