@@ -342,31 +342,37 @@ def main():
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     check_parser = subparsers.add_parser('check', help='Check available GPUs')
-    check_parser.add_argument('--mem', type=int, default=96, help='Minimum GPU memory in GB')
+    check_parser.add_argument(
+        '--mem', type=int, default=96,
+        help='Minimum GPU memory in GB.  Default %(default)s')
     check_parser.add_argument('--secure', action='store_true', help='Secure cloud only')
     check_parser.add_argument(
-        '--disk', type=int, default=25, help='Contianer disk (nvme) volume size in GB')
-    check_parser.add_argument('--vol', type=int, default=75, help='Volume size in GB')
+        '--disk', type=int, default=25,
+        help='Contianer disk (nvme) volume size in GB.  Default %(default)s')
+    check_parser.add_argument(
+        '--vol', type=int, default=75,
+        help='Volume size in GB.  Default %(default)s')
     check_parser.add_argument(
         '--weight', choices=['bandwidth', 'b', 'compute', 'c'],
         help='Weigh pricing based on a metric')
     start_parser = subparsers.add_parser('start', help='Start an Ollama pod')
     start_parser.add_argument('--gpu', help='GPU type to use (otherwise, use cheapest available)')
-    start_parser.add_argument('--mem', type=int, default=96, help='Minimum GPU memory in GB')
+    start_parser.add_argument(
+        '--mem', type=int, default=96,
+        help='Minimum GPU memory in GB.  Default %(default)s')
     start_parser.add_argument('--secure', action='store_true', help='Secure cloud only')
     start_parser.add_argument(
         '--disk', type=int, default=25,
-        help='Contianer disk (nvme) volume size in GB')
+        help='Container disk (nvme) volume size in GB.  Default %(default)s')
     start_parser.add_argument(
         '--vol', type=int, default=75,
-        help='Volume size in GB (where models are stored)')
+        help='Volume size in GB (where models are stored).  Default %(default)s')
     start_parser.add_argument(
         '--no-wait', action='store_true', help='Do not wait for pod to be ready before exiting')
     start_parser.add_argument(
         '--model', action='append', default=[],
         help='Model to pull after creation (can be used multiple times)')
     subparsers.add_parser('list', help='List running pods')
-
     stop_parser = subparsers.add_parser('stop', help='Stop a pod')
     stop_group = stop_parser.add_mutually_exclusive_group(required=True)
     stop_group.add_argument('--pod', type=str, help='Pod ID to stop')
