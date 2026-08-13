@@ -28,6 +28,7 @@ import yaml
 from ratelimit import limits, sleep_and_retry
 
 logging.getLogger('paperscraper.load_dumps').setLevel(logging.WARNING + 1)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s %(name)s: %(message)s',
@@ -200,7 +201,6 @@ def compute_score(paper: Paper, config: dict) -> float:
     w_access = weights.get('access_weight', 0.25)
     w_review = weights.get('peer_review_weight', 0.15)
     w_recency = weights.get('recency_weight', 0.05)
-
     relevance_component = paper.relevance_score
     citation_log = 0.0
     if paper.citation_count > 0:
@@ -483,9 +483,9 @@ class OpenAlexBackend(ArchiveBackend):
     def search(self, query_terms: list[list[str]], max_results: int) -> list[Paper]:
         from pyalex import Works
         from pyalex import config as pyalex_config
-
         api_key = self.config.get('api_key')
         email = self.config.get('email')
+
         if api_key:
             pyalex_config.api_key = api_key
         if email:
@@ -498,7 +498,6 @@ class OpenAlexBackend(ArchiveBackend):
         for group in query_terms:
             flat_terms.append('(' + ' OR '.join(f'"{t}"' for t in group) + ')')
         search_string = ' AND '.join(flat_terms)
-
         papers = []
         try:
             results = (
@@ -841,7 +840,7 @@ class PaperDownloader:
         download_dir: Path,
         min_free_bytes: int,
         email: str,
-        allow_scihub: bool = True,
+        allow_scihub: bool = False,
     ):
         self.download_dir = download_dir
         self.min_free_bytes = min_free_bytes
@@ -901,6 +900,7 @@ class PaperDownloader:
         try:
             from paperscraper.pdf import save_pdf
             result = save_pdf({'doi': doi}, filepath=str(filepath))
+
             if result and filepath.exists() and filepath.stat().st_size > 1000:
                 return True, None
             filepath.unlink(missing_ok=True)
@@ -912,6 +912,7 @@ class PaperDownloader:
     def download_via_pypaperretriever(self, doi: str, filepath: Path) -> tuple[bool, str | None]:
         try:
             from pypaperretriever import PaperRetriever
+
             retriever = PaperRetriever(
                 email=self.email,
                 doi=doi,
@@ -926,13 +927,23 @@ class PaperDownloader:
                     key=lambda p: p.stat().st_mtime,
                     reverse=True,
                 )
+            success = False
             if downloaded_files:
                 newest = downloaded_files[0]
                 if newest != filepath and newest.exists():
                     newest.rename(filepath)
                 if filepath.exists() and filepath.stat().st_size > 1000:
-                    return True, None
+                    success = True
             filepath.unlink(missing_ok=True)
+            for subdir in list(filepath.parent.iterdir()):
+                if subdir.name.startswith('doi-') and subdir.is_dir():
+                    try:
+                        if not any(subdir.iterdir()):
+                            shutil.rmtree(str(subdir), ignore_errors=True)
+                    except OSError:
+                        pass
+            if success:
+                return True, None
             return False, 'pypaperretriever did not produce a valid file'
         except Exception as exc:
             filepath.unlink(missing_ok=True)
@@ -1078,7 +1089,7 @@ def cmd_download(args, config):
     min_free_gb = download_conf.get('min_free_gb', 5)
     email = config.get('email', 'user@example.com')
     top_l = download_conf.get('top_l', 5)
-    allow_scihub = download_conf.get('allow_scihub', True)
+    allow_scihub = download_conf.get('allow_scihub', False)
     downloader = PaperDownloader(download_dir, min_free_gb * (1024 ** 3),
                                  email, allow_scihub=allow_scihub)
     searches = parse_search_queries(config)
@@ -1215,26 +1226,23 @@ def main():
         default='paper_search.yaml',
         help='path to YAML config file (default: paper_search.yaml)',
     )
-
     subparsers = parser.add_subparsers(dest='command', required=True)
     subparsers.add_parser('search', help='run configured searches and report top-k new papers')
     subparsers.add_parser('download', help='download top-l undownloaded papers per search')
-
     ack_parser = subparsers.add_parser('acknowledge', help='mark papers as acknowledged')
     ack_parser.add_argument('identities', nargs='+', help='paper identity strings to acknowledge')
     list_parser = subparsers.add_parser('list', help='list known papers')
     list_parser.add_argument('-s', '--search-name', default=None, help='filter by search name')
+
     list_parser.add_argument(
         '--status',
         choices=['all', 'unreported', 'reported', 'downloaded', 'acknowledged'],
         default='all',
     )
     list_parser.add_argument('-n', '--limit', type=int, default=50)
-
     init_parser = subparsers.add_parser('init', help='generate a sample config file')
     init_parser.add_argument('-o', '--output', default='paper_search.yaml')
     init_parser.add_argument('-f', '--force', action='store_true')
-
     args = parser.parse_args()
     if args.command == 'init':
         cmd_init_config(args, {})
@@ -1256,4 +1264,5 @@ def main():
 
 
 if __name__ == '__main__':
+
     main()
