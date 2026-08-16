@@ -154,8 +154,7 @@ RUN chown -R ubuntu:ubuntu /home/ubuntu
 USER ubuntu
 WORKDIR /home/ubuntu
 # hadolint ignore=SC2016
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    echo 'export PATH="$HOME/.local/bin:$HOME/.env:$PATH"' >> ~/.bashrc
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/home/ubuntu/.local/bin:/home/ubuntu/.nvm/current:/home/ubuntu/.nvm:/home/ubuntu/.env:$PATH" \
     NVM_DIR="/home/ubuntu/.nvm"
 RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash && \
@@ -319,6 +318,12 @@ function parse_git_branch () {
   git branch 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \(.*\)/ (\1)/'
 }
 PS1='\h:$(truncate_current_directory)$(parse_git_branch)$ '
+export LANG=en_US.UTF-8
+export PI_OFFLINE=1
+export PI_SKIP_VERSION_CHECK=1
+export PYENV_ROOT="/.pyenv"
+export CFLAGS="-std=gnu17 -march=native"
+export PATH="$HOME/.local/bin:$HOME/.nvm/current:$HOME/.nvm:$HOME/.env:$HOME/.env:/.pyenv/bin:/.pyenv/shims:$PATH"
 EOF
 
 # USER root

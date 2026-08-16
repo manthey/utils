@@ -230,6 +230,10 @@ def cmd_start(args):  # noqa
     elif gpu_info.get('secureCloud'):
         cloud_type = 'SECURE'
     env_vars = {'OLLAMA_CONTEXT_LENGTH': '262144'}
+    for env in args.env:
+        parts = env.split('=', 1)
+        if len(parts) == 2:
+            env_vars[parts[0]] = parts[1]
     pod = runpod.create_pod(
         name=f'ollama-{gpu_type_id}',
         image_name='ollama/ollama:latest',
@@ -355,6 +359,7 @@ def main():
     check_parser.add_argument(
         '--weight', choices=['bandwidth', 'b', 'compute', 'c'],
         help='Weigh pricing based on a metric')
+
     start_parser = subparsers.add_parser('start', help='Start an Ollama pod')
     start_parser.add_argument('--gpu', help='GPU type to use (otherwise, use cheapest available)')
     start_parser.add_argument(
@@ -372,7 +377,12 @@ def main():
     start_parser.add_argument(
         '--model', action='append', default=[],
         help='Model to pull after creation (can be used multiple times)')
+    start_parser.add_argument(
+        '--env', action='append', default=[],
+        help='Environment variables to set on the container (example, '
+        'OLLAMA_NUM_PARALLEL=3) (can be used multiple times)')
     subparsers.add_parser('list', help='List running pods')
+
     stop_parser = subparsers.add_parser('stop', help='Stop a pod')
     stop_group = stop_parser.add_mutually_exclusive_group(required=True)
     stop_group.add_argument('--pod', type=str, help='Pod ID to stop')
