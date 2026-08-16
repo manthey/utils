@@ -911,7 +911,6 @@ def format_chunks(documents: list[str], metadatas: list[dict]) -> str:
         line_end = meta.get('line_end', line_start)
         text_bytes = text.encode('utf-8', errors='ignore')
         chunk_end = byte_offset + len(text_bytes)
-
         if file_path == current_file and byte_offset <= current_byte_end:
             overlap = current_byte_end - byte_offset
             if overlap < len(text_bytes):
@@ -1339,7 +1338,6 @@ async def chat_completions(request: fastapi.Request):  # noqa
             if len(response.text) > 500:
                 logger.debug('upstream body end: ...%s', response.text[500:][-500:])
             return response.content, response.status_code, dict(response.headers)
-
     content, status_code, headers = await asyncio.to_thread(fetch)
     if log_chat:
         try:

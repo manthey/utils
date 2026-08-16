@@ -1835,7 +1835,6 @@ def load_yaml_tests(files=None):
                     client, model_name, ollama_base_url, ollama_docker_url, test['test'])
             register_test(test['name'], test['description'],
                           test.get('skip', False), test.get('version', 0))(test_func)
-
         for test in tests:
             make_test(test)
 

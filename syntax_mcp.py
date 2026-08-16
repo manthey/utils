@@ -345,7 +345,6 @@ async def list_tools_handler(ctx, params) -> ListToolsResult:
 async def call_tool_handler(ctx, params) -> CallToolResult:
     name = params.name
     arguments = params.arguments or {}
-
     if name == 'list_supported_languages':
         logger.info(name)
         return tool_result({'languages': SUPPORTED_LANGUAGES})
