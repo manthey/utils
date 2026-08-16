@@ -138,7 +138,7 @@ repos:
         language: system
         types_or: [dockerfile]
   - repo: https://github.com/manthey/agent-reformat
-    rev: v1.0.18
+    rev: v1.0.19
     hooks:
       - id: agent-reformat
-        args: [--fix, --rules=AR00, AR02, AR03]
+        args: [--fix, --rules=AR00, AR014, AR02, AR03]
