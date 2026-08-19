@@ -78,6 +78,8 @@ EXTENSION_TO_LANGUAGE = {
     '.kt': 'kotlin', '.swift': 'swift',
 }
 
+SKIP_FILES = {'package-lock.json'}
+
 PREAMBLES = {
     'code':
         "The following code fragments were retrieved from the project's "
@@ -113,6 +115,7 @@ class SourceConfig:
         self, source_path: str, source_type: str, source_sub_path: str,
         exclude: str, git_extensions: str, dir_suffixes: str,
     ):
+        """Create a source record"""
         self.source_path = os.path.abspath(source_path)
         self.is_file = os.path.isfile(self.source_path)
         self.source_type = source_type
@@ -124,6 +127,7 @@ class SourceConfig:
 
 class BM25Index:
     def __init__(self, bm25: rank_bm25.BM25Okapi, documents: list[str], metadatas: list[dict]):
+        """Create a BOW index"""
         self.bm25 = bm25
         self.documents = documents
         self.metadatas = metadatas
@@ -215,6 +219,8 @@ def list_paths(
     for p in sorted(source.rglob('*')):
         try:
             if p.is_file() and p.suffix.lower() in suffixes:
+                if p.name in SKIP_FILES:
+                    continue
                 if not spec.match_file(p.relative_to(base).as_posix()):
                     yield p
         except Exception:
@@ -307,6 +313,8 @@ def iter_repo_blobs(
         if prefix and not item.path.startswith(prefix):
             continue
         if not any(item.path.endswith(ext) for ext in extensions):
+            continue
+        if Path(item.path).name in SKIP_FILES:
             continue
         if not spec.match_file(item.path):
             yield item
