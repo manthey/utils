@@ -298,9 +298,11 @@ RUN chmod a+x /home/ubuntu/.local/bin/pidev.sh && \
 
 RUN cat <<'EOF' > /home/ubuntu/.local/bin/set_ollama.sh
 #!/usr/bin/env bash
-sed -i 's|^\(.*_API_BASE=\)https\?://[^/]*|\1'"$1"'|' /home/ubuntu/.config/mini-swe-agent/.env
-sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"$1"'|' /home/ubuntu/.pi/agent/local-providers.json
-sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"$1"'|' /home/ubuntu/.pi/agent/models.json
+TARGET_URL="${1:-http://host.docker.internal:11434}"
+sed -i 's|^\(.*_API_BASE=\)https\?://[^/]*|\1'"${TARGET_URL}"'|' /home/ubuntu/.config/mini-swe-agent/.env
+sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"${TARGET_URL}"'|' /home/ubuntu/.pi/agent/local-providers.json
+sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"${TARGET_URL}"'|' /home/ubuntu/.pi/agent/models.json
+echo "${TARGET_URL}"
 EOF
 
 RUN chmod a+x /home/ubuntu/.local/bin/set_ollama.sh
