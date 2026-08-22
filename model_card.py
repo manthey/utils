@@ -424,7 +424,7 @@ def extract_answer_from_reasoning(content: str) -> str:
     return content.strip()
 
 
-@register_test('first_load', 'First load and memory use')
+@register_test('first_load', 'First load and memory use', category='base')
 def test_first_load(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
@@ -1328,6 +1328,10 @@ def load_existing_results(path: str | None) -> dict[str, TestResult]:
     for entry in record.get('tests', []):
         data = entry.get('result') or {}
         if entry.get('name'):
+            if (entry['name'] == 'embedding' and
+                    not record.get('metadata', {}).get('has_embedding')):
+                data['passed'] = False
+                data['output'] = 'Error: Error code: 501'
             results[entry['name']] = TestResult(
                 version=data.get('version', 0), passed=data.get('passed'),
                 output=data.get('output', ''),
@@ -1567,26 +1571,80 @@ def covered_by(model, summary):
     return ''
 
 
-def model_rank(model, summary):
+def model_rank(model, summary, category=None):
     passed = 0
-    ptime = 0
+    ptime = 0.0
     sval = []
     stime = []
+
     for t in summary['tests']:
-        if t not in model['tests']:
-            sval.append(0)
-            stime.append(10000)
+        if t not in model.get('tests', {}):
             continue
+
+        test_def = next((td for td in TEST_REGISTRY if td.name == t), None)
+        if test_def is None:
+            test_cat = 'unspecified'
+        else:
+            test_cat = (test_def.category or 'unspecified')
+
+        # Handle category filtering
+        if category is not None and category != '':
+            if test_cat == 'base':  # base goes to all
+                if category != 'all':
+                    continue  # Skip base unless specifically requesting 'all'
+            elif category != 'all' and test_cat != category:
+                continue  # Only include tests in the requested category (except for 'all')
+
         s = model['tests'][t].get('status', '')
+        sc = 1.0 if s == 'PASSED' else (0.0 if s == 'Failed'
+                                        else int(s.split('/')[0]) / int(s.split('/')[1]))
+        sval.append(sc)
         st = model['tests'][t].get('duration', '')
-        sval.append(1 if s == 'PASSED' else 0 if s == 'Failed' else
-                    int(s.split('/')[0]) / int(s.split('/')[1]))
         stime.append(10000 if not st else float(st[:-1]))
-        if sval[-1] == 1:
+        if sc == 1.0:
             passed += 1
             ptime += stime[-1]
-    rank = (-passed, ptime, -sum(sval), sum(stime))
-    return rank
+
+    return (-passed, ptime, -sum(sval), sum(stime))
+
+
+def rank_all_models(summary) -> list[str]:
+    category_set = set()
+    for td in TEST_REGISTRY:
+        cat = td.category or 'unspecified'
+        if cat != 'base':
+            category_set.add(cat)
+    active_categories = sorted(category_set)  # deterministic ordering
+    model_names = list(summary['models'].keys())
+    n_models = len(model_names)
+    if n_models == 0:
+        return []
+    overall_scores = {mname: model_rank(summary['models'][mname], summary, None)
+                      for mname in model_names}
+    sorted_by_overall = sorted(model_names, key=lambda m: overall_scores[m])
+    all_ranks = {m: idx for idx, m in enumerate(sorted_by_overall)}
+    cat_ranks = {}  # cat -> {mname: rank}
+    for cat in active_categories:
+        scores = {}
+        for mname in model_names:
+            score_tuple = model_rank(summary['models'][mname], summary, cat)
+            scores[mname] = score_tuple
+        sorted_by_cat = sorted(scores.keys(), key=lambda m: scores[m])
+        cat_ranks[cat] = {m: idx for idx, m in enumerate(sorted_by_cat) if scores[m][0]}
+    tuples_with_models = []
+    for mname in model_names:
+        all_rank = all_ranks.get(mname, n_models)
+        entry_list: list[int] = [all_rank]
+        for cat in active_categories:
+            cat_rank = cat_ranks[cat].get(mname, n_models)  # worst if not in category
+            entry_list.append((cat_rank * 2) + 1)
+
+        original_all_rank = all_rank
+        entry_list.sort()
+        entry_list.append(original_all_rank)
+        tuples_with_models.append((tuple(entry_list), mname))
+    tuples_with_models.sort(key=lambda x: x[0])
+    return [m for _, m in tuples_with_models]
 
 
 def summary_table(summary, models):
@@ -1597,9 +1655,9 @@ def summary_table(summary, models):
     for t in summary['tests']:
         cols += [f'{known.get(t, t)}', 'Duration', 'Tokens']
     cols += ['Covered', 'Present', 'Rank']
-    for idx, model in enumerate([m[-1] for m in sorted([
-            (model_rank(m, summary), m['metadata']['Name'], m)
-            for m in summary['models'].values()])]):
+    sorted_models = rank_all_models(summary)
+    for idx, mname in enumerate(sorted_models):
+        model = summary['models'][mname]
         row = [model['metadata'].get(col, '') for col in summary['columns']]
         for t in summary['tests']:
             tval = model['tests'].get(t, {})

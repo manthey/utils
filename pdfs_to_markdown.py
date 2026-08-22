@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 logging.getLogger('transformers').setLevel(logging.ERROR)
 logging.getLogger('torch').setLevel(logging.ERROR)
+logging.getLogger('RapidOCR').setLevel(logging.ERROR)
+os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'warning')
 
 FORMULA_PROMPT = (
     'Convert the mathematical formula in this image into a single LaTeX '
@@ -155,6 +157,7 @@ def get_converter(args):
     pipeline_options.do_picture_description = False
     pipeline_options.do_code_enrichment = True
     pipeline_options.do_formula_enrichment = False
+
     converter = DocumentConverter(
         format_options={
             InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),

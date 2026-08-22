@@ -26,6 +26,7 @@
       - "GDAL_PAM_ENABLED"
 - name: "ollama_show_test"
   description: "Show ollama model information"
+  category: base
   version: 1
   test:
     env:
