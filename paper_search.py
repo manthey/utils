@@ -27,13 +27,13 @@ import requests
 import yaml
 from ratelimit import limits, sleep_and_retry
 
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 logging.getLogger('paperscraper.load_dumps').setLevel(logging.WARNING + 1)
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
-)
-log = logging.getLogger('paper_search')
+logging.getLogger('paperscraper.pdf.fallbacks').setLevel(logging.CRITICAL)
+logging.getLogger('pypaperretriever').setLevel(logging.CRITICAL)
+logging.getLogger('PyPaperRetriever').setLevel(logging.CRITICAL)
+logging.getLogger('HttpClient').setLevel(logging.WARNING + 1)
 
 
 @dataclass
@@ -208,7 +208,6 @@ def compute_score(paper: Paper, config: dict) -> float:
         citation_log = math.log1p(paper.citation_count) / math.log1p(1000)
         citation_log = min(citation_log, 1.0)
     access_component = 1.0 if paper.is_open_access else 0.2
-
     review_component = 0.0
     if paper.is_peer_reviewed:
         review_component = 1.0
@@ -284,7 +283,7 @@ class ArxivBackend(ArchiveBackend):
                     )
                     papers.append(paper)
         except Exception as exc:
-            log.error('arxiv search failed: %s', exc)
+            logger.error('arxiv search failed: %s', exc)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
         return papers
@@ -330,7 +329,7 @@ class PubmedBackend(ArchiveBackend):
                     )
                     papers.append(paper)
         except Exception as exc:
-            log.error('pubmed search failed: %s', exc)
+            logger.error('pubmed search failed: %s', exc)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
         return papers[:max_results]
@@ -378,7 +377,7 @@ class BiorxivBackend(ArchiveBackend):
                     )
                     papers.append(paper)
         except Exception as exc:
-            log.error('biorxiv search failed: %s', exc)
+            logger.error('biorxiv search failed: %s', exc)
         return papers[:max_results]
 
 
@@ -420,7 +419,7 @@ class MedrxivBackend(ArchiveBackend):
                     )
                     papers.append(paper)
         except Exception as exc:
-            log.error('medrxiv search failed: %s', exc)
+            logger.error('medrxiv search failed: %s', exc)
         return papers[:max_results]
 
 
@@ -443,7 +442,7 @@ class ChemrxivBackend(ArchiveBackend):
             resp = requests.get(url, params=params, timeout=30)
             if resp.status_code == 403:
                 if not ChemrxivBackend._logged_api_key_warning:
-                    log.warning(
+                    logger.debug(
                         'Chemrxiv search returned 403 (Forbidden). '
                         'This backend may require an api_key in your config; '
                         'skipping chemrxiv for this session.',
@@ -471,7 +470,7 @@ class ChemrxivBackend(ArchiveBackend):
                 )
                 papers.append(paper)
         except Exception as exc:
-            log.error('chemrxiv search failed: %s', exc)
+            logger.error('chemrxiv search failed: %s', exc)
         return papers[:max_results]
 
 
@@ -554,7 +553,7 @@ class OpenAlexBackend(ArchiveBackend):
                 )
                 papers.append(paper)
         except Exception as exc:
-            log.error('openalex search failed: %s', exc)
+            logger.error('openalex search failed: %s', exc)
         return papers
 
 
@@ -609,7 +608,7 @@ class SemanticScholarBackend(ArchiveBackend):
                 )
                 papers.append(paper)
         except Exception as exc:
-            log.error('semantic_scholar search failed: %s', exc)
+            logger.error('semantic_scholar search failed: %s', exc)
         return papers
 
 
@@ -622,7 +621,7 @@ class CoreBackend(ArchiveBackend):
         papers = []
         api_key = self.config.get('api_key')
         if not api_key:
-            log.warning('CORE backend requires an api_key in config; skipping')
+            logger.debug('CORE backend requires an api_key in config; skipping')
             return papers
         flat_terms = []
         for group in query_terms:
@@ -654,7 +653,7 @@ class CoreBackend(ArchiveBackend):
                 )
                 papers.append(paper)
         except Exception as exc:
-            log.error('core search failed: %s', exc)
+            logger.error('core search failed: %s', exc)
         return papers
 
 
@@ -708,7 +707,7 @@ class DOAJBackend(ArchiveBackend):
                 )
                 papers.append(paper)
         except Exception as exc:
-            log.error('doaj search failed: %s', exc)
+            logger.error('doaj search failed: %s', exc)
         return papers
 
 
@@ -721,7 +720,7 @@ class IEEEBackend(ArchiveBackend):
         papers = []
         api_key = self.config.get('api_key')
         if not api_key:
-            log.warning('IEEE backend requires an api_key in config; skipping')
+            logger.debug('IEEE backend requires an api_key in config; skipping')
             return papers
         parts = []
         for group in query_terms:
@@ -760,7 +759,7 @@ class IEEEBackend(ArchiveBackend):
                 )
                 papers.append(paper)
         except Exception as exc:
-            log.error('ieee search failed: %s', exc)
+            logger.error('ieee search failed: %s', exc)
         return papers
 
 
@@ -815,7 +814,7 @@ class EuropePMCBackend(ArchiveBackend):
                 )
                 papers.append(paper)
         except Exception as exc:
-            log.error('europe_pmc search failed: %s', exc)
+            logger.error('europe_pmc search failed: %s', exc)
         return papers
 
 
@@ -865,16 +864,16 @@ class PaperDownloader:
             success, error = self.download_from_url(paper.pdf_url, filepath)
             if success:
                 return True, str(filepath), None
-            log.debug('direct pdf_url download failed for %s: %s', paper.title[:60], error)
+            logger.debug('direct pdf_url download failed for %s: %s', paper.title[:60], error)
         if paper.doi:
             success, error = self.download_via_paperscraper(paper.doi, filepath)
             if success:
                 return True, str(filepath), None
-            log.debug('paperscraper download failed for %s: %s', paper.title[:60], error)
+            logger.debug('paperscraper download failed for %s: %s', paper.title[:60], error)
             success, error = self.download_via_pypaperretriever(paper.doi, filepath)
             if success:
                 return True, str(filepath), None
-            log.debug('pypaperretriever download failed for %s: %s', paper.title[:60], error)
+            logger.debug('pypaperretriever download failed for %s: %s', paper.title[:60], error)
         return False, None, 'all download methods exhausted'
 
     def download_from_url(self, url: str, filepath: Path) -> tuple[bool, str | None]:
@@ -900,7 +899,6 @@ class PaperDownloader:
         try:
             from paperscraper.pdf import save_pdf
             result = save_pdf({'doi': doi}, filepath=str(filepath))
-
             if result and filepath.exists() and filepath.stat().st_size > 1000:
                 return True, None
             filepath.unlink(missing_ok=True)
@@ -963,10 +961,10 @@ def build_backends(config: dict) -> list[ArchiveBackend]:
             continue
         backend_class = BACKEND_REGISTRY.get(archive_name)
         if backend_class is None:
-            log.warning('unknown archive backend: %s', archive_name)
+            logger.warning('unknown archive backend: %s', archive_name)
             continue
         backends.append(backend_class(archive_conf))
-        log.info('enabled backend: %s', archive_name)
+        logger.debug('enabled backend: %s', archive_name)
     return backends
 
 
@@ -983,31 +981,31 @@ def run_search(
     search_name = search_def['name']
     query_terms = search_def['terms']
     max_results_per_backend = search_def.get('max_results', 50)
-    log.info('running search: %s', search_name)
+    logger.info('running search: %s', search_name)
     all_papers = []
     for backend in backends:
-        log.info('  querying %s ...', backend.name)
+        logger.info('  querying %s ...', backend.name)
         try:
             papers = backend.search(query_terms, max_results_per_backend)
-            log.info('  %s returned %d papers', backend.name, len(papers))
+            logger.info('  %s returned %d papers', backend.name, len(papers))
             all_papers.extend(papers)
         except Exception as exc:
-            log.error('  %s raised: %s', backend.name, exc)
+            logger.error('  %s raised: %s', backend.name, exc)
     new_count = 0
     for paper in all_papers:
         score = compute_score(paper, config)
         if db.add_paper(paper, search_name, score):
             new_count += 1
-    log.info('search "%s": %d total results, %d new papers',
-             search_name, len(all_papers), new_count)
+    logger.info('search "%s": %d total results, %d new papers',
+                search_name, len(all_papers), new_count)
 
 
 def report_top_k(db: PaperDatabase, search_name: str, top_k: int) -> list[dict]:
     unreported = db.get_unreported(search_name, top_k)
     if not unreported:
-        log.info('search "%s": no unreported papers', search_name)
+        logger.info('search "%s": no unreported papers', search_name)
         return []
-    log.info('search "%s": reporting top %d papers:', search_name, len(unreported))
+    logger.info('search "%s": reporting top %d papers:', search_name, len(unreported))
     for i, row in enumerate(unreported, 1):
         meta = json.loads(row.get('metadata', '{}'))
         oa_marker = 'OA' if meta.get('is_open_access') else 'closed'
@@ -1035,13 +1033,13 @@ def download_top_l(
         (search_name, top_l),
     ).fetchall()
     if not rows:
-        log.info('search "%s": no papers to download', search_name)
+        logger.info('search "%s": no papers to download', search_name)
         return
     for row in rows:
         row = dict(row)
         meta = json.loads(row.get('metadata', '{}'))
         if not meta.get('is_open_access') and not meta.get('pdf_url'):
-            log.info('  skipping non-OA paper without pdf_url: %s', row['title'][:60])
+            logger.info('  skipping non-OA paper without pdf_url: %s', row['title'][:60])
             continue
         paper = Paper(
             title=row['title'],
@@ -1057,15 +1055,15 @@ def download_top_l(
             pdf_url=meta.get('pdf_url'),
             relevance_score=meta.get('relevance_score', 0.0),
         )
-        log.info('  downloading: %s', paper.title[:60])
+        logger.info('  downloading: %s', paper.title[:60])
         success, pdf_path, error = downloader.download(paper)
         db.mark_downloaded(row['identity'], pdf_path or '', success, error)
         if success:
-            log.info('    saved to %s', pdf_path)
+            logger.info('    saved to %s', pdf_path)
         else:
-            log.warning('    failed: %s', error)
+            logger.debug('    failed: %s', error)
         if not downloader.has_disk_space():
-            log.warning('disk space reserve reached; stopping downloads')
+            logger.warning('disk space reserve reached; stopping downloads')
             break
 
 
@@ -1105,7 +1103,7 @@ def cmd_acknowledge(args, config):
     try:
         for identity in args.identities:
             db.mark_acknowledged(identity)
-            log.info('acknowledged: %s', identity)
+            logger.info('acknowledged: %s', identity)
     finally:
         db.close()
 
@@ -1226,6 +1224,9 @@ def main():
         default='paper_search.yaml',
         help='path to YAML config file (default: paper_search.yaml)',
     )
+    parser.add_argument(
+        '--verbose', '-v', action='count', default=0,
+        help='Increase verbosity')
     subparsers = parser.add_subparsers(dest='command', required=True)
     subparsers.add_parser('search', help='run configured searches and report top-k new papers')
     subparsers.add_parser('download', help='download top-l undownloaded papers per search')
@@ -1244,6 +1245,9 @@ def main():
     init_parser.add_argument('-o', '--output', default='paper_search.yaml')
     init_parser.add_argument('-f', '--force', action='store_true')
     args = parser.parse_args()
+    logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
+    logger.addHandler(logging.StreamHandler(sys.stderr))
+    logger.debug('Parsed arguments: %r', args)
     if args.command == 'init':
         cmd_init_config(args, {})
         return
@@ -1253,7 +1257,6 @@ def main():
         print('run "paper_search init" to generate a sample config', file=sys.stderr)
         sys.exit(1)
     config = load_config(config_path)
-
     commands = {
         'search': cmd_search,
         'download': cmd_download,
