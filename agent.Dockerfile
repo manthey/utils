@@ -90,6 +90,10 @@ RUN apt-get update && \
     curl -sSL "https://github.com/universal-ctags/ctags-nightly-build/releases/download/$(curl -s https://api.github.com/repos/universal-ctags/ctags-nightly-build/releases/latest | grep '"tag_name"' | head -1 | cut -d '"' -f 4)/uctags-$(curl -s https://api.github.com/repos/universal-ctags/ctags-nightly-build/releases/latest | grep '"tag_name"' | head -1 | cut -d '"' -f 4 | cut -d '+' -f 1)-$(uname -m | sed 's/x86_64/linux-x86_64/;s/aarch64/linux-aarch64/').deb" -o /tmp/uctags.deb && \
     dpkg --force-architecture -i /tmp/uctags.deb && \
     rm /tmp/uctags.deb && \
+    mkdir -p /usr/libexec/docker/cli-plugins && \
+    BUILDX_LATEST=$(curl -s https://api.github.com/repos/docker/buildx/releases/latest | grep '"tag_name"' | cut -d '"' -f 4) && \
+    curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_LATEST}/buildx-${BUILDX_LATEST}.linux-$(dpkg --print-architecture)" -o /usr/libexec/docker/cli-plugins/docker-buildx && \
+    chmod +x /usr/libexec/docker/cli-plugins/docker-buildx && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/* && \
     rdfind -minsize 8192 -makehardlinks true -makeresultsfile false /usr && \
     rdfind -minsize 8192 -makehardlinks true -makeresultsfile false /var
