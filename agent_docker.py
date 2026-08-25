@@ -103,7 +103,7 @@ def get_mount_args(is_windows, more=None):
 def free_port(docker_cmd, start):
     used = {}
     report = subprocess.check_output(
-        docker_cmd + ['container', 'ls', '--format', '{{.Ports}}', '-a'])
+        docker_cmd + ['container', 'ls', '--format', '{{.Ports}}', '-a']).decode()
     for entry in report.replace(',', '\n').replace('\r', '\n').split('\n'):
         val = entry.split('->')[0].split('/')[0].split(':')[-1]
         if not val:
