@@ -13,7 +13,6 @@ import os
 import platform
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tarfile
@@ -101,15 +100,25 @@ def get_mount_args(is_windows, more=None):
     return args
 
 
-def free_port(start, limit=50):
-    for port in range(start, start + limit):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(('0.0.0.0', port))
-                return port
-            except OSError:
-                continue
-    return start
+def free_port(docker_cmd, start):
+    used = {}
+    report = subprocess.check_output(
+        docker_cmd + ['container', 'ls', '--format', '{{.Ports}}', '-a'])
+    for entry in report.replace(',', '\n').replace('\r', '\n').split('\n'):
+        val = entry.split('->')[0].split('/')[0].split(':')[-1]
+        if not val:
+            continue
+        if '-' in val:
+            parts = val.split('-')
+            for p in range(int(parts[0]), int(parts[1]) + 1, 1):
+                used[p] = True
+        else:
+            used[int(val)] = True
+    logger.debug('Used ports: %r', sorted(used.keys()))
+    port = start
+    while port in used:
+        port += 1
+    return port
 
 
 def add_config(args, src, parser):
@@ -240,7 +249,7 @@ def main():  # noqa
         if args.docker:
             other_opts.extend(['-v', '/var/run/docker.sock:/var/run/docker.sock'])
         if args.ssh:
-            port = free_port(args.sshport)
+            port = free_port(docker_cmd, args.sshport)
             other_opts.extend(['-p', f'{port}:2222'])
             if port != args.sshport:
                 logger.warning('Using ssh port %s', port)
