@@ -77,9 +77,7 @@ EXTENSION_TO_LANGUAGE = {
     '.cs': 'c_sharp', '.cpp': 'cpp', '.c': 'c', '.rb': 'ruby',
     '.kt': 'kotlin', '.swift': 'swift',
 }
-
 SKIP_FILES = {'package-lock.json'}
-
 PREAMBLES = {
     'code':
         "The following code fragments were retrieved from the project's "
@@ -518,7 +516,10 @@ def embed_document_chunks(
     file_sha = meta.get('file_sha', '')
     rel_path = meta.get('rel_path', file_path)
     texts, embeddings, metadatas, ids = [], [], [], []
-    for chunk_info in chunk_text(doc.text, chunk_size, chunk_overlap, file_path):
+    for chunk_info in tqdm.tqdm(
+        chunk_text(doc.text, chunk_size, chunk_overlap, file_path),
+        delay=15, unit='chunk', desc='Embedding chunks', dynamic_ncols=True,
+    ):
         check_shutdown()
         t = chunk_info['text']
         t = t.encode('utf-8', errors='ignore').decode('utf-8', errors='ignore')
@@ -695,9 +696,9 @@ def sync_collection(  # noqa
     collection: chromadb.Collection, data_dir: Path, cname: str,
     current_hashes: dict[str, str],
 ) -> None:
-    check_embed_model_available(config.ollama_base_url, config.embed_model)
+    check_embed_model_available(config.embed_url, config.embed_model)
     embed_model = OllamaEmbedding(
-        model_name=config.embed_model, base_url=config.ollama_base_url)
+        model_name=config.embed_model, base_url=config.embed_url)
     chunk_size = resolve_chunk_size()
     lock = file_index_lock(data_dir)
     with lock:
@@ -1042,7 +1043,7 @@ def retrieve_context(  # noqa
                     pattern_matched_paths = []
                 pattern_matched_paths.append(abs_path)
     embed_model = OllamaEmbedding(
-        model_name=config.embed_model, base_url=config.ollama_base_url)
+        model_name=config.embed_model, base_url=config.embed_url)
     check_shutdown()
     max_query_len = resolve_chunk_size(for_query=True)
     if len(query) > max_query_len:
@@ -1094,7 +1095,6 @@ def retrieve_context(  # noqa
         (doc, meta) for _, doc, meta in semantic_ranked[:semantic_chosen_k]
     ]
     logger.info('semantic chosen: %d', semantic_chosen_k)
-
     all_bm25_results: list[tuple[str, dict, float]] = []
     for src in source_configs:
         cname = collection_name_for_source(
@@ -1209,7 +1209,6 @@ def create_mcp_server() -> Server:
     async def call_tool_handler(ctx, params) -> CallToolResult:
         name = params.name
         arguments = params.arguments or {}
-
         dispatch = {
             'search_codebase': lambda a: mcp_search_codebase(
                 a['query'], a.get('path_filter'), a.get('top_k')),
@@ -1604,18 +1603,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     for sub in (serve, mcp):
         sub.add_argument(
-            '--ollama-base-url',
+            '--ollama-base-url', '--url',
             default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
             help='Ollama URL; default is http://localhost:11434',
         )
         sub.add_argument(
-            '--embed-model', '-e',
+            '--embed-url',
+            help='Ollama URL for embedding model, if different from base.',
+        )
+        sub.add_argument(
+            '--embed-model', '--model', '-e',
             default=os.environ.get('RAG_EMBED_MODEL', 'nomic-embed-text'),
             help=(
                 'Embedding model; default is nomic-embed-text.  Others are '
                 'mxbai-embed-large (good for code), all-minilm (small), '
                 'snowflake-arctic-embed, bge-m3 (multilingual), bge-large '
-                '(English). Do ollama pull on the model before using it.'
+                '(English). The model should already be pulled.'
             ),
         )
         sub.add_argument(
@@ -1723,6 +1726,8 @@ def main():  # noqa
         env_val = os.environ.get('RAG_DIR_SUFFIXES', '')
         if env_val:
             args.dir_suffixes = [env_val]
+    if not args.embed_url:
+        args.embed_url = args.ollama_base_url
     if args.command == 'serve':
         cmd_serve(args)
     elif args.command == 'clear':
