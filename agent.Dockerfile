@@ -170,8 +170,17 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | b
 RUN cd /tmp && npx playwright install
 RUN uv venv --seed --no-project --python=python3.13 .env
 RUN cat <<'EOF' > /home/ubuntu/.local/bin/start_services.sh
-mkdir -p /tmp/db
+pkill redis-server
+pkill mongod
+pkill rabbitmq-server
+pkill memcached
+while ss -tuln | grep -q ":6379 "; do sleep 1; done
+while ss -tuln | grep -q ":27017 "; do sleep 1; done
+while ss -tuln | grep -q ":5672 "; do sleep 1; done
+while ss -tuln | grep -q ":11211 "; do sleep 1; done
 nohup redis-server --bind 0.0.0.0 >/tmp/redis.log 2>&1 &
+rm -rf /tmp/db
+mkdir -p /tmp/db
 nohup mongod --noauth --bind_ip_all --dbpath=/tmp/db >/tmp/mongo.log 2>&1 &
 nohup rabbitmq-server >/tmp/rabbitmq.log 2>&1 &
 nohup memcached -d >/tmp/memcached.log 2>&1 &
