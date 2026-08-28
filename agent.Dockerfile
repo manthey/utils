@@ -34,6 +34,7 @@ RUN apt-get update && \
       ca-certificates \
       # girder convenience \
       fuse3 \
+      libfuse-dev \
       libfuse3-dev \
       libldap2-dev \
       libsasl2-dev \
