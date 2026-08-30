@@ -197,12 +197,15 @@ def schedule_stop(pod_id, delay_minutes):
     if isWindows:
         start_time = (datetime.datetime.now(datetime.UTC).astimezone() +
                       datetime.timedelta(minutes=delay_minutes))
+        # This will show a console window when it runs.  To avoid that is a
+        # lot of brittle work
         cmd = ['schtasks', '/create', '/tn', task_name, '/tr',
                stop_cmd, '/sc', 'ONCE', '/st',
                start_time.strftime('%H:%M'), '/sd',
                start_time.strftime('%Y/%m/%d'),
                '/f']
     else:
+        # This requires a service that we probably don't have installed
         cmd = f'echo "{stop_cmd}" | at now + {delay_minutes} minutes'
     subprocess.check_call(cmd, shell=not isWindows)
 

@@ -10,7 +10,7 @@ for root, dirs, files in os.walk(os.path.expanduser(sessions)):  # noqa
         count = {'user': 0, 'assistant': 0}
         usage = {'input': 0, 'output': 0, 'max': 0}
         try:
-            for line in open(os.path.join(root, file)).readlines():
+            for line in open(os.path.join(root, file), encoding='utf8').readlines():
                 try:
                     record = json.loads(line)
                     msg = record['message']
