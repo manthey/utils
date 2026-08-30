@@ -37,7 +37,9 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
+import time
 from collections.abc import Generator
 from pathlib import Path
 
@@ -121,6 +123,95 @@ class SourceConfig:
         self.exclude = exclude
         self.git_extensions = git_extensions
         self.dir_suffixes = dir_suffixes
+
+
+class PodManager:
+    """Manages the startup and idle shutdown of a RunPod Ollama instance."""
+
+    def __init__(self, runpod_args: str, load_time_minutes: float,
+                 idle_time_minutes: float, has_explicit_embed: bool):
+        self.current_pod_id = None
+        self.current_pod_url = None
+        self.active = False
+
+        self.load_time = load_time_minutes * 60
+        self.idle_time = idle_time_minutes * 60
+        self.runpod_args = runpod_args
+        self.has_explicit_embed = has_explicit_embed
+
+        self.pending_start_timepoint = 0.0
+        self.last_request_time = 0.0
+        self.active_requests_count = 0
+        logger.info('RunPod manager started')
+        chat_logger.info('RunPod manager started')  # ##DWM::
+
+    def record_request_finished(self) -> None:
+        """Marks the end of a request stream."""
+        if self.active_requests_count > 0:
+            self.active_requests_count -= 1
+        if self.active_requests_count == 0:
+            self.last_request_time = time.time()
+
+    def on_request_arriving(self) -> tuple[str | None, bool]:
+        """Handle lifecycle logic for an arriving request."""
+        now = time.time()
+        if now - self.last_request_time > self.idle_time and not self.active_requests_count:
+            self.pending_start_timepoint = now + self.load_time
+            self.active = False
+            self.current_pod_id = None
+        self.active_requests_count += 1
+        logger.info(
+            f'RunPod timing: {now} {self.pending_start_timepoint} {now - self.last_request_time} {self.load_time}')
+        # ##DWM::
+        chat_logger.info(
+            f'RunPod timing: {now} {self.pending_start_timepoint} {now - self.last_request_time} {self.load_time}')
+        if not self.active:
+            if (
+                now > self.pending_start_timepoint and
+                now - self.last_request_time < self.load_time
+            ):
+                logger.info('RunPod trigger: Starting pod')
+                chat_logger.info('RunPod trigger: Starting pod')  # ##DWM::
+                threading.Thread(
+                    target=self.start_pod_thread, daemon=True, name='RunPodStart',
+                ).start()
+                # Prevent rapid on/off
+                self.pending_start_timepoint = now + self.load_time
+
+        if self.active and self.current_pod_url:
+            return self.current_pod_url, True
+        return None, False
+
+    def start_pod_thread(self) -> None:
+        """Blocking thread to start the pod using runpod_manage.py."""
+        logger.info('RunPod task starting')
+        chat_logger.info('RunPod task starting')  # ##DWM::
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            tmp_json = f.name
+            f.write('{}')
+        script_root = Path(os.path.abspath(__file__)).parent / 'runpod_manage.py'
+        base_cmd = ['uv', 'run', str(script_root), 'start', '--json', tmp_json]
+        cmd_string = subprocess.list2cmdline(base_cmd) + ' ' + self.runpod_args
+        try:
+            subprocess.run(cmd_string, shell=True, check=True)
+            with open(tmp_json) as f:
+                data = json.load(f)
+            if data.get('status') == 'started':
+                self.current_pod_id = data['pod_id']
+                self.current_pod_url = data['url']
+                self.active = True
+                logger.info('RunPod started successfully: ID=%s', self.current_pod_id)
+                # ##DWM::
+                chat_logger.info('RunPod started successfully: ID=%s', self.current_pod_id)
+            else:
+                logger.error('RunPod start failed: %s', data)
+                chat_logger.error('RunPod start failed: %s', data)  # ##DWM::
+        except Exception as e:
+            logger.error('Error starting pod: %s', e)
+            chat_logger.error('Error starting pod: %s', e)  # ##DWM::
+        finally:
+            if os.path.exists(tmp_json):
+                os.unlink(tmp_json)
 
 
 class BM25Index:
@@ -1364,18 +1455,25 @@ async def chat_completions(request: fastapi.Request):  # noqa
     methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
 )
 async def proxy_passthrough(request: fastapi.Request, path: str):
+    target_url = None
+    is_pod_active = False
+    if pod_manager:
+        target_url, is_pod_active = pod_manager.on_request_arriving()
     log_chat = chat_logger.getEffectiveLevel() <= logging.INFO
     async with httpx.AsyncClient(timeout=None) as client:
         content = await request.body()
         if log_chat and 'generate' in path:
             chat_logger.info('request: %r', content)
+        target_base = target_url if target_url else config.ollama_base_url
         response = await client.request(
             method=request.method,
-            url=f'{config.ollama_base_url}/{path}',
+            url=f'{target_base}/{path}',
             headers={k: v for k, v in request.headers.items() if k.lower() != 'host'},
             content=content,
             params=request.query_params,
         )
+    if pod_manager:
+        pod_manager.record_request_finished()
     if log_chat and 'generate' in path:
         val = response.content
         try:
@@ -1446,7 +1544,15 @@ def cmd_serve(args):
     global config
     global source_configs
     global mcp_manager
+    global pod_manager
 
+    if args.runpod_args:
+        pod_manager = PodManager(
+            runpod_args=args.runpod_args,
+            load_time_minutes=args.runpod_load_time,
+            idle_time_minutes=args.runpod_idle_time,
+            has_explicit_embed=bool(getattr(args, 'embed_url', None)),
+        )
     config = args
     source_configs = build_source_configs(args)
     if args.completion_log:
@@ -1597,6 +1703,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         '--completion-log', '--chat-log',
         help='Folder for storing rotated completion logs with the queries '
         'and responses that come through the completion endpoint.')
+    serve.add_argument(
+        '--runpod-load-time', type=float, default=10,
+        help='Minutes of activity before a pod is started. Default %(default)s')
+    serve.add_argument(
+        '--runpod-idle-time', type=float, default=20,
+        help='Minutes of inactivity before a running pod is stopped. Default %(default)s')
+    serve.add_argument(
+        '--runpod-args', type=str, default='',
+        help='String of arguments to pass to `runpod_manage.py start`.')
     clear.add_argument(
         '--purge-inactive', action='store_true',
         help='Remove inactive chunks and deleted-file entries without destroying active data',
