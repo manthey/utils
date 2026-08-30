@@ -8,9 +8,11 @@
 # ///
 
 import argparse
+import datetime
 import json
 import math
 import os
+import platform
 import subprocess
 import sys
 import time
@@ -183,6 +185,51 @@ def add_weights(compatible, args):  # noqa
                 cm['weight'] = best[1]['tflops']
 
 
+def schedule_stop(pod_id, delay_minutes):
+    """Reschedules a stop command for the specified pod."""
+    cancel_scheduled_stop(pod_id)
+
+    task_name = f'RunPodStop_{pod_id}'
+    script_path = os.path.abspath(__file__)
+    isWindows = platform.system() == 'Windows'
+    sysexec = sys.executable
+    stop_cmd = subprocess.list2cmdline([sysexec, script_path, 'stop', '--pod', pod_id])
+    if isWindows:
+        start_time = (datetime.datetime.now(datetime.UTC).astimezone() +
+                      datetime.timedelta(minutes=delay_minutes))
+        cmd = ['schtasks', '/create', '/tn', task_name, '/tr',
+               stop_cmd, '/sc', 'ONCE', '/st',
+               start_time.strftime('%H:%M'), '/sd',
+               start_time.strftime('%Y/%m/%d'),
+               '/f']
+    else:
+        cmd = f'echo "{stop_cmd}" | at now + {delay_minutes} minutes'
+    subprocess.check_call(cmd, shell=not isWindows)
+
+
+def cancel_scheduled_stop(pod_id):
+    """Removes the scheduled stop task for the specified pod."""
+    task_name = f'RunPodStop_{pod_id}'
+    isWindows = platform.system() == 'Windows'
+
+    if isWindows:
+        try:
+            subprocess.check_call(
+                ['schtasks', '/delete', '/tn', task_name, '/f'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            pass
+    else:
+        try:
+            output = subprocess.check_output(['atq'], text=True)
+            for line in output.splitlines():
+                if task_name in line:
+                    job_id = line.split()[0]
+                    subprocess.run(['atrm', job_id], check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+
 def cmd_check(args):
     compatible = find_gpus(args.mem, args.secure, args.vol + args.disk)
     if not compatible:
@@ -292,6 +339,13 @@ def cmd_start(args):  # noqa
                 except Exception:
                     time.sleep(5)
             print(f'  Pulled {model}')
+    if args.json:
+        status_data = {
+            'status': 'started',
+            'pod_id': pod['id'],
+            'url': url,
+        }
+        json.dump(status_data, open(args.json, 'w'))
 
 
 def cmd_list(args):
@@ -303,6 +357,7 @@ def cmd_list(args):
             return
         print(f'{"ID":<30} {"Name":<30} {"GPU":<20} {"Status":<15} {"Image":<30}')
         print('-' * 130)
+        pods_json = []
         for pod in pods:
             pod_id = pod.get('id', 'unknown')
             name = pod.get('name', 'unknown')
@@ -310,6 +365,10 @@ def cmd_list(args):
             status = pod.get('desiredStatus', pod.get('status', 'unknown'))
             image = pod.get('imageName', 'unknown')
             print(f'{pod_id:<30} {name:<30} {gpu:<20} {status:<15} {image:<30}')
+            pods_json.append({
+                'id': pod_id, 'name': name, 'gpu': gpu, 'status': status, 'image': image})
+        if args.json:
+            json.dump(pods_json, open(args.json, 'w'))
     except Exception as e:
         print(f'Error listing pods: {e}', file=sys.stderr)
         sys.exit(1)
@@ -325,17 +384,26 @@ def cmd_stop(args):
                 return
             for pod in pods:
                 pod_id = pod['id']
+                cancel_scheduled_stop(pod_id)
                 print(f'Stopping pod {pod_id}...')
-                runpod.terminate_pod(pod_id)
-            print(f'Stopped {len(pods)} pod(s).')
+                if not args.delay:
+                    runpod.terminate_pod(pod_id)
+                else:
+                    schedule_stop(pod_id, args.delay)
+            print(f'{"Stopped" if not args.delay else "Scheduled stopping"} {len(pods)} pod(s).')
         except Exception as e:
             print(f'Error stopping pods: {e}', file=sys.stderr)
             sys.exit(1)
     elif args.pod:
         try:
             print(f'Stopping pod {args.pod}...')
-            runpod.terminate_pod(args.pod)
-            print(f'Pod {args.pod} stopped.')
+            cancel_scheduled_stop(args.pod)
+            if not args.delay:
+                runpod.terminate_pod(args.pod)
+                print(f'Pod {args.pod} stopped.')
+            else:
+                schedule_stop(args.pod, args.delay)
+                print(f'Pod {args.pod} scheduled to stop.')
         except Exception as e:
             print(f'Error stopping pod {args.pod}: {e}', file=sys.stderr)
             sys.exit(1)
@@ -344,7 +412,6 @@ def cmd_stop(args):
 def main():
     parser = argparse.ArgumentParser(description='Manage RunPod Ollama instances')
     subparsers = parser.add_subparsers(dest='command', required=True)
-
     check_parser = subparsers.add_parser('check', help='Check available GPUs')
     check_parser.add_argument(
         '--mem', type=int, default=96,
@@ -359,7 +426,6 @@ def main():
     check_parser.add_argument(
         '--weight', choices=['bandwidth', 'b', 'compute', 'c'],
         help='Weigh pricing based on a metric')
-
     start_parser = subparsers.add_parser('start', help='Start an Ollama pod')
     start_parser.add_argument('--gpu', help='GPU type to use (otherwise, use cheapest available)')
     start_parser.add_argument(
@@ -381,12 +447,15 @@ def main():
         '--env', action='append', default=[],
         help='Environment variables to set on the container (example, '
         'OLLAMA_NUM_PARALLEL=3) (can be used multiple times)')
-    subparsers.add_parser('list', help='List running pods')
+    start_parser.add_argument('--json', help='Output status to a json file.')
+    list_parser = subparsers.add_parser('list', help='List running pods')
+    list_parser.add_argument('--json', help='Output status to a json file.')
 
     stop_parser = subparsers.add_parser('stop', help='Stop a pod')
     stop_group = stop_parser.add_mutually_exclusive_group(required=True)
     stop_group.add_argument('--pod', type=str, help='Pod ID to stop')
     stop_group.add_argument('--all', action='store_true', help='Stop all pods')
+    stop_parser.add_argument('--delay', type=int, help='Delay in minutes before stopping pod(s)')
 
     args = parser.parse_args()
     if args.command == 'check':
