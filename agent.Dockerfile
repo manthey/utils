@@ -260,7 +260,7 @@ RUN cat <<'EOF' > /home/ubuntu/.pi/agent/local-providers.json
     "ollama": {
       "enabled": true,
       "baseUrl": "http://host.docker.internal:11434",
-      "cleanupStale": false,
+      "cleanupStale": true,
       "cacheTtlHours": 24
     }
   }
