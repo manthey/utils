@@ -16,6 +16,7 @@ import io
 import logging
 import os
 import sys
+import unicodedata as ud
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,21 @@ PICTURE_PROMPT = (
     'legends, numerical values, the overall meaning of the image, and '
     'interesting salient details.  Use no more than 250 words.'
 )
+FAIR_COPY_PROMPT = (
+    'Clean up this OCR text by fixing typos, character recognition errors, '
+    'and formatting issues while preserving the original meaning and '
+    'structure. Output only the cleaned text without explanations.'
+)
+DETECT_LANGUAGE_PROMPT = (
+    'What is the primary language of this text? Reply with just the language '
+    'name in English (e.g., "French", "Chinese", "Japanese") and nothing else.'
+)
+TRANSLATE_PROMPT = (
+    'Translate this text to English. Preserve all markdown formatting, '
+    'headers, image/figure markers, tables, and code blocks exactly as they '
+    'are. Output only the translated text without explanations.'
+)
+CHUNK_SEPARATOR = '\n--- CHAPTER BREAK ---\n'
 
 
 def image_to_data_url(image):
@@ -60,6 +76,132 @@ def query_vision_model(client, model, image, prompt):
     content = response.choices[0].message.content.strip()
     tokens = response.usage.total_tokens if response.usage else 0
     return content, tokens
+
+
+def query_llm(client, model, prompt):
+    """Query an LLM (text-only) and return its text response."""
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    content = response.choices[0].message.content.strip()
+    tokens = response.usage.total_tokens if response.usage else 0
+    return content, tokens
+
+
+def is_ocr_used(result):
+    """Detect if OCR was used by checking docling confidence scores."""
+    conf = getattr(result, 'confidence', None)
+    pages_conf = getattr(conf, 'pages', None) if conf else None
+    if isinstance(pages_conf, dict):
+        for score in pages_conf.values():
+            ocr = getattr(score, 'ocr_score', 0)
+            if ocr is not None and float(ocr) > 0:
+                return True
+    # Fallback: check parsed_page flag or page metadata
+    if hasattr(result, 'pages'):
+        for page in result.pages:
+            parsed = getattr(page, 'parsed_page', None)
+            if parsed and getattr(parsed, 'has_ocr', False):
+                return True
+            if getattr(page, 'has_ocr', False):
+                return True
+    return False
+
+
+def estimate_token_limit(model):
+    """Return conservative max text tokens for chunking based on model context."""
+    default_max = 8192
+    ctx_map = {'claude': 16000, 'gpt-4o': 128000, 'qwen': 32768,
+               'gemini': 128000, 'llama': 8192}
+    model_lower = str(model).lower()
+    for key, val in ctx_map.items():
+        if key in model_lower:
+            return min(val - 4000, default_max)
+    return default_max
+
+
+def chunk_text(text, limit=None):
+    """Split markdown text into chunks at conceptual breaks, conservatively chunked."""
+    if not text:
+        return []
+    estimated_chars_per_token = 4
+    token_limit = limit or estimate_token_limit('default')
+    target_chars = max(int(token_limit * estimated_chars_per_token // 2), 6000)
+    text_segments = [s for s in text.split(CHUNK_SEPARATOR) if s.strip()]
+    chunks, current_chunk = [], ''
+    for segment in text_segments:
+        enc_s = len(segment.encode('utf-8'))
+        if not current_chunk:
+            current_chunk = segment
+        elif len(current_chunk.encode('utf-8')) + enc_s < target_chars:
+            current_chunk += CHUNK_SEPARATOR + segment
+        else:
+            chunks.append(current_chunk)
+            current_chunk = segment
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks or [text]
+
+
+def detect_language(client, model, text):
+    """Detect the primary language of text content."""
+    sample_lines = '\n'.join(
+        l for l in text.split('\n')[:50]
+        if l.strip() and not l.startswith('#')
+    )[:4000]
+    if not sample_lines:
+        return 'English'
+    prompt = f'{DETECT_LANGUAGE_PROMPT}\n\n{sample_lines}'
+    try:
+        det, _ = query_llm(client, model, prompt)
+        return det.strip().lower() if det else 'English'
+    except Exception:
+        pass
+    # Fallback: check for non-Latin character density
+    latin_only = ''.join(c for c in text[:4000] if ud.isprintable(c))
+    non_latin = sum(1 for c in latin_only if not c.isascii())
+    ratio = non_latin / len(latin_only) if latin_only else 0
+    return 'non-English' if ratio > 0.05 else 'English'
+
+
+def process_ocr_text(client, model, text):
+    """Apply fair copy processing to clean up OCR text."""
+    chunks = chunk_text(text)
+    results, total_tokens = [], 0
+    for i, chunk in enumerate(chunks):
+        logger.info('OCR fair copy chunk %d / %d', i + 1, len(chunks))
+        try:
+            cleaned, tokens = query_llm(
+                client, model,
+                f'{FAIR_COPY_PROMPT}\n\n{chunk}')
+            total_tokens += tokens
+            results.append(cleaned)
+        except Exception as err:
+            logger.warning('OCR fair copy chunk %d failed: %s', i, err)
+            results.append(chunk)
+    return CHUNK_SEPARATOR.join(results), total_tokens
+
+
+def process_translation(client, model, text, src_lang=None):
+    """Translate text to English if not already in English."""
+    if src_lang == 'English':
+        logger.info('Text is already English; skipping translation')
+        return text, 0
+    chunks = chunk_text(text)
+    results, total_tokens = [], 0
+    for i, chunk in enumerate(chunks):
+        logger.info('Translation chunk %d / %d', i + 1, len(chunks))
+        try:
+            translated, tok = query_llm(
+                client, model,
+                f'{TRANSLATE_PROMPT}\n\nOriginal ({src_lang}):\n{chunk}')
+            total_tokens += tok
+            results.append(translated)
+        except Exception as err:
+            logger.warning('Translation chunk %d failed: %s', i, err)
+            results.append(chunk)
+    return CHUNK_SEPARATOR.join(results), total_tokens
 
 
 def crop_item_image(doc, item):
@@ -211,7 +353,37 @@ def process_file(converter, client, filepath, model, args):
         if offload:
             offload_ollama(args.url)
     markdown = doc.export_to_markdown()
-    return markdown
+    # Apply OCR text processing if requested or OCR was detected
+    process_mode = getattr(args, 'process', 'none')
+    proc_model = getattr(args, 'processing_model', '') or model
+
+    ocr_used = is_ocr_used(result)  # Detect OCR from page confidences
+    needs_process = process_mode != 'none' or ocr_used
+    final_output = markdown
+
+    if needs_process:
+        logger.info('OCR detected: %s; applying text processing '
+                    '(mode=%s)',
+                    ocr_used, process_mode)
+        # Detect source language first (needed for translation)
+        src_lang = detect_language(client, proc_model, markdown)
+        logger.debug('Detected source language: %s', src_lang)
+        total_tokens = 0
+        if process_mode in ('ocr', 'all') and ocr_used:
+            fair_copy_text, ocr_tok = process_ocr_text(client, proc_model, markdown)
+            total_tokens += ocr_tok
+            logger.info('OCR fair copy complete (%d tokens)', ocr_tok)
+            final_output += '\n\n## FAIR COPY\n\n' + fair_copy_text
+            source_text = fair_copy_text
+        else:
+            source_text = markdown
+        if process_mode in ('translate', 'all') and src_lang != 'English':
+            translated_text, trans_tok = process_translation(
+                client, proc_model, source_text, src_lang=src_lang)
+            total_tokens += trans_tok
+            logger.info('Translation complete (%d tokens)', trans_tok)
+            final_output += '\n\n## TRANSLATION\n\n' + translated_text
+    return final_output
 
 
 def process_directory(args):  # noqa
@@ -294,6 +466,13 @@ def main():
     parser.add_argument(
         '--model', '-m', default='qwen2.5vl:7b',
         help='Vision model identifier.  Default %(default)s.')
+    parser.add_argument(
+        '--processing-model', dest='processing_model', default='',
+        help='Text-only LLM for OCR cleanup/translation (uses --model if empty).')
+    parser.add_argument(
+        '--process', choices=['none', 'ocr', 'translate', 'all'], default='all',
+        help='Apply text processing: none=skip, ocr=fair copy only, '
+        'translate=translate to English, all=both.')
     parser.add_argument(
         '--images-scale', type=float, default=2.0,
         help='Rendering scale for page images.  Default %(default)s.')

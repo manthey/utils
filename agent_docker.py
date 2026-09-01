@@ -236,7 +236,7 @@ def main():  # noqa
             cmd = ['wsl', 'grep', 'nameserver', '/etc/resolv.conf']
             logger.info(cmd)
             gateway = subprocess.check_output(cmd).decode().split()[1].strip()
-        other_opts = []
+        other_opts = ['--ulimit', 'nofile=64000:64000']
         if args.fuse:
             other_opts.extend([
                 '--device', '/dev/fuse:/dev/fuse',
