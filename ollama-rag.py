@@ -841,6 +841,7 @@ def sync_collection(  # noqa
     current_paths = set(current_hashes.keys())
     new_paths = current_paths - indexed_paths
     deleted_paths = indexed_paths - current_paths
+    fresh_deletes = len([fp for fp in deleted_paths if files_entry[fp].get('active_sha')])
     modified_paths, reactivate_paths, unchanged_paths = set(), set(), set()
     for fp in current_paths & indexed_paths:
         new_sha = current_hashes[fp]
@@ -852,9 +853,9 @@ def sync_collection(  # noqa
         else:
             modified_paths.add(fp)
     logger.info(
-        'sync: %d new, %d modified, %d reactivate, %d deleted, %d unchanged',
+        'sync: %d new, %d modified, %d reactivate, %d deleted, %d retired, %d unchanged',
         len(new_paths), len(modified_paths), len(reactivate_paths),
-        len(deleted_paths), len(unchanged_paths),
+        fresh_deletes, len(deleted_paths) - fresh_deletes, len(unchanged_paths),
     )
     if not (new_paths or deleted_paths or modified_paths or reactivate_paths):
         logger.info('collection is up to date')
