@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -106,6 +107,7 @@ PREAMBLES = {
         'referencing code, cite the file path and line numbers. Base your '
         'response on the information provided in these excerpts.',
 }
+pod_manager = None
 
 
 class SourceConfig:
@@ -125,101 +127,139 @@ class SourceConfig:
         self.dir_suffixes = dir_suffixes
 
 
-class PodManager:
-    """Manages the startup and idle shutdown of a RunPod Ollama instance."""
-
-    def __init__(self, runpod_args: str, load_time_minutes: float,
-                 idle_time_minutes: float, has_explicit_embed: bool):
-        self.current_pod_id = None
-        self.current_pod_url = None
-        self.active = False
-
-        self.load_time = load_time_minutes * 60
-        self.idle_time = idle_time_minutes * 60
-        self.runpod_args = runpod_args
-        self.has_explicit_embed = has_explicit_embed
-
-        self.pending_start_timepoint = 0.0
-        self.last_request_time = 0.0
-        self.active_requests_count = 0
-        logger.info('RunPod manager started')
-        chat_logger.info('RunPod manager started')  # ##DWM::
-
-    def record_request_finished(self) -> None:
-        """Marks the end of a request stream."""
-        if self.active_requests_count > 0:
-            self.active_requests_count -= 1
-        if self.active_requests_count == 0:
-            self.last_request_time = time.time()
-
-    def on_request_arriving(self) -> tuple[str | None, bool]:
-        """Handle lifecycle logic for an arriving request."""
-        now = time.time()
-        if now - self.last_request_time > self.idle_time and not self.active_requests_count:
-            self.pending_start_timepoint = now + self.load_time
-            self.active = False
-            self.current_pod_id = None
-        self.active_requests_count += 1
-        logger.info(
-            f'RunPod timing: {now} {self.pending_start_timepoint} {now - self.last_request_time} {self.load_time}')
-        # ##DWM::
-        chat_logger.info(
-            f'RunPod timing: {now} {self.pending_start_timepoint} {now - self.last_request_time} {self.load_time}')
-        if not self.active:
-            if (
-                now > self.pending_start_timepoint and
-                now - self.last_request_time < self.load_time
-            ):
-                logger.info('RunPod trigger: Starting pod')
-                chat_logger.info('RunPod trigger: Starting pod')  # ##DWM::
-                threading.Thread(
-                    target=self.start_pod_thread, daemon=True, name='RunPodStart',
-                ).start()
-                # Prevent rapid on/off
-                self.pending_start_timepoint = now + self.load_time
-
-        if self.active and self.current_pod_url:
-            return self.current_pod_url, True
-        return None, False
-
-    def start_pod_thread(self) -> None:
-        """Blocking thread to start the pod using runpod_manage.py."""
-        logger.info('RunPod task starting')
-        chat_logger.info('RunPod task starting')  # ##DWM::
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-            tmp_json = f.name
-            f.write('{}')
-        script_root = Path(os.path.abspath(__file__)).parent / 'runpod_manage.py'
-        base_cmd = ['uv', 'run', str(script_root), 'start', '--json', tmp_json]
-        cmd_string = subprocess.list2cmdline(base_cmd) + ' ' + self.runpod_args
-        try:
-            subprocess.run(cmd_string, shell=True, check=True)
-            with open(tmp_json) as f:
-                data = json.load(f)
-            if data.get('status') == 'started':
-                self.current_pod_id = data['pod_id']
-                self.current_pod_url = data['url']
-                self.active = True
-                logger.info('RunPod started successfully: ID=%s', self.current_pod_id)
-                # ##DWM::
-                chat_logger.info('RunPod started successfully: ID=%s', self.current_pod_id)
-            else:
-                logger.error('RunPod start failed: %s', data)
-                chat_logger.error('RunPod start failed: %s', data)  # ##DWM::
-        except Exception as e:
-            logger.error('Error starting pod: %s', e)
-            chat_logger.error('Error starting pod: %s', e)  # ##DWM::
-        finally:
-            if os.path.exists(tmp_json):
-                os.unlink(tmp_json)
-
-
 class BM25Index:
     def __init__(self, bm25: rank_bm25.BM25Okapi, documents: list[str], metadatas: list[dict]):
         """Create a BOW index"""
         self.bm25 = bm25
         self.documents = documents
         self.metadatas = metadatas
+
+
+class PodManager:
+    """Manages the startup and idle shutdown of a RunPod Ollama instance."""
+
+    def __init__(self, runpod_args: str, load_time_minutes: float,
+                 idle_time_minutes: float, has_explicit_embed: bool):
+        self.load_time = load_time_minutes * 60
+        self.idle_time = idle_time_minutes * 60
+        self.runpod_args = runpod_args
+        self.has_explicit_embed = has_explicit_embed
+        self.active_requests = 0
+        self.start_time = 0
+        self.last_end_time = 0
+        self.lock = threading.RLock()
+
+        self.current_pod_id = None
+        self.current_pod_url = None
+        self.original_url = None
+        self.active = False
+        self.manage_script = Path(os.path.abspath(__file__)).parent / 'runpod_manage.py'
+        logger.info('RunPod manager started')
+
+    def start_request(self):
+        """Handle lifecycle logic for an arriving request."""
+        now = time.time()
+        with self.lock:
+            start = False
+            if not self.active and (self.active_requests or now - self.start_time < self.load_time):
+                start = True
+            if not self.active_requests:
+                if now - self.last_end_time > self.load_time:
+                    self.start_time = now
+            self.active_requests += 1
+            if start:
+                logger.info('RunPod trigger: Starting pod')
+                self.active = 'starting'
+                threading.Thread(
+                    target=self.start_pod_thread, daemon=True, name='RunPodStart',
+                ).start()
+            self.cancel_stop_timer()
+            # TODO: if active is True (started), update fallback delay timeout
+
+    def end_request(self):
+        """Marks the end of a request stream."""
+        with self.lock:
+            if self.active_requests > 0:
+                self.active_requests = 0
+            if not self.active_requests:
+                self.last_end_time = time.time()
+                if self.active is True:
+                    self.cancel_stop_timer()
+                    self.stop_timer = threading.Timer(self.idle_time, self.stop_pod)
+
+    def cancel_stop_timer(self):
+        with self.lock:
+            if self.stop_timer:
+                try:
+                    self.stop_timer.cancel()
+                except Exception:
+                    pass
+                self.stop_timer = None
+
+    def start_pod_thread(self) -> None:
+        """Blocking thread to start the pod using runpod_manage.py."""
+        with self.lock:
+            if self.active:
+                return
+        logger.info('RunPod task starting')
+        if not self.original_url:
+            self.original_url = config.ollama_base_url
+        with tempfile.TemporaryDirectory() as tmpdir:
+            status_file = Path(tmpdir) / 'status.json'
+            base_cmd = ['uv', 'run', str(self.manage_script), 'start', '--json', status_file]
+            cmd = subprocess.list2cmdline(base_cmd) + ' ' + self.runpod_args
+            try:
+                subprocess.check_call(cmd, shell=True)
+                with open(status_file) as f:
+                    data = json.load(f)
+                with self.lock:
+                    if data.get('status') == 'started':
+                        self.current_pod_id = data['pod_id']
+                        self.current_pod_url = data['url']
+                        self.active = True
+                        logger.info('RunPod started successfully: ID=%s', self.current_pod_id)
+                    else:
+                        self.active = False
+                        logger.error('RunPod start failed: %s', data)
+            except Exception as e:
+                with self.lock:
+                    self.active = False
+                logger.error('Error starting pod: %s', e)
+
+    def stop_timer(self):
+        base_cmd = None
+        with self.lock:
+            if not self.active or not self.current_pod_id:
+                return
+            base_cmd = ['uv', 'run', str(self.manage_script), 'stop', '--pod', self.current_pod_id]
+            self.active = False
+            self.current_pod_id = None
+        if base_cmd:
+            subprocess.run(subprocess.list2cmdline(base_cmd), shell=True)
+
+    def set_fallback(self):
+        base_cmd = None
+        with self.lock:
+            if not self.active or not self.current_pod_id:
+                return
+            base_cmd = ['uv', 'run', str(self.manage_script), 'stop', '--pod',
+                        self.current_pod_id, '--delay',
+                        int((self.load_time + self.idle_time) / 60) + 60]
+        if base_cmd:
+            subprocess.run(subprocess.list2cmdline(base_cmd), shell=True)
+
+    @staticmethod
+    def request_tracker(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if pod_manager:
+                pod_manager.start_request()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                if pod_manager:
+                    pod_manager.end_request()
+        return wrapper
 
 
 config: argparse.Namespace
@@ -1374,6 +1414,7 @@ def apply_rag_params(
 
 
 @app.post('/v1/chat/completions')
+@PodManager.request_tracker
 async def chat_completions(request: fastapi.Request):  # noqa
     body = await request.json()
     stream = body.get('stream', False)
@@ -1454,26 +1495,20 @@ async def chat_completions(request: fastapi.Request):  # noqa
     '/{path:path}',
     methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
 )
+@PodManager.request_tracker
 async def proxy_passthrough(request: fastapi.Request, path: str):
-    target_url = None
-    is_pod_active = False
-    if pod_manager:
-        target_url, is_pod_active = pod_manager.on_request_arriving()
     log_chat = chat_logger.getEffectiveLevel() <= logging.INFO
     async with httpx.AsyncClient(timeout=None) as client:
         content = await request.body()
         if log_chat and 'generate' in path:
             chat_logger.info('request: %r', content)
-        target_base = target_url if target_url else config.ollama_base_url
         response = await client.request(
             method=request.method,
-            url=f'{target_base}/{path}',
+            url=f'{config.ollama_base_url}/{path}',
             headers={k: v for k, v in request.headers.items() if k.lower() != 'host'},
             content=content,
             params=request.query_params,
         )
-    if pod_manager:
-        pod_manager.record_request_finished()
     if log_chat and 'generate' in path:
         val = response.content
         try:
