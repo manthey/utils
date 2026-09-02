@@ -7,6 +7,7 @@
 # ///
 
 import argparse
+import re
 from pathlib import Path
 
 from github import Auth, Github
@@ -115,6 +116,7 @@ def download_items(repository, types, output_directory, include_diff, github_cli
     repo = github_client.get_repo(repository_name)
     output_path = Path(output_directory)
     output_path.mkdir(parents=True, exist_ok=True)
+    names = set()
     for type_val in types.split(','):
         item_type = ShortTypes.get(type_val, type_val)
         state_label = get_state_label(item_type)
@@ -125,7 +127,9 @@ def download_items(repository, types, output_directory, include_diff, github_cli
                 if issue.pull_request:
                     continue
                 content = format_issue_content(issue, state_label, repository)
-                filename = output_path / f'issue_{issue.number}.md'
+                issue_name = f'issue_{issue.number}.md'
+                names.add(issue_name)
+                filename = output_path / issue_name
                 with open(filename, 'w', encoding='utf-8') as file:
                     file.write(content)
                 print(f'Downloaded issue #{issue.number}')
@@ -139,10 +143,13 @@ def download_items(repository, types, output_directory, include_diff, github_cli
             for pull_request in pulls:
                 content = format_pull_request_content(
                     pull_request, state_label, include_diff, repository)
-                filename = output_path / f'pr_{pull_request.number}.md'
+                pr_name = f'pr_{pull_request.number}.md'
+                names.add(pr_name)
+                filename = output_path / pr_name
                 with open(filename, 'w', encoding='utf-8') as file:
                     file.write(content)
                 print(f'Downloaded PR #{pull_request.number}')
+    return names
 
 
 def main():
@@ -171,16 +178,26 @@ def main():
         '--include-diff', '-d', action='store_true',
         help='Include diff content for pull requests',
     )
-    arguments = parser.parse_args()
-    github_client = Github(auth=Auth.Token(arguments.token)) if arguments.token else Github()
-    download_items(
-        arguments.repository,
-        arguments.type,
-        arguments.output_dir,
-        arguments.include_diff,
+    parser.add_argument(
+        '--remove', action='store_true',
+        help='Remove stale issue and pr files when done',
+    )
+    args = parser.parse_args()
+    github_client = Github(auth=Auth.Token(args.token)) if args.token else Github()
+    files = download_items(
+        args.repository,
+        args.type,
+        args.output_dir,
+        args.include_diff,
         github_client,
     )
-    print(f'Download complete. Files saved to {arguments.output_dir}')
+    if args.remove:
+        output_path = Path(args.output_dir)
+        for p in [p for p in output_path.glob('*')
+                  if re.match(r'(issue|pr)_\d+.md', p.name) and p.name not in files]:
+            print(f'Removing stale {p.name}')
+            p.unlink()
+    print(f'Download complete. Files saved to {args.output_dir}')
 
 
 if __name__ == '__main__':
