@@ -226,7 +226,8 @@ export default function addGuidelines(pi) {
       "- Never claim code is verified unless you have actually run it.\n" +
       "- Always use up-to-date versions (e.g., python 3.10-3.14) when possible.\n" +
       "- If you are in a repo with a .pre-commit-config.yaml, pre-commit must be run and pass on all generated or altered code. You may not alter hooks or ignore rules without first getting approval.\n"
-      "- When modifying existing code, prefer small changes to major refactors unless otherwise instructed";
+      "- When modifying existing code, prefer small changes to major refactors unless otherwise instructed\n"
+      "- If you share any links, they must be verified as active and not returning error codes";
     if (!event.systemPrompt) return event;
       return { ...event, systemPrompt: event.systemPrompt + customRule };
     });
