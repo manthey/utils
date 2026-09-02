@@ -3,6 +3,7 @@
 # requires-python = '>=3.12'
 # dependencies = [
 #   'docling',
+#   'fasttext',
 #   'openai',
 #   'pillow',
 # ]
@@ -10,14 +11,16 @@
 # This can be run via something like
 # uv run --index-strategy unsafe-best-match --with torch==2.13.0+cu132
 # --index https://download.pytorch.org/whl/cu132 ..scriptname.. ..options..
+
 import argparse
 import base64
 import io
 import logging
 import os
 import sys
-import unicodedata as ud
 from pathlib import Path
+
+import fasttext
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -41,10 +44,6 @@ FAIR_COPY_PROMPT = (
     'Clean up this OCR text by fixing typos, character recognition errors, '
     'and formatting issues while preserving the original meaning and '
     'structure. Output only the cleaned text without explanations.'
-)
-DETECT_LANGUAGE_PROMPT = (
-    'What is the primary language of this text? Reply with just the language '
-    'name in English (e.g., "French", "Chinese", "Japanese") and nothing else.'
 )
 TRANSLATE_PROMPT = (
     'Translate this text to English. Preserve all markdown formatting, '
@@ -144,25 +143,63 @@ def chunk_text(text, limit=None):
     return chunks or [text]
 
 
-def detect_language(client, model, text):
-    """Detect the primary language of text content."""
-    sample_lines = '\n'.join(
+def get_fasttext_model():
+    """Load or download the fasttext language identification model."""
+    import os
+
+    # Check environment variable first, then try common locations,
+    # then fall back to a local cache directory.
+    for path in (os.environ.get('FASTTEXT_MODEL'),
+                 '/usr/share/fasttext/lid.176.bin',
+                 os.path.expanduser('~/.cache/fasttext/lid.176.bin')):
+        if path and os.path.isfile(path):
+            return fasttext.load_model(path)
+    # Download to a local cache directory
+    cache_dir = os.path.expanduser('~/.cache/fasttext')
+    os.makedirs(cache_dir, exist_ok=True)
+    model_path = os.path.join(cache_dir, 'lid.176.bin')
+
+    url = 'https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin'
+    try:
+        from urllib.request import urlopen
+
+        with urlopen(url) as resp, open(model_path, 'wb') as f:
+            f.write(resp.read())
+        return fasttext.load_model(model_path)
+    except Exception as exc:
+        msg = (
+            f'Failed to download fasttext model from {url}: {exc}; '
+            'Set FASTTEXT_MODEL env var or install lid.176.bin manually.'
+        )
+        raise RuntimeError(msg) from exc
+
+
+def detect_language(client=None, model=None, text=''):
+    """
+    Detect if the primary language of text content is English using fasttext.
+    """
+    import re
+
+    sample = '\n'.join(
         l for l in text.split('\n')[:50]
         if l.strip() and not l.startswith('#')
     )[:4000]
-    if not sample_lines:
+    if not sample:
         return 'English'
-    prompt = f'{DETECT_LANGUAGE_PROMPT}\n\n{sample_lines}'
+    clean_text = re.sub(r'[^a-zA-Z\s]', ' ', sample).lower()
+    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+    if len(clean_text) < 10:
+        return 'English'
+    prepared = clean_text.replace(' ', '.').replace('\n', '.')
+    model = get_fasttext_model()
     try:
-        det, _ = query_llm(client, model, prompt)
-        return det.strip().lower() if det else 'English'
+        labels, probs = model.predict(prepared, k=3)
+        if labels[0] == '__label__en' and probs[0] > 0.2:
+            return 'English'
+        lang = labels[0][9:].replace('_', ' ').capitalize()
+        return lang if lang else 'Other'
     except Exception:
-        pass
-    # Fallback: check for non-Latin character density
-    latin_only = ''.join(c for c in text[:4000] if ud.isprintable(c))
-    non_latin = sum(1 for c in latin_only if not c.isascii())
-    ratio = non_latin / len(latin_only) if latin_only else 0
-    return 'non-English' if ratio > 0.05 else 'English'
+        return 'Other'
 
 
 def process_ocr_text(client, model, text):
@@ -467,7 +504,7 @@ def main():
         '--model', '-m', default='qwen2.5vl:7b',
         help='Vision model identifier.  Default %(default)s.')
     parser.add_argument(
-        '--processing-model', dest='processing_model', default='',
+        '--processing-model', '-p', dest='processing_model', default='',
         help='Text-only LLM for OCR cleanup/translation (uses --model if empty).')
     parser.add_argument(
         '--process', choices=['none', 'ocr', 'translate', 'all'], default='all',
