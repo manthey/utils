@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 chat_logger = logging.getLogger(__name__ + '_chat_log')
 chat_logger.addHandler(logging.NullHandler())
+runpod_logger = logger
 
 EXTENSION_TO_LANGUAGE = {
     '.py': 'python', '.java': 'java', '.ts': 'typescript', '.tsx': 'typescript',
@@ -155,7 +156,7 @@ class PodManager:
         self.original_url = None
         self.active = False
         self.manage_script = Path(os.path.abspath(__file__)).parent / 'runpod_manage.py'
-        logger.info('RunPod manager started')
+        runpod_logger.info('RunPod manager started')
 
     def start_request(self):
         """Handle lifecycle logic for an arriving request."""
@@ -169,12 +170,11 @@ class PodManager:
                 if now - self.last_end_time > self.load_time:
                     self.start_time = now
             self.active_requests += 1
-            chat_logger.info('RunPodManager start %r' % ([
+            runpod_logger.debug('RunPodManager start %r', [
                 self.active, self.active_requests, self.start_time,
-                self.load_time, now, now - self.start_time], ))  # ##DWM::
+                self.load_time, now, now - self.start_time])
             if start:
-                logger.info('RunPod trigger: Starting pod')
-                chat_logger.info('RunPod trigger: Starting pod')
+                runpod_logger.info('RunPod trigger: Starting pod')
                 self.active = 'starting'
                 threading.Thread(
                     target=self.start_pod_thread, daemon=True, name='RunPodStart',
@@ -192,9 +192,9 @@ class PodManager:
                 if self.active is True:
                     self.cancel_stop_timer()
                     self.stop_timer = threading.Timer(self.idle_time, self.stop_pod)
-            chat_logger.info('RunPodManager endreq %r' % ([
+            runpod_logger.debug('RunPodManager endreq %r', [
                 self.active, self.active_requests, self.start_time,
-                self.load_time], ))  # ##DWM::
+                self.load_time])
 
     def cancel_stop_timer(self):
         with self.lock:
@@ -210,8 +210,7 @@ class PodManager:
         with self.lock:
             if self.active != 'starting':
                 return
-        logger.info('RunPod task starting')
-        chat_logger.info('RunPod task starting')
+        runpod_logger.info('RunPod task starting')
         if not self.original_url:
             self.original_url = config.ollama_base_url
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -228,30 +227,30 @@ class PodManager:
                         self.current_pod_url = data['url']
                         self.active = True
                         config.ollama_base_url = self.current_pod_url
-                        logger.info('RunPod started successfully: ID=%s', self.current_pod_id)
-                        chat_logger.info('RunPod started successfully: ID=%s', self.current_pod_id)
+                        runpod_logger.info(
+                            'RunPod started successfully: ID=%s', self.current_pod_id)
                         self.set_fallback()
                     else:
                         self.active = False
-                        logger.error('RunPod start failed: %s', data)
-                        chat_logger.error('RunPod start failed: %s', data)
+                        runpod_logger.error('RunPod start failed: %s', data)
             except Exception as e:
                 with self.lock:
                     self.active = False
-                logger.error('Error starting pod: %s', e)
-                chat_logger.error('Error starting pod: %s', e)
+                runpod_logger.error('Error starting pod: %s', e)
 
     def stop_pod(self):
         base_cmd = None
         with self.lock:
             if not self.active or not self.current_pod_id:
                 return
+            runpod_logger.info('Stopping pod: %s', self.current_pod_id)
             base_cmd = ['uv', 'run', str(self.manage_script), 'stop', '--pod', self.current_pod_id]
             self.active = False
             self.current_pod_id = None
             config.ollama_base_url = self.original_url
         if base_cmd:
             subprocess.run(subprocess.list2cmdline(base_cmd), shell=True)
+            runpod_logger.info('Stopped pod: %s', base_cmd[-1])
 
     def set_fallback(self):
         base_cmd = None
@@ -267,13 +266,29 @@ class PodManager:
     @staticmethod
     def request_tracker(func):
         @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            if pod_manager:
-                pod_manager.start_request()
+        async def wrapper(*args, **kwargs):
+            if not pod_manager:
+                return await func(*args, **kwargs)
+            result = None
             try:
-                return func(*args, **kwargs)
+                result = await func(*args, **kwargs)
+                if isinstance(result, fastapi.responses.StreamingResponse):
+                    original_iter = result.body_iterator
+
+                    async def wrapped_stream():
+                        try:
+                            async for chunk in original_iter:
+                                yield chunk
+                        except Exception:
+                            pass
+                        finally:
+                            pod_manager.end_request()
+
+                    result.body_iterator = wrapped_stream()
+                    return result
+                return result
             finally:
-                if pod_manager:
+                if not isinstance(result, fastapi.responses.StreamingResponse):
                     pod_manager.end_request()
         return wrapper
 
@@ -1457,7 +1472,6 @@ async def chat_completions(request: fastapi.Request):  # noqa
     if log_chat:
         chat_logger.info('openai request: %s', json.dumps(body))
     if stream:
-        @PodManager.request_tracker
         async def generate():
             response_chunks = []
             completed = False
@@ -1484,7 +1498,6 @@ async def chat_completions(request: fastapi.Request):  # noqa
                         json.dumps({'content': ''.join(response_chunks)}))
         return fastapi.responses.StreamingResponse(generate(), media_type='text/event-stream')
 
-    @PodManager.request_tracker
     def fetch():
         with httpx.Client(timeout=None) as client:
             response = client.post(
@@ -1617,6 +1630,14 @@ def cmd_serve(args):
         chat_logger.setLevel(logging.INFO)
     else:
         chat_logger.setLevel(logging.ERROR)
+    if args.runpod_log:
+        runpod_logger = logging.getLogger(__name__ + '_runpod_log')
+        runpod_logger.addHandler(logging.NullHandler())
+        log_file = os.path.join(args.runpod_log, 'runpod.log')
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 ** 2, backupCount=5)
+        runpod_logger.addHandler(handler)
+        runpod_logger.setLevel(logging.INFO)
     if source_configs:
         paths_str = ', '.join(src.source_path for src in source_configs)
         logger.info('configured %d source%s: %s', len(source_configs),
@@ -1770,6 +1791,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         '--purge-inactive', action='store_true',
         help='Remove inactive chunks and deleted-file entries without destroying active data',
     )
+    serve.add_argument(
+        '--runpod-log', '--pod-log',
+        help='Folder for storing rotated logs with runpod manager activity.')
     for sub in (serve, mcp):
         sub.add_argument(
             '--ollama-base-url', '--url',
