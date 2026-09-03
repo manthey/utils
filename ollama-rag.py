@@ -147,6 +147,7 @@ class PodManager:
         self.active_requests = 0
         self.start_time = 0
         self.last_end_time = 0
+        self.stop_timer = None
         self.lock = threading.RLock()
 
         self.current_pod_id = None
@@ -161,31 +162,39 @@ class PodManager:
         now = time.time()
         with self.lock:
             start = False
-            if not self.active and (self.active_requests or now - self.start_time < self.load_time):
+            if (not self.active and now - self.start_time > self.load_time and
+                    now - self.last_end_time < min(self.load_time, self.idle_time)):
                 start = True
             if not self.active_requests:
                 if now - self.last_end_time > self.load_time:
                     self.start_time = now
             self.active_requests += 1
+            chat_logger.info('RunPodManager start %r' % ([
+                self.active, self.active_requests, self.start_time,
+                self.load_time, now, now - self.start_time], ))  # ##DWM::
             if start:
                 logger.info('RunPod trigger: Starting pod')
+                chat_logger.info('RunPod trigger: Starting pod')
                 self.active = 'starting'
                 threading.Thread(
                     target=self.start_pod_thread, daemon=True, name='RunPodStart',
                 ).start()
             self.cancel_stop_timer()
-            # TODO: if active is True (started), update fallback delay timeout
+            self.set_fallback()
 
     def end_request(self):
         """Marks the end of a request stream."""
         with self.lock:
             if self.active_requests > 0:
-                self.active_requests = 0
+                self.active_requests -= 1
             if not self.active_requests:
                 self.last_end_time = time.time()
                 if self.active is True:
                     self.cancel_stop_timer()
                     self.stop_timer = threading.Timer(self.idle_time, self.stop_pod)
+            chat_logger.info('RunPodManager endreq %r' % ([
+                self.active, self.active_requests, self.start_time,
+                self.load_time], ))  # ##DWM::
 
     def cancel_stop_timer(self):
         with self.lock:
@@ -199,9 +208,10 @@ class PodManager:
     def start_pod_thread(self) -> None:
         """Blocking thread to start the pod using runpod_manage.py."""
         with self.lock:
-            if self.active:
+            if self.active != 'starting':
                 return
         logger.info('RunPod task starting')
+        chat_logger.info('RunPod task starting')
         if not self.original_url:
             self.original_url = config.ollama_base_url
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -217,16 +227,21 @@ class PodManager:
                         self.current_pod_id = data['pod_id']
                         self.current_pod_url = data['url']
                         self.active = True
+                        config.ollama_base_url = self.current_pod_url
                         logger.info('RunPod started successfully: ID=%s', self.current_pod_id)
+                        chat_logger.info('RunPod started successfully: ID=%s', self.current_pod_id)
+                        self.set_fallback()
                     else:
                         self.active = False
                         logger.error('RunPod start failed: %s', data)
+                        chat_logger.error('RunPod start failed: %s', data)
             except Exception as e:
                 with self.lock:
                     self.active = False
                 logger.error('Error starting pod: %s', e)
+                chat_logger.error('Error starting pod: %s', e)
 
-    def stop_timer(self):
+    def stop_pod(self):
         base_cmd = None
         with self.lock:
             if not self.active or not self.current_pod_id:
@@ -234,6 +249,7 @@ class PodManager:
             base_cmd = ['uv', 'run', str(self.manage_script), 'stop', '--pod', self.current_pod_id]
             self.active = False
             self.current_pod_id = None
+            config.ollama_base_url = self.original_url
         if base_cmd:
             subprocess.run(subprocess.list2cmdline(base_cmd), shell=True)
 
@@ -244,7 +260,7 @@ class PodManager:
                 return
             base_cmd = ['uv', 'run', str(self.manage_script), 'stop', '--pod',
                         self.current_pod_id, '--delay',
-                        int((self.load_time + self.idle_time) / 60) + 60]
+                        str(int((self.load_time + self.idle_time) / 60) + 60)]
         if base_cmd:
             subprocess.run(subprocess.list2cmdline(base_cmd), shell=True)
 
@@ -1441,6 +1457,7 @@ async def chat_completions(request: fastapi.Request):  # noqa
     if log_chat:
         chat_logger.info('openai request: %s', json.dumps(body))
     if stream:
+        @PodManager.request_tracker
         async def generate():
             response_chunks = []
             completed = False
@@ -1467,6 +1484,7 @@ async def chat_completions(request: fastapi.Request):  # noqa
                         json.dumps({'content': ''.join(response_chunks)}))
         return fastapi.responses.StreamingResponse(generate(), media_type='text/event-stream')
 
+    @PodManager.request_tracker
     def fetch():
         with httpx.Client(timeout=None) as client:
             response = client.post(
@@ -1851,6 +1869,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main():  # noqa
     parser = build_arg_parser()
     args = parser.parse_args()
+    print(args)
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
     if hasattr(args, 'source_path') and not args.source_path:
         env_paths = os.environ.get('RAG_SOURCE_PATH', '')

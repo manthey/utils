@@ -266,7 +266,8 @@ def cmd_start(args):  # noqa
         print('No available GPU found matching criteria.', file=sys.stderr)
         sys.exit(1)
     if args.gpu:
-        gpu_info = [g for g in compatible if args.gpu in {g['id'], g['displayName']}][0]
+        gpu_info = [g for g in compatible
+                    if args.gpu.replace('_', ' ') in {g['id'], g['displayName']}][0]
     else:
         gpu_info = compatible[0]
     gpu_type_id = gpu_info['id']
@@ -430,7 +431,9 @@ def main():
         '--weight', choices=['bandwidth', 'b', 'compute', 'c'],
         help='Weigh pricing based on a metric')
     start_parser = subparsers.add_parser('start', help='Start an Ollama pod')
-    start_parser.add_argument('--gpu', help='GPU type to use (otherwise, use cheapest available)')
+    start_parser.add_argument(
+        '--gpu', help='GPU type to use (otherwise, use cheapest available).  '
+        'Underscores will be replaced with spaces.')
     start_parser.add_argument(
         '--mem', type=int, default=96,
         help='Minimum GPU memory in GB.  Default %(default)s')
