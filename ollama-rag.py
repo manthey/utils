@@ -13,6 +13,7 @@
 #   "llama-index-readers-file>=0.5",
 #   "mcp[cli]>=2.0",
 #   "msgpack>=1.0",
+#   "oslex",
 #   "pathspec",
 #   "pypdf>=4.0",
 #   "python-docx>=1.1",
@@ -54,6 +55,7 @@ import httpx
 import mcp.server.stdio
 import mcp.server.streamable_http_manager
 import msgpack
+import oslex
 import pathspec
 import rank_bm25
 import starlette.responses
@@ -216,8 +218,8 @@ class PodManager:
             self.original_url = config.ollama_base_url
         with tempfile.TemporaryDirectory() as tmpdir:
             status_file = Path(tmpdir) / 'status.json'
-            base_cmd = ['uv', 'run', str(self.manage_script), 'start', '--json', status_file]
-            cmd = subprocess.list2cmdline(base_cmd) + ' ' + self.runpod_args
+            cmd = ['uv', 'run', str(self.manage_script), 'start', '--json',
+                   status_file] + oslex.split(self.runpod_args)
             try:
                 subprocess.check_call(cmd, shell=True)
                 with open(status_file) as f:
@@ -240,29 +242,29 @@ class PodManager:
                 runpod_logger.error('Error starting pod: %s', e)
 
     def stop_pod(self):
-        base_cmd = None
+        cmd = None
         with self.lock:
             if not self.active or not self.current_pod_id:
                 return
             runpod_logger.info('Stopping pod: %s', self.current_pod_id)
-            base_cmd = ['uv', 'run', str(self.manage_script), 'stop', '--pod', self.current_pod_id]
+            cmd = ['uv', 'run', str(self.manage_script), 'stop', '--pod', self.current_pod_id]
             self.active = False
             self.current_pod_id = None
             config.ollama_base_url = self.original_url
-        if base_cmd:
-            subprocess.run(subprocess.list2cmdline(base_cmd), shell=True)
-            runpod_logger.info('Stopped pod: %s', base_cmd[-1])
+        if cmd:
+            subprocess.run(cmd, shell=True)
+            runpod_logger.info('Stopped pod: %s', cmd[-1])
 
     def set_fallback(self):
-        base_cmd = None
+        cmd = None
         with self.lock:
             if not self.active or not self.current_pod_id:
                 return
-            base_cmd = ['uv', 'run', str(self.manage_script), 'stop', '--pod',
-                        self.current_pod_id, '--delay',
-                        str(int((self.load_time + self.idle_time) / 60) + 60)]
-        if base_cmd:
-            subprocess.run(subprocess.list2cmdline(base_cmd), shell=True)
+            cmd = ['uv', 'run', str(self.manage_script), 'stop', '--pod',
+                   self.current_pod_id, '--delay',
+                   str(int((self.load_time + self.idle_time) / 60) + 60)]
+        if cmd:
+            subprocess.run(cmd, shell=True)
 
     @staticmethod
     def request_tracker(func):
