@@ -73,7 +73,8 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 chat_logger = logging.getLogger(__name__ + '_chat_log')
 chat_logger.addHandler(logging.NullHandler())
-runpod_logger = logger
+runpod_logger = logging.getLogger(__name__ + '_runpod_log')
+runpod_logger.addHandler(logging.NullHandler())
 
 EXTENSION_TO_LANGUAGE = {
     '.py': 'python', '.java': 'java', '.ts': 'typescript', '.tsx': 'typescript',
@@ -269,6 +270,7 @@ class PodManager:
         async def wrapper(*args, **kwargs):
             if not pod_manager:
                 return await func(*args, **kwargs)
+            pod_manager.start_request()
             result = None
             try:
                 result = await func(*args, **kwargs)
@@ -1613,6 +1615,18 @@ def cmd_serve(args):
     global mcp_manager
     global pod_manager
 
+    if args.completion_log:
+        log_file = os.path.join(args.completion_log, 'rag_chat.log')
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 ** 2, backupCount=5)
+        chat_logger.addHandler(handler)
+    else:
+        chat_logger.setLevel(logging.ERROR)
+    if args.runpod_log:
+        log_file = os.path.join(args.runpod_log, 'runpod.log')
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=10 * 1024 ** 2, backupCount=5)
+        runpod_logger.addHandler(handler)
     if args.runpod_args:
         pod_manager = PodManager(
             runpod_args=args.runpod_args,
@@ -1622,22 +1636,6 @@ def cmd_serve(args):
         )
     config = args
     source_configs = build_source_configs(args)
-    if args.completion_log:
-        log_file = os.path.join(args.completion_log, 'rag_chat.log')
-        handler = logging.handlers.RotatingFileHandler(
-            log_file, maxBytes=10 * 1024 ** 2, backupCount=5)
-        chat_logger.addHandler(handler)
-        chat_logger.setLevel(logging.INFO)
-    else:
-        chat_logger.setLevel(logging.ERROR)
-    if args.runpod_log:
-        runpod_logger = logging.getLogger(__name__ + '_runpod_log')
-        runpod_logger.addHandler(logging.NullHandler())
-        log_file = os.path.join(args.runpod_log, 'runpod.log')
-        handler = logging.handlers.RotatingFileHandler(
-            log_file, maxBytes=10 * 1024 ** 2, backupCount=5)
-        runpod_logger.addHandler(handler)
-        runpod_logger.setLevel(logging.INFO)
     if source_configs:
         paths_str = ', '.join(src.source_path for src in source_configs)
         logger.info('configured %d source%s: %s', len(source_configs),
@@ -1787,13 +1785,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     serve.add_argument(
         '--runpod-args', type=str, default='',
         help='String of arguments to pass to `runpod_manage.py start`.')
+    serve.add_argument(
+        '--runpod-log', '--pod-log',
+        help='Folder for storing rotated logs with runpod manager activity.')
     clear.add_argument(
         '--purge-inactive', action='store_true',
         help='Remove inactive chunks and deleted-file entries without destroying active data',
     )
-    serve.add_argument(
-        '--runpod-log', '--pod-log',
-        help='Folder for storing rotated logs with runpod manager activity.')
     for sub in (serve, mcp):
         sub.add_argument(
             '--ollama-base-url', '--url',
@@ -1895,6 +1893,8 @@ def main():  # noqa
     args = parser.parse_args()
     print(args)
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
+    chat_logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
+    runpod_logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
     if hasattr(args, 'source_path') and not args.source_path:
         env_paths = os.environ.get('RAG_SOURCE_PATH', '')
         if env_paths:
