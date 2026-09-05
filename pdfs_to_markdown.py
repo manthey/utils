@@ -51,7 +51,8 @@ PICTURE_PROMPT = (
 FAIR_COPY_PROMPT = (
     'Clean up this OCR text by fixing typos, character recognition errors, '
     'and formatting issues while preserving the original meaning and '
-    'structure. Output only the cleaned text without explanations.'
+    'structure. Specifically, convert any "long s" (ſ) typically found in older texts '
+    'to standard lowercase "s". Output only the cleaned text without explanations.'
 )
 DETECT_LANGUAGE_PROMPT = (
     'What is the primary language of this text? Reply with just the language '
@@ -62,7 +63,7 @@ TRANSLATE_PROMPT = (
     'headers, image/figure markers, tables, and code blocks exactly as they '
     'are. Output only the translated text without explanations.'
 )
-CHUNK_SEPARATOR = '\n--- CHAPTER BREAK ---\n'
+# Unique marker for joining processed chunks back together.
 
 
 def image_to_data_url(image):
@@ -120,38 +121,61 @@ def is_ocr_used(result):
     return False
 
 
-def estimate_token_limit(model):
-    """Return conservative max text tokens for chunking based on model context."""
-    default_max = 8192
-    ctx_map = {'claude': 16000, 'gpt-4o': 128000, 'qwen': 32768,
-               'gemini': 128000, 'llama': 8192}
-    model_lower = str(model).lower()
-    for key, val in ctx_map.items():
-        if key in model_lower:
-            return min(val - 4000, default_max)
-    return default_max
-
-
 def chunk_text(text, limit=None):
-    """Split markdown text into chunks at conceptual breaks, conservatively chunked."""
+    """Split markdown text into logical chunks based on headers or paragraphs."""
     if not text:
         return []
+
     estimated_chars_per_token = 4
-    token_limit = limit or estimate_token_limit('default')
-    target_chars = max(int(token_limit * estimated_chars_per_token // 2), 6000)
-    text_segments = [s for s in text.split(CHUNK_SEPARATOR) if s.strip()]
-    chunks, current_chunk = [], ''
-    for segment in text_segments:
-        enc_s = len(segment.encode('utf-8'))
-        if not current_chunk:
-            current_chunk = segment
-        elif len(current_chunk.encode('utf-8')) + enc_s < target_chars:
-            current_chunk += CHUNK_SEPARATOR + segment
+    token_limit = limit or 8192
+    target_bytes = max(int(token_limit * estimated_chars_per_token // 2), 6000)
+
+    # Split by Markdown headers to respect document structure
+    segments = re.split(r'(^#{1,6}\s+.*$)', text, flags=re.MULTILINE)
+    merged_segments = []
+    header_pattern = re.compile(r'^#{1,6}\s+')
+    for i, seg in enumerate(segments):
+        if not seg.strip():
+            continue
+        if header_pattern.match(seg):
+            chunk = f'\n\n{seg}\n'
+            # Merge with the next paragraph block if it exists
+            if i + 1 < len(segments):
+                chunk += segments[i + 1].strip() + '\n'
+            merged_segments.append(chunk)
         else:
-            chunks.append(current_chunk)
-            current_chunk = segment
-    if current_chunk:
-        chunks.append(current_chunk)
+            merged_segments.append(seg.strip() + '\n\n')
+    chunks, current_chunk, current_len = [], '', 0
+
+    def try_finalize(chunks_list, curr_str):
+        if len(curr_str) > 50 and curr_str.strip():
+            chunks_list.append(curr_str)
+
+    for segment in merged_segments:
+        seg_len = len(segment.encode('utf-8'))
+        if seg_len > target_bytes:
+            sub_blocks = re.split(r'\n{1,3}', segment)
+            for blk in sub_blocks:
+                if not blk.strip():
+                    continue
+                blk_len = len(blk.encode('utf-8'))
+                need_new_chunk = (current_chunk == '') or (current_len + blk_len > target_bytes)
+                if need_new_chunk:
+                    try_finalize(chunks, current_chunk)
+                    current_chunk, current_len = blk, blk_len
+                else:
+                    current_chunk += '\n' + blk
+                    current_len += blk_len + 1
+            continue
+        # Respect byte limit when logically merging segments
+        need_new_segment = (not current_chunk) or (current_len + seg_len > target_bytes)
+        if need_new_segment:
+            try_finalize(chunks, current_chunk)
+            current_chunk, current_len = segment, seg_len
+        else:
+            current_chunk += '\n\n' + segment
+            current_len += 2 + seg_len
+    try_finalize(chunks, current_chunk)
     return chunks or [text]
 
 
@@ -227,7 +251,7 @@ def process_ocr_text(client, model, text):
     chunks = chunk_text(text)
     results, total_tokens = [], 0
     for i, chunk in enumerate(chunks):
-        logger.info('OCR fair copy chunk %d / %d', i + 1, len(chunks))
+        logger.info('OCR fair copy chunk %d / %d (%d)', i + 1, len(chunks), len(chunk))
         try:
             cleaned, tokens = query_llm(
                 client, model,
@@ -237,18 +261,18 @@ def process_ocr_text(client, model, text):
         except Exception as err:
             logger.warning('OCR fair copy chunk %d failed: %s', i, err)
             results.append(chunk)
-    return CHUNK_SEPARATOR.join(results), total_tokens
+    return '\n'.join(results), total_tokens
 
 
 def process_translation(client, model, text, src_lang=None):
     """Translate text to English if not already in English."""
-    if src_lang == 'English':
+    if src_lang.lower() == 'english':
         logger.info('Text is already English; skipping translation')
         return text, 0
     chunks = chunk_text(text)
     results, total_tokens = [], 0
     for i, chunk in enumerate(chunks):
-        logger.info('Translation chunk %d / %d', i + 1, len(chunks))
+        logger.info('Translation chunk %d / %d (%d(', i + 1, len(chunks), len(chunk))
         try:
             translated, tok = query_llm(
                 client, model,
@@ -258,7 +282,7 @@ def process_translation(client, model, text, src_lang=None):
         except Exception as err:
             logger.warning('Translation chunk %d failed: %s', i, err)
             results.append(chunk)
-    return CHUNK_SEPARATOR.join(results), total_tokens
+    return '\n'.join(results), total_tokens
 
 
 def crop_item_image(doc, item):
@@ -429,6 +453,7 @@ def process_file(converter, client, filepath, model, args):
             total_tokens += ocr_tok
             logger.info('OCR fair copy complete (%d tokens)', ocr_tok)
             final_output += '\n\n## FAIR COPY\n\n' + fair_copy_text
+
             source_text = fair_copy_text
         else:
             source_text = markdown
