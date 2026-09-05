@@ -196,6 +196,7 @@ class PodManager:
                 if self.active is True:
                     self.cancel_stop_timer()
                     self.stop_timer = threading.Timer(self.idle_time, self.stop_pod)
+                    self.stop_timer.start()
             runpod_logger.debug('RunPodManager endreq %r', [
                 self.active, self.active_requests, self.start_time,
                 self.load_time])
@@ -243,6 +244,7 @@ class PodManager:
                 runpod_logger.error('Error starting pod: %s', e)
 
     def stop_pod(self):
+        runpod_logger.info('Stopping pod timer')
         cmd = None
         with self.lock:
             if not self.active or not self.current_pod_id:
