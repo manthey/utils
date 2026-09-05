@@ -3,7 +3,6 @@
 # requires-python = '>=3.12'
 # dependencies = [
 #   'docling',
-#   'fasttext',
 #   'openai',
 #   'pillow',
 # ]
@@ -17,10 +16,19 @@ import base64
 import io
 import logging
 import os
+import re
 import sys
+import unicodedata
 from pathlib import Path
 
-import fasttext
+import requests
+
+has_fasttext = False
+try:
+    import fasttext
+    has_fasttext = True
+except ImportError:
+    pass
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -44,6 +52,10 @@ FAIR_COPY_PROMPT = (
     'Clean up this OCR text by fixing typos, character recognition errors, '
     'and formatting issues while preserving the original meaning and '
     'structure. Output only the cleaned text without explanations.'
+)
+DETECT_LANGUAGE_PROMPT = (
+    'What is the primary language of this text? Reply with just the language '
+    'name in English (e.g., "French", "Chinese", "Japanese") and nothing else.'
 )
 TRANSLATE_PROMPT = (
     'Translate this text to English. Preserve all markdown formatting, '
@@ -145,8 +157,6 @@ def chunk_text(text, limit=None):
 
 def get_fasttext_model():
     """Load or download the fasttext language identification model."""
-    import os
-
     # Check environment variable first, then try common locations,
     # then fall back to a local cache directory.
     for path in (os.environ.get('FASTTEXT_MODEL'),
@@ -176,10 +186,8 @@ def get_fasttext_model():
 
 def detect_language(client=None, model=None, text=''):
     """
-    Detect if the primary language of text content is English using fasttext.
+    Detect if the primary language of text content is English
     """
-    import re
-
     sample = '\n'.join(
         l for l in text.split('\n')[:50]
         if l.strip() and not l.startswith('#')
@@ -190,16 +198,28 @@ def detect_language(client=None, model=None, text=''):
     clean_text = re.sub(r'\s+', ' ', clean_text).strip()
     if len(clean_text) < 10:
         return 'English'
-    prepared = clean_text.replace(' ', '.').replace('\n', '.')
-    model = get_fasttext_model()
+    if has_fasttext:
+        prepared = clean_text.replace(' ', '.').replace('\n', '.')
+        model = get_fasttext_model()
+        try:
+            labels, probs = model.predict(prepared, k=3)
+            if labels[0] == '__label__en' and probs[0] > 0.2:
+                return 'English'
+            lang = labels[0][9:].replace('_', ' ').capitalize()
+            return lang if lang else 'Other'
+        except Exception:
+            return 'Other'
+    prompt = f'{DETECT_LANGUAGE_PROMPT}\n\n{sample}'
     try:
-        labels, probs = model.predict(prepared, k=3)
-        if labels[0] == '__label__en' and probs[0] > 0.2:
-            return 'English'
-        lang = labels[0][9:].replace('_', ' ').capitalize()
-        return lang if lang else 'Other'
+        det, _ = query_llm(client, model, prompt)
+        return det.strip().lower() if det else 'English'
     except Exception:
-        return 'Other'
+        pass
+    # Fallback: check for non-Latin character density
+    latin_only = ''.join(c for c in text[:4000] if unicodedata.isprintable(c))
+    non_latin = sum(1 for c in latin_only if not c.isascii())
+    ratio = non_latin / len(latin_only) if latin_only else 0
+    return 'non-English' if ratio > 0.05 else 'English'
 
 
 def process_ocr_text(client, model, text):
@@ -346,8 +366,6 @@ def get_converter(args):
 
 
 def offload_ollama(url):
-    import requests
-
     url = url.rstrip('/')
     resp = requests.get(f'{url}/api/ps')
     try:

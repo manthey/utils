@@ -167,7 +167,8 @@ class PodManager:
         with self.lock:
             start = False
             if (not self.active and now - self.start_time > self.load_time and
-                    now - self.last_end_time < min(self.load_time, self.idle_time)):
+                    (self.active_requests or
+                        now - self.last_end_time < min(self.load_time, self.idle_time))):
                 start = True
             if not self.active_requests:
                 if now - self.last_end_time > self.load_time:
