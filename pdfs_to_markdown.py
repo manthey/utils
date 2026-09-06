@@ -3,6 +3,7 @@
 # requires-python = '>=3.12'
 # dependencies = [
 #   'docling',
+#   'lingua-language-detector',
 #   'openai',
 #   'pillow',
 # ]
@@ -13,22 +14,15 @@
 
 import argparse
 import base64
+import functools
 import io
 import logging
 import os
 import re
 import sys
-import unicodedata
 from pathlib import Path
 
 import requests
-
-has_fasttext = False
-try:
-    import fasttext
-    has_fasttext = True
-except ImportError:
-    pass
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -194,71 +188,21 @@ def chunk_text(text, limit=None):
     return chunks or [text]
 
 
-def get_fasttext_model():
-    """Load or download the fasttext language identification model."""
-    # Check environment variable first, then try common locations,
-    # then fall back to a local cache directory.
-    for path in (os.environ.get('FASTTEXT_MODEL'),
-                 '/usr/share/fasttext/lid.176.bin',
-                 os.path.expanduser('~/.cache/fasttext/lid.176.bin')):
-        if path and os.path.isfile(path):
-            return fasttext.load_model(path)
-    # Download to a local cache directory
-    cache_dir = os.path.expanduser('~/.cache/fasttext')
-    os.makedirs(cache_dir, exist_ok=True)
-    model_path = os.path.join(cache_dir, 'lid.176.bin')
+@functools.cache
+def get_lang_detector():
+    import lingua
 
-    url = 'https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin'
-    try:
-        from urllib.request import urlopen
-
-        with urlopen(url) as resp, open(model_path, 'wb') as f:
-            f.write(resp.read())
-        return fasttext.load_model(model_path)
-    except Exception as exc:
-        msg = (
-            f'Failed to download fasttext model from {url}: {exc}; '
-            'Set FASTTEXT_MODEL env var or install lid.176.bin manually.'
-        )
-        raise RuntimeError(msg) from exc
+    return lingua.LanguageDetectorBuilder.from_all_languages().build()
 
 
-def detect_language(client=None, model=None, text=''):
-    """
-    Detect if the primary language of text content is English
-    """
-    sample = '\n'.join(
-        l for l in text.split('\n')[:1000]
-        if l.strip() and not l.strip().startswith('#')
-    )[:16384]
-    if not sample:
+def detect_language(text):
+    if len(text.strip()) <= 10:
         return 'English'
-    clean_text = re.sub(r'[^a-zA-Z\s]', ' ', sample).lower()
-    clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-    if len(clean_text) < 10:
+    detector = get_lang_detector()
+    lang = detector.detect_language_of(text)
+    if not lang:
         return 'English'
-    if has_fasttext:
-        prepared = clean_text.replace(' ', '.').replace('\n', '.')
-        model = get_fasttext_model()
-        try:
-            labels, probs = model.predict(prepared, k=3)
-            if labels[0] == '__label__en' and probs[0] > 0.2:
-                return 'English'
-            lang = labels[0][9:].replace('_', ' ').capitalize()
-            return lang if lang else 'Other'
-        except Exception:
-            return 'Other'
-    prompt = f'{DETECT_LANGUAGE_PROMPT}\n\n{sample}'
-    try:
-        det, _ = query_llm(client, model, prompt)
-        return det.strip().lower() if det else 'English'
-    except Exception:
-        pass
-    # Fallback: check for non-Latin character density
-    latin_only = ''.join(c for c in text[:4000] if unicodedata.isprintable(c))
-    non_latin = sum(1 for c in latin_only if not c.isascii())
-    ratio = non_latin / len(latin_only) if latin_only else 0
-    return 'non-English' if ratio > 0.05 else 'English'
+    return lang.name.capitalize()
 
 
 def process_ocr_text(client, model, text):
@@ -457,19 +401,17 @@ def process_file(converter, client, filepath, model, args):
         logger.info('OCR detected: %s; applying text processing '
                     '(mode=%s)',
                     ocr_used, process_mode)
-        # Detect source language first (needed for translation)
-        src_lang = detect_language(client, proc_model, markdown)
-        logger.debug('Detected source language: %s', src_lang)
+        source_text = markdown
         total_tokens = 0
         if process_mode in ('ocr', 'all') and ocr_used:
             fair_copy_text, ocr_tok = process_ocr_text(client, proc_model, markdown)
             total_tokens += ocr_tok
             logger.info('OCR fair copy complete (%d tokens)', ocr_tok)
             final_output += '\n\n## FAIR COPY\n\n' + fair_copy_text
-
             source_text = fair_copy_text
-        else:
-            source_text = markdown
+        # Detect source language first (needed for translation)
+        src_lang = detect_language(source_text)
+        logger.debug('Detected source language: %s', src_lang)
         if process_mode in ('translate', 'all') and src_lang != 'English':
             translated_text, trans_tok = process_translation(
                 client, proc_model, source_text, src_lang=src_lang)
