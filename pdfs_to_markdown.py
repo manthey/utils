@@ -479,6 +479,18 @@ def process_file(converter, client, filepath, model, args):
     return final_output
 
 
+def sort_file_list(file_list, sort):
+    new_list = []
+    for f in file_list:
+        if not os.path.isfile(f):
+            continue
+        metric = f
+        if sort == 'shortest':
+            metric = os.path.getsize(f)
+        new_list.append((metric, f))
+    return [entry[-1] for entry in sorted(new_list)]
+
+
 def process_directory(args):  # noqa
     from openai import OpenAI
 
@@ -495,6 +507,8 @@ def process_directory(args):  # noqa
             file_list = sorted(target.rglob('*')) if args.recurse else sorted(target.iterdir())
         else:
             continue
+        if args.sort:
+            file_list = sort_file_list(file_list, args.sort)
         for filepath in file_list:
             if not filepath.is_file():
                 continue
@@ -578,6 +592,9 @@ def main():
     parser.add_argument(
         '--offload', '-o', action='store_true',
         help='Offload torch models between pdfs.')
+    parser.add_argument(
+        '--sort',
+        help='Sort files before processing. "shortest" will sort by size.')
     parser.add_argument(
         '--list', '-l', action='store_true',
         help='Just list what files would be processed without actually doing anything.')
