@@ -66,6 +66,19 @@ TRANSLATE_PROMPT = (
 # Unique marker for joining processed chunks back together.
 
 
+def chat_create_with_reasoning(client, **kwargs):
+    """Create a chat completion, trying 'reasoning_effort=low' first."""
+    kwargs['reasoning_effort'] = 'low'
+    try:
+        return client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        # If reasoning effort is unsupported, retry without it
+        if 'reasoning_effort' in str(exc).lower():
+            kwargs.pop('reasoning_effort')
+            return client.chat.completions.create(**kwargs)
+        raise exc
+
+
 def image_to_data_url(image):
     buffer = io.BytesIO()
     image = image.convert('L' if image.mode in {'L', 'LA'} else 'RGB')
@@ -75,7 +88,8 @@ def image_to_data_url(image):
 
 
 def query_vision_model(client, model, image, prompt):
-    response = client.chat.completions.create(
+    response = chat_create_with_reasoning(
+        client,
         model=model,
         messages=[{
             'role': 'user',
@@ -92,7 +106,8 @@ def query_vision_model(client, model, image, prompt):
 
 def query_llm(client, model, prompt):
     """Query an LLM (text-only) and return its text response."""
-    response = client.chat.completions.create(
+    response = chat_create_with_reasoning(
+        client,
         model=model,
         messages=[{'role': 'user', 'content': prompt}],
     )
@@ -213,9 +228,9 @@ def detect_language(client=None, model=None, text=''):
     Detect if the primary language of text content is English
     """
     sample = '\n'.join(
-        l for l in text.split('\n')[:50]
-        if l.strip() and not l.startswith('#')
-    )[:4000]
+        l for l in text.split('\n')[:1000]
+        if l.strip() and not l.strip().startswith('#')
+    )[:16384]
     if not sample:
         return 'English'
     clean_text = re.sub(r'[^a-zA-Z\s]', ' ', sample).lower()
@@ -265,14 +280,12 @@ def process_ocr_text(client, model, text):
 
 
 def process_translation(client, model, text, src_lang=None):
-    """Translate text to English if not already in English."""
     if src_lang.lower() == 'english':
-        logger.info('Text is already English; skipping translation')
         return text, 0
     chunks = chunk_text(text)
     results, total_tokens = [], 0
     for i, chunk in enumerate(chunks):
-        logger.info('Translation chunk %d / %d (%d(', i + 1, len(chunks), len(chunk))
+        logger.info('Translation chunk %d / %d (%d)', i + 1, len(chunks), len(chunk))
         try:
             translated, tok = query_llm(
                 client, model,
