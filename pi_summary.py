@@ -155,7 +155,7 @@ def main():
         if not files:
             continue
         for fname in files:
-            filepath = os.path.join(full_dir, fname)
+            filepath = os.path.abspath(os.path.join(full_dir, fname))
             records = load_records(filepath)
             msg_id_to_rec, children_map = build_tree(records)
             roots = find_roots(msg_id_to_rec, children_map)

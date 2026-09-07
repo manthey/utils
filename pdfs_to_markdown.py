@@ -436,6 +436,8 @@ def sort_file_list(file_list, sort):
 def process_directory(args):  # noqa
     from openai import OpenAI
 
+    if args.no_cuda:
+        os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
     converter = None
     if not args.offload:
         converter = get_converter(args)
@@ -534,6 +536,8 @@ def main():
     parser.add_argument(
         '--offload', '-o', action='store_true',
         help='Offload torch models between pdfs.')
+    parser.add_argument(
+        '--no-cuda', action='store_true', help='Avoid using cuda for OCR.')
     parser.add_argument(
         '--sort',
         help='Sort files before processing. "shortest" will sort by size.')

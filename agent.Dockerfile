@@ -245,6 +245,7 @@ RUN cat <<'EOF' > /home/ubuntu/.pi/agent/settings.json
   "hideThinkingBlock": true,
   "httpIdleTimeoutMs": 0,
   "outputPad": 0,
+  "steeringMode": "all",
   "quietStartup": true,
   "extensions": [
     "~/.pi/agent/global-guidelines.js"
@@ -342,6 +343,14 @@ export PI_SKIP_VERSION_CHECK=1
 export PYENV_ROOT="/.pyenv"
 export CFLAGS="-std=gnu17 -march=native"
 export PATH="$HOME/.local/bin:$HOME/.nvm/current:$HOME/.nvm:$HOME/.env:$HOME/.env:/.pyenv/bin:/.pyenv/shims:$PATH"
+EOF
+
+RUN cat <<'EOF' > /home/ubuntu/.tmux.conf
+set -ga terminal-overrides ',xterm*:smcup@:rmcup@'
+
+set -ga terminal-overrides ",*:Tc"
+set -g default-terminal "$TERM"
+set -ga update-environment "TERM"
 EOF
 
 # USER root
