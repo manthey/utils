@@ -32,9 +32,9 @@ logging.getLogger('RapidOCR').setLevel(logging.ERROR)
 os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'warning')
 
 FORMULA_PROMPT = (
-    'Convert the mathematical formula in this image into a single LaTeX '
-    'expression. Respond with only the LaTeX code, without explanations, '
-    'without surrounding dollar signs, and without code fences.'
+    'Transcribe the mathematical formula in this image to raw LaTeX ONLY.  Do '
+    'NOT use markdown, code blocks (```), or explanations. Return strictly '
+    'the math string.'
 )
 PICTURE_PROMPT = (
     'Describe this figure or image in precise, accurate detail.  Convey the '
@@ -45,12 +45,9 @@ PICTURE_PROMPT = (
 FAIR_COPY_PROMPT = (
     'Clean up this OCR text by fixing typos, character recognition errors, '
     'and formatting issues while preserving the original meaning and '
-    'structure. Specifically, convert any "long s" (ſ) typically found in older texts '
-    'to standard lowercase "s". Output only the cleaned text without explanations.'
-)
-DETECT_LANGUAGE_PROMPT = (
-    'What is the primary language of this text? Reply with just the language '
-    'name in English (e.g., "French", "Chinese", "Japanese") and nothing else.'
+    'structure. Specifically, convert any "long s" (ſ) typically found in '
+    'older texts to standard lowercase "s". Output only the cleaned text '
+    'without explanations.'
 )
 TRANSLATE_PROMPT = (
     'Translate this text to English. Preserve all markdown formatting, '
@@ -76,6 +73,7 @@ def chat_create_with_reasoning(client, **kwargs):
     """Create a chat completion, trying 'reasoning_effort=low' first."""
     kwargs = kwargs.copy()
     kwargs['stream'] = True
+    kwargs['stream_options'] = {'include_usage': True}
     kwargs['reasoning_effort'] = 'low'
     try:
         return chat_create_process(client, **kwargs)
@@ -295,6 +293,12 @@ def enrich_formulas(doc, client, model):
             logger.warning(msg)
             count -= 1
             continue
+        latex = latex.strip()
+        if '```' in latex:
+            parts = latex.split('```')
+            if len(parts) > 1 and parts[1].split('\n', 1)[1].strip():
+                latex = parts[1].split('\n', 1)[1].strip()
+        latex = latex.strip().strip('$').strip()
         item.text = latex
         processed += 1
     if processed:
