@@ -220,8 +220,8 @@ RUN mkdir -p /home/ubuntu/.pi/agent && \
 
 RUN cat <<'EOF' > /home/ubuntu/.pi/agent/extensions/global-guidelines.js
 export default function addGuidelines(pi) {
-  const datestr = new Date().toISOString().slice(0, 10);
   pi.on("before_agent_start", async (event) => {
+    const datestr = new Date().toISOString().slice(0, 10);
     const customRule = "\n\n## Global Guidelines:\n" +
       "- Never use emojis, slang, or metaphors.\n" +
       "- Never claim code is verified unless you have actually run it.\n" +
@@ -231,8 +231,7 @@ export default function addGuidelines(pi) {
       "- The current date is " + datestr + ". Treat this as authoritative runtime context.\n" +
       "- Your training data may be outdated. Do not use the apparent absence of a model, package, library, API, or feature from your training data as evidence that it does not exist.\n" +
       "- If you share any links, they must be verified as active and not returning error codes.";
-    if (!event.systemPrompt) return event;
-    return { ...event, systemPrompt: event.systemPrompt + customRule };
+    return { systemPrompt: event.systemPrompt + customRule };
     });
 }
 EOF

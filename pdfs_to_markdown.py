@@ -32,9 +32,10 @@ logging.getLogger('RapidOCR').setLevel(logging.ERROR)
 os.environ.setdefault('TRANSFORMERS_VERBOSITY', 'warning')
 
 FORMULA_PROMPT = (
-    'Transcribe the mathematical formula in this image to raw LaTeX ONLY.  Do '
-    'NOT use markdown, code blocks (```), or explanations. Return strictly '
-    'the math string.'
+    'Transcribe the mathematical formula in this image using standard LaTeX '
+    'notation. Wrap the entire equation strictly inside $$ ... $$. Do not '
+    'include any surrounding text, explanations, or code blocks. Return ONLY '
+    'the string content between the dollar signs.'
 )
 PICTURE_PROMPT = (
     'Describe this figure or image in precise, accurate detail.  Convey the '
@@ -69,17 +70,17 @@ def chat_create_process(client, **kwargs):
     return ''.join(result), usage
 
 
-def chat_create_with_reasoning(client, **kwargs):
+def chat_create_with_reasoning(client, level='low', **kwargs):
     """Create a chat completion, trying 'reasoning_effort=low' first."""
     kwargs = kwargs.copy()
     kwargs['stream'] = True
     kwargs['stream_options'] = {'include_usage': True}
-    kwargs['reasoning_effort'] = 'low'
+    kwargs['reasoning_effort'] = level
     try:
         return chat_create_process(client, **kwargs)
     except Exception as exc:
         # If reasoning effort is unsupported, retry without it
-        if 'reasoning_effort' in str(exc).lower():
+        if 'reasoning_effort' in str(exc).lower() or 'thinking' in str(exc).lower():
             kwargs.pop('reasoning_effort')
             return chat_create_process(client, **kwargs)
         raise exc
@@ -93,7 +94,7 @@ def image_to_data_url(image):
     return f'data:image/png;base64,{encoded}'
 
 
-def query_vision_model(client, model, image, prompt):
+def query_vision_model(client, model, image, prompt, **kwargs):
     content, tokens = chat_create_with_reasoning(
         client,
         model=model,
@@ -104,6 +105,8 @@ def query_vision_model(client, model, image, prompt):
                 {'type': 'image_url', 'image_url': {'url': image_to_data_url(image)}},
             ],
         }],
+        level='none',
+        **kwargs,
     )
     return content, tokens
 
@@ -286,20 +289,26 @@ def enrich_formulas(doc, client, model):
             continue
         try:
             logger.debug('Formula %d / %d', processed + 1, count)
-            latex, tokens = query_vision_model(client, model, image, FORMULA_PROMPT)
+            formula, tokens = query_vision_model(
+                client, model, image, FORMULA_PROMPT, max_tokens=2048)
             max_tokens = max(tokens, max_tokens)
         except Exception as error:
             msg = f'Formula enrichment failed: {error}'
             logger.warning(msg)
             count -= 1
             continue
-        latex = latex.strip()
-        if '```' in latex:
-            parts = latex.split('```')
-            if len(parts) > 1 and parts[1].split('\n', 1)[1].strip():
-                latex = parts[1].split('\n', 1)[1].strip()
-        latex = latex.strip().strip('$').strip()
-        item.text = latex
+        formula = formula.strip()
+        if '```' in formula:
+            parts = formula.split('```')
+            if parts[1].split('\n', 1)[1].strip():
+                formula = parts[1].split('\n', 1)[1].strip()
+        if '$$' in formula and len(formula.split('$$')[1]):
+            formula = formula.split('$$')[1]
+        elif '$' in formula and len(formula.split('$')[1]):
+            formula = formula.split('$')[1]
+        formula = f'\n$${formula}$$\n'
+        logger.debug(formula.strip())
+        item.text = formula
         processed += 1
     if processed:
         msg = f'Processed {processed} formulas'
@@ -322,7 +331,9 @@ def enrich_pictures(doc, client, model):
             continue
         try:
             logger.debug('Picture %d / %d', described + 1, count)
-            description, tokens = query_vision_model(client, model, image, PICTURE_PROMPT)
+            description, tokens = query_vision_model(
+                client, model, image, PICTURE_PROMPT, max_tokens=16384)
+            logger.debug(description)
             max_tokens = max(tokens, max_tokens)
         except Exception as error:
             msg = f'Picture description failed: {error}'
@@ -530,10 +541,19 @@ def main():
         help='API key sent to the endpoint.  Default %(default)s.')
     parser.add_argument(
         '--model', '-m', default='qwen2.5vl:7b',
-        help='Vision model identifier.  Default %(default)s.')
+        help='Vision model identifier.  Default %(default)s.  A smaller '
+        'context than the default is fine, for instance, one model could '
+        'be\nqwen2.5vl-pdf.Modelfile\n```Modelfile\nFROM qwen2.5vl:7b\n'
+        'PARAMETER num_ctx 12288\n```\n, ingested with `ollama create '
+        'qwen2.5vl:7b-pdf -f qwen2.5vl-pdf.Modelfile`.')
     parser.add_argument(
         '--processing-model', '-p', dest='processing_model', default='',
-        help='Text-only LLM for OCR cleanup/translation (uses --model if empty).')
+        help='Text-only LLM for OCR cleanup/translation (uses --model if '
+        'empty).  A smaller context than default is fine, for instances, one '
+        'model could be\nqwen3.5-pdf.Modelfile\n```\nFROM qwen3.5:9b\n'
+        'PARAMETER num_ctx 32768\nPARAMETER temperature 0.25\nPARAMETER '
+        'repeat_penalty 1.5\n```\n, ingested with `ollama create '
+        'qwen3.5:9b-pdf -f qwen3.5-pdf.Modelfile`.')
     parser.add_argument(
         '--process', choices=['none', 'ocr', 'translate', 'all'], default='all',
         help='Apply text processing: none=skip, ocr=fair copy only, '
