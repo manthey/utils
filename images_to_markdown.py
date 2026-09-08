@@ -104,7 +104,7 @@ def describe_image(
 ) -> str:
     import openai
 
-    client = openai.OpenAI(base_url=f'{url}/v1', api_key='ollama', timeout=300)
+    client = openai.OpenAI(base_url=f'{url}/v1', api_key='ollama', timeout=300, max_retries=10)
     messages = [{
         'role': 'system',
         'content': [{'type': 'text', 'text': system}],

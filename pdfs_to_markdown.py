@@ -57,19 +57,33 @@ TRANSLATE_PROMPT = (
     'headers, image/figure markers, tables, and code blocks exactly as they '
     'are. Output only the translated text without explanations.'
 )
-# Unique marker for joining processed chunks back together.
+
+
+def chat_create_process(client, **kwargs):
+    stream = client.chat.completions.create(**kwargs)
+    result = []
+    usage = 0
+    for chunk in stream:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta and delta.content:
+            result.append(delta.content)
+        if chunk.usage is not None:
+            usage += chunk.usage.total_tokens
+    return ''.join(result), usage
 
 
 def chat_create_with_reasoning(client, **kwargs):
     """Create a chat completion, trying 'reasoning_effort=low' first."""
+    kwargs = kwargs.copy()
+    kwargs['stream'] = True
     kwargs['reasoning_effort'] = 'low'
     try:
-        return client.chat.completions.create(**kwargs)
+        return chat_create_process(client, **kwargs)
     except Exception as exc:
         # If reasoning effort is unsupported, retry without it
         if 'reasoning_effort' in str(exc).lower():
             kwargs.pop('reasoning_effort')
-            return client.chat.completions.create(**kwargs)
+            return chat_create_process(client, **kwargs)
         raise exc
 
 
@@ -82,7 +96,7 @@ def image_to_data_url(image):
 
 
 def query_vision_model(client, model, image, prompt):
-    response = chat_create_with_reasoning(
+    content, tokens = chat_create_with_reasoning(
         client,
         model=model,
         messages=[{
@@ -93,20 +107,16 @@ def query_vision_model(client, model, image, prompt):
             ],
         }],
     )
-    content = response.choices[0].message.content.strip()
-    tokens = response.usage.total_tokens if response.usage else 0
     return content, tokens
 
 
 def query_llm(client, model, prompt):
     """Query an LLM (text-only) and return its text response."""
-    response = chat_create_with_reasoning(
+    content, tokens = chat_create_with_reasoning(
         client,
         model=model,
         messages=[{'role': 'user', 'content': prompt}],
     )
-    content = response.choices[0].message.content.strip()
-    tokens = response.usage.total_tokens if response.usage else 0
     return content, tokens
 
 
@@ -441,7 +451,7 @@ def process_directory(args):  # noqa
     converter = None
     if not args.offload:
         converter = get_converter(args)
-    client = OpenAI(base_url=args.url.rstrip('/') + '/v1', api_key=args.api_key)
+    client = OpenAI(base_url=args.url.rstrip('/') + '/v1', api_key=args.api_key, max_retries=10)
     suffix = f'.{args.suffix.lstrip(".")}'
     for input_path in args.inputs:
         target = Path(input_path)

@@ -35,7 +35,7 @@ def describe_sequence(
 ) -> tuple[str, int]:
     import openai
 
-    client = openai.OpenAI(base_url=f'{url}/v1', api_key=api_key, timeout=300)
+    client = openai.OpenAI(base_url=f'{url}/v1', api_key=api_key, timeout=300, max_retries=10)
     content: list[dict[str, Any]] = []
     if overview:
         content.append({'type': 'text', 'text': f'Overall video context:\n{overview}'})

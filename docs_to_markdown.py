@@ -112,7 +112,7 @@ def process_file(client, filepath: Path, model: str, args):
 def process_directory(args):  # noqa
     from openai import OpenAI
 
-    client = OpenAI(base_url=args.url.rstrip('/') + '/v1', api_key=args.api_key)
+    client = OpenAI(base_url=args.url.rstrip('/') + '/v1', api_key=args.api_key, max_retries=10)
     suffix = f'.{args.suffix.lstrip(".")}'
     for input_path in args.inputs:
         target = Path(input_path)
