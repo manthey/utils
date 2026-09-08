@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from pathlib import Path
 
 import yaml
 
@@ -186,12 +187,10 @@ def main():  # noqa
         '--mount', action='append', default=[],
         help='Mount a folder into the docker.  Recommended format is local:inside:ro')
     parser.add_argument(
-        '--skip',
-        action='append',
-        dest='skips',
-        help='Files or folders to exclude from the copy. '
-             'Use commas for multiple patterns in one --skip (e.g., ".venv,*.pyc"). '
-             'Repeat --skip for separate groups.')
+        '--skip', action='append', dest='skips',
+        help='Files or folders to exclude from the copy. Use commas for '
+        'multiple patterns in one --skip (e.g., ".venv,*.pyc") or repeat '
+        '--skip.')
     parser.add_argument(
         '--config',
         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent_docker.yaml'),
@@ -265,13 +264,17 @@ def main():  # noqa
 
         def tar_exclusion_filter(tarinfo):
             basename = os.path.basename(tarinfo.name)
+            subparts = Path(tarinfo.name).parts[1:]
             for pat in skip_patterns:
                 if fnmatch.fnmatch(basename, pat):
+                    return None
+                if subparts[:len(Path(pat).parts)] == Path(pat).parts:
                     return None
                 parts = tarinfo.name.split('/')
                 if any(fnmatch.fnmatch(part, pat) for part in parts):
                     return None
             return tarinfo
+
         with tempfile.SpooledTemporaryFile() as fp:
             with tarfile.open(fileobj=fp, mode='w') as tf:
                 tf.add(os.path.join('..', current_dir), filter=tar_exclusion_filter,
