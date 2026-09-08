@@ -215,21 +215,24 @@ RUN chmod a+x /home/ubuntu/.local/bin/mswea.sh && \
     mswea.sh x x --help
 
 RUN mkdir -p /home/ubuntu/.pi/agent && \
-    mkdir -p /home/ubuntu/.pi/extensions && \
+    mkdir -p /home/ubuntu/.pi/agent/extensions && \
     npm install -g @earendil-works/pi-coding-agent
 
-RUN cat <<'EOF' > /home/ubuntu/.pi/agent/global-guidelines.js
+RUN cat <<'EOF' > /home/ubuntu/.pi/agent/extensions/global-guidelines.js
 export default function addGuidelines(pi) {
+  const datestr = new Date().toISOString().slice(0, 10);
   pi.on("before_agent_start", async (event) => {
     const customRule = "\n\n## Global Guidelines:\n" +
       "- Never use emojis, slang, or metaphors.\n" +
       "- Never claim code is verified unless you have actually run it.\n" +
       "- Always use up-to-date versions (e.g., python 3.10-3.14) when possible.\n" +
-      "- If you are in a repo with a .pre-commit-config.yaml, pre-commit must be run and pass on all generated or altered code. You may not alter hooks or ignore rules without first getting approval.\n"
-      "- When modifying existing code, prefer small changes to major refactors unless otherwise instructed.\n"
+      "- If you are in a repo with a .pre-commit-config.yaml, pre-commit must be run and pass on all generated or altered code. You may not alter hooks or ignore rules without first getting approval.\n" +
+      "- When modifying existing code, prefer small changes to major refactors unless otherwise instructed.\n" +
+      "- The current date is " + datestr + ". Treat this as authoritative runtime context.\n" +
+      "- Your training data may be outdated. Do not use the apparent absence of a model, package, library, API, or feature from your training data as evidence that it does not exist.\n" +
       "- If you share any links, they must be verified as active and not returning error codes.";
     if (!event.systemPrompt) return event;
-      return { ...event, systemPrompt: event.systemPrompt + customRule };
+    return { ...event, systemPrompt: event.systemPrompt + customRule };
     });
 }
 EOF
@@ -246,10 +249,7 @@ RUN cat <<'EOF' > /home/ubuntu/.pi/agent/settings.json
   "httpIdleTimeoutMs": 0,
   "outputPad": 0,
   "steeringMode": "all",
-  "quietStartup": true,
-  "extensions": [
-    "~/.pi/agent/global-guidelines.js"
-  ]
+  "quietStartup": true
 }
 EOF
 
