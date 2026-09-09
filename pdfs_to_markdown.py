@@ -70,8 +70,8 @@ def chat_create_process(client, **kwargs):
     return ''.join(result), usage
 
 
-def chat_create_with_reasoning(client, level='low', **kwargs):
-    """Create a chat completion, trying 'reasoning_effort=low' first."""
+def chat_create_with_reasoning(client, level='none', **kwargs):
+    """Create a chat completion, trying with a reasoning_effort first."""
     kwargs = kwargs.copy()
     kwargs['stream'] = True
     kwargs['stream_options'] = {'include_usage': True}
@@ -302,11 +302,10 @@ def enrich_formulas(doc, client, model):
             parts = formula.split('```')
             if parts[1].split('\n', 1)[1].strip():
                 formula = parts[1].split('\n', 1)[1].strip()
-        if '$$' in formula and len(formula.split('$$')[1]):
-            formula = formula.split('$$')[1]
-        elif '$' in formula and len(formula.split('$')[1]):
-            formula = formula.split('$')[1]
-        formula = f'\n$${formula}$$\n'
+        while '$$' in formula and len(formula.split('$$')[1]):
+            formula = formula.split('$$')[1].strip()
+        while '$' in formula and len(formula.split('$')[1]):
+            formula = formula.split('$')[1].strip()
         logger.debug(formula.strip())
         item.text = formula
         processed += 1
