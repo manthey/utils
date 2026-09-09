@@ -1016,6 +1016,33 @@ def test_geospatial_analysis(
     })
 
 
+@register_test(
+    'equation_analysis', 'Equation image to latex',
+    category='vision', version=1)
+def test_equation_analysis(
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
+) -> TestResult:
+    img = base64.b64encode(open(os.path.join(os.path.dirname(
+        __file__), 'model_card_test_image4.png'), 'rb').read()).decode('utf-8')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [{
+            'role': 'user',
+            'content': [{
+                'type': 'text',
+                'text': 'Transcribe the mathematical formula in this image '
+                'using standard LaTeX notation. Wrap the entire equation '
+                'strictly inside $$ ... $$. Do not include any surrounding '
+                'text, explanations, or code blocks. Return ONLY the string '
+                'content between the dollar signs.',
+            }, {
+                'type': 'image_url',
+                'image_url': {'url': f'data:image/jpeg;base64,{img}'},
+            }],
+        }]},
+        'present': [r'P\^\{23\}', r'Delta', r'-1', r'\(t\)', r'f_', r'\$\$'],
+    })
+
+
 @register_test('tool_use', 'Tool use')
 def test_tool_use(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
@@ -1604,7 +1631,6 @@ def model_rank(model, summary, category=None):
         if sc == 1.0:
             passed += 1
             ptime += stime[-1]
-
     return (-passed, ptime, -sum(sval), sum(stime))
 
 
