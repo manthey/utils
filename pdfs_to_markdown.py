@@ -300,6 +300,7 @@ def crop_item_image(doc, item):
 def enrich_formulas(doc, client, model):
     from docling_core.types.doc.labels import DocItemLabel
 
+    formulas = {}
     max_tokens = 0
     processed = 0
     count = len([item for item, _ in doc.iterate_items()
@@ -333,19 +334,22 @@ def enrich_formulas(doc, client, model):
         while '$' in formula and len(formula.split('$')[1]):
             formula = formula.split('$')[1].strip()
         logger.debug(formula.strip())
-        item.text = formula
+        item.text = f'formula_{processed}'
+        formulas[processed] = formula
         processed += 1
     if processed:
         msg = f'Processed {processed} formulas'
         logger.info(msg)
-    return max_tokens
+    return formulas, max_tokens
 
 
 def enrich_pictures(doc, client, model):
     from docling_core.types.doc.document import (DescriptionMetaField,
                                                  PictureItem, PictureMeta)
+
+    pictures = {}
     max_tokens = 0
-    described = 0
+    processed = 0
     count = len([item for item, _ in doc.iterate_items() if isinstance(item, PictureItem)])
     for item, _ in doc.iterate_items():
         if not isinstance(item, PictureItem):
@@ -355,7 +359,7 @@ def enrich_pictures(doc, client, model):
             count -= 1
             continue
         try:
-            logger.debug('Picture %d / %d', described + 1, count)
+            logger.debug('Picture %d / %d', processed + 1, count)
             description, tokens = query_vision_model(
                 client, model, image, PICTURE_PROMPT, max_tokens=16384)
             logger.debug(description)
@@ -366,12 +370,13 @@ def enrich_pictures(doc, client, model):
             count -= 1
             continue
         item.meta = PictureMeta(description=DescriptionMetaField(
-            text=description, created_by=model))
-        described += 1
-    if described:
-        msg = f'Described {described} pictures'
+            text=f'<!-- picture_{processed} -->', created_by=model))
+        pictures[processed] = description
+        processed += 1
+    if processed:
+        msg = f'Processed {processed} pictures'
         logger.info(msg)
-    return max_tokens
+    return pictures, max_tokens
 
 
 def get_converter(args):
@@ -430,22 +435,26 @@ def process_file(converter, client, proc_client, filepath, model, args):
                 torch.cuda.empty_cache()
             except Exception:
                 pass
+    pictures = {}
+    formulas = {}
     try:
-        tokens = enrich_pictures(doc, client, model)
-        tokens = max(tokens, enrich_formulas(doc, client, model))
+        pictures, tokens = enrich_pictures(doc, client, model)
+        formulas, ftokens = enrich_formulas(doc, client, model)
+        tokens = max(tokens, ftokens)
         logger.debug('Max tokens in any vision request: %d', tokens)
     finally:
         result.input._backend.unload()
         if offload:
             offload_ollama(args.url)
     markdown = doc.export_to_markdown()
+    markdown = '\n\n'.join([p.strip() for p in markdown.split('<!-- image -->')])
     # Apply OCR text processing if requested or OCR was detected
     process_mode = getattr(args, 'process', 'none')
     proc_model = getattr(args, 'processing_model', '') or model
 
     ocr_used = is_ocr_used(result)  # Detect OCR from page confidences
     needs_process = process_mode != 'none' or ocr_used
-    final_output = markdown
+    output = markdown
 
     if needs_process:
         logger.info('OCR detected: %s; applying text processing '
@@ -457,7 +466,7 @@ def process_file(converter, client, proc_client, filepath, model, args):
             fair_copy_text, ocr_tok = process_ocr_text(proc_client, proc_model, markdown)
             total_tokens += ocr_tok
             logger.info('OCR fair copy complete (%d tokens)', ocr_tok)
-            final_output += '\n\n## FAIR COPY\n\n' + fair_copy_text
+            output += '\n\n## FAIR COPY\n\n' + fair_copy_text
             source_text = fair_copy_text
         # Detect source language first (needed for translation)
         src_lang = detect_language(source_text)
@@ -467,8 +476,20 @@ def process_file(converter, client, proc_client, filepath, model, args):
                 proc_client, proc_model, source_text, src_lang=src_lang)
             total_tokens += trans_tok
             logger.info('Translation complete (%d tokens)', trans_tok)
-            final_output += '\n\n## TRANSLATION\n\n' + translated_text
-    return final_output
+            output += '\n\n## TRANSLATION\n\n' + translated_text
+    for k in pictures:
+        template = f'<!-- picture_{k} -->'
+        if template not in output:
+            msg = f'Missing picture template {template}'
+            raise Exception(msg)
+        output = output.replace(template, f'IMAGE {k + 1}\n\n{pictures[k]}\n\nENDIMAGE {k + 1}\n')
+    for k in formulas:
+        template = f'$$formula_{k}$$'
+        if template not in output:
+            msg = 'Missing formula template {template}'
+            raise Exception(msg)
+        output = output.replace(template, f'$${formulas[k]}$$')
+    return output
 
 
 def sort_file_list(file_list, sort):
