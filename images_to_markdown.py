@@ -185,7 +185,7 @@ def describe_file(url: str, specs: list[dict], filepath: Path, raise_errors: boo
 
 def process_directory(  # noqa
     inputs: str, recurse: bool, out: str | None, suffix: str,
-    specs: list[dict], url: str, overwrite: bool, dry_run: bool,
+    specs: list[dict], url: str, deep: bool, overwrite: bool, dry_run: bool,
     raise_errors: bool, list_files: bool,
 ) -> None:
     suffix = f'.{suffix.lstrip(".")}'
@@ -205,7 +205,11 @@ def process_directory(  # noqa
             md_path = filepath.with_suffix(suffix)
             if out:
                 if os.path.isdir(out):
-                    md_path = Path(out) / md_path.name
+                    outdir = Path(out)
+                    if deep:
+                        outdir /= filepath.parent.relative_to(Path(input_path))
+                        outdir.mkdir(parents=True, exist_ok=True)
+                    md_path = outdir / md_path.name
                 else:
                     md_path = Path(out)
             if (not overwrite and md_path.exists() and
@@ -264,6 +268,11 @@ def main() -> None:
         'single path or non-existent path, write the first description to '
         'this file and then stop.')
     parser.add_argument(
+        '--deep', action='store_true',
+        help='If out is a directory, reconstruct source-path relative '
+        'directories to store outputs. Multiple sources will all be relative '
+        'to the out directory.')
+    parser.add_argument(
         '--model', '-m', default=None, action='append',
         help='Ollama vision model name; overrides models in the yaml spec')
     parser.add_argument(
@@ -306,7 +315,7 @@ def main() -> None:
         sys.exit(0)
     process_directory(
         args.inputs, args.recurse, args.out, args.suffix, specs, args.url,
-        args.overwrite, args.dry_run, args.raise_errors, args.list)
+        args.deep, args.overwrite, args.dry_run, args.raise_errors, args.list)
 
 
 if __name__ == '__main__':

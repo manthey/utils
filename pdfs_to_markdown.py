@@ -338,7 +338,7 @@ def enrich_formulas(doc, client, model):
         formulas[processed] = formula
         processed += 1
     if processed:
-        msg = f'Processed {processed} formulas'
+        msg = f'Processed {processed} formula{"" if len(processed) == 1 else "s"}'
         logger.info(msg)
     return formulas, max_tokens
 
@@ -374,7 +374,7 @@ def enrich_pictures(doc, client, model):
         pictures[processed] = description
         processed += 1
     if processed:
-        msg = f'Processed {processed} pictures'
+        msg = f'Processed {processed} picture{"" if len(processed) == 1 else "s"}'
         logger.info(msg)
     return pictures, max_tokens
 
@@ -536,7 +536,11 @@ def process_directory(args):  # noqa
             md_path = filepath.with_suffix(suffix)
             if args.out:
                 if os.path.isdir(args.out):
-                    md_path = Path(args.out) / md_path.name
+                    outdir = Path(args.out)
+                    if args.deep:
+                        outdir /= filepath.parent.relative_to(Path(input_path))
+                        outdir.mkdir(parents=True, exist_ok=True)
+                    md_path = outdir / md_path.name
                 else:
                     md_path = Path(args.out)
             if (not args.overwrite and md_path.exists() and
@@ -584,6 +588,11 @@ def main():
         help='If an existing directory, the location to store outputs.  If a '
         'single path or non-existent path, write the first description to '
         'this file and then stop.')
+    parser.add_argument(
+        '--deep', action='store_true',
+        help='If out is a directory, reconstruct source-path relative '
+        'directories to store outputs. Multiple sources will all be relative '
+        'to the out directory.')
     parser.add_argument(
         '--url', default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
         help='Ollama base URL.  Default %(default)s.')
