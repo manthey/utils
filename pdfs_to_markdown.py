@@ -338,7 +338,7 @@ def enrich_formulas(doc, client, model):
         formulas[processed] = formula
         processed += 1
     if processed:
-        msg = f'Processed {processed} formula{"" if len(processed) == 1 else "s"}'
+        msg = f'Processed {processed} formula{"" if processed == 1 else "s"}'
         logger.info(msg)
     return formulas, max_tokens
 
@@ -374,7 +374,7 @@ def enrich_pictures(doc, client, model):
         pictures[processed] = description
         processed += 1
     if processed:
-        msg = f'Processed {processed} picture{"" if len(processed) == 1 else "s"}'
+        msg = f'Processed {processed} picture{"" if processed == 1 else "s"}'
         logger.info(msg)
     return pictures, max_tokens
 
@@ -418,6 +418,14 @@ def offload_ollama(url):
             pass
 
 
+def clean_blanks(text):
+    """
+    Trim trailing whitespace on any line; maximum newline sequence of 2.
+    """
+    return re.sub(r'\n{3,}', '\n\n', re.sub(r'[ \t]+$', '', text.replace(
+        '\r\n', '\n').replace('\r', '\n'), flags=re.M))
+
+
 def process_file(converter, client, proc_client, filepath, model, args):
     offload = converter is None
     if converter is None:
@@ -448,6 +456,7 @@ def process_file(converter, client, proc_client, filepath, model, args):
             offload_ollama(args.url)
     markdown = doc.export_to_markdown()
     markdown = '\n\n'.join([p.strip() for p in markdown.split('<!-- image -->')])
+    markdown = clean_blanks(markdown)
     # Apply OCR text processing if requested or OCR was detected
     process_mode = getattr(args, 'process', 'none')
     proc_model = getattr(args, 'processing_model', '') or model
@@ -489,6 +498,7 @@ def process_file(converter, client, proc_client, filepath, model, args):
             msg = 'Missing formula template {template}'
             raise Exception(msg)
         output = output.replace(template, f'$${formulas[k]}$$')
+    output = clean_blanks(output)
     return output
 
 
