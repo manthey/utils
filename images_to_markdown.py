@@ -200,7 +200,7 @@ def process_directory(  # noqa
         for filepath in file_list:
             if not filepath.is_file():
                 continue
-            if str(filepath).endswith(('.pdf', '.docx', '.md')):
+            if str(filepath).lower().endswith(('.pdf', '.docx', '.md')):
                 continue
             md_path = filepath.with_suffix(suffix)
             if out:

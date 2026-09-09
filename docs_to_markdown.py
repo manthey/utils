@@ -125,7 +125,7 @@ def process_directory(args):  # noqa
         for filepath in file_list:
             if not filepath.is_file():
                 continue
-            if not str(filepath).endswith((
+            if not str(filepath).lower().endswith((
                 '.docx', '.doc', '.rtf', '.odt', '.html',
             )) and filepath not in args.inputs:
                 continue

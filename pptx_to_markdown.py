@@ -144,7 +144,8 @@ def process_directory(args):  # noqa
         for filepath in file_list:
             if not filepath.is_file():
                 continue
-            if not str(filepath).endswith(('.pptx', '.ppt')) and filepath not in args.inputs:
+            if not str(filepath).lower().endswith(
+                    ('.pptx', '.ppt')) and filepath not in args.inputs:
                 continue
             md_path = filepath.with_suffix(suffix)
             if args.out:

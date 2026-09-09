@@ -57,7 +57,7 @@ TRANSLATE_PROMPT = (
 )
 
 
-def chat_create_process(client, **kwargs):
+def chat_create_process(client, stop_after=None, **kwargs):
     stream = client.chat.completions.create(**kwargs)
     result = []
     usage = 0
@@ -65,12 +65,17 @@ def chat_create_process(client, **kwargs):
         delta = chunk.choices[0].delta if chunk.choices else None
         if delta and delta.content:
             result.append(delta.content)
+            if '</think>' in result[-1]:
+                result[:-1] = []
+                result[-1] = result[-1].split('</think>')[-1]
+            if stop_after and len(''.join(result)) > stop_after:
+                break
         if chunk.usage is not None:
             usage += chunk.usage.total_tokens
     return ''.join(result), usage
 
 
-def chat_create_with_reasoning(client, level='none', **kwargs):
+def chat_create_with_reasoning(client, level='low', **kwargs):
     """Create a chat completion, trying with a reasoning_effort first."""
     kwargs = kwargs.copy()
     kwargs['stream'] = True
@@ -111,12 +116,13 @@ def query_vision_model(client, model, image, prompt, **kwargs):
     return content, tokens
 
 
-def query_llm(client, model, prompt):
+def query_llm(client, model, prompt, **kwargs):
     """Query an LLM (text-only) and return its text response."""
     content, tokens = chat_create_with_reasoning(
         client,
         model=model,
         messages=[{'role': 'user', 'content': prompt}],
+        **kwargs,
     )
     return content, tokens
 
@@ -222,15 +228,23 @@ def process_ocr_text(client, model, text):
     results, total_tokens = [], 0
     for i, chunk in enumerate(chunks):
         logger.info('OCR fair copy chunk %d / %d (%d)', i + 1, len(chunks), len(chunk))
-        try:
-            cleaned, tokens = query_llm(
-                client, model,
-                f'{FAIR_COPY_PROMPT}\n\n{chunk}')
-            total_tokens += tokens
-            results.append(cleaned)
-        except Exception as err:
-            logger.warning('OCR fair copy chunk %d failed: %s', i, err)
-            results.append(chunk)
+        result = None
+        lasterr = ''
+        minlen, maxlen = len(chunk) // 4, len(chunk) * 3 // 2
+        for retries in range(5, -1, -1):
+            try:
+                cleaned, tokens = query_llm(
+                    client, model, f'{FAIR_COPY_PROMPT}\n\n{chunk}', stop_after=maxlen + 1)
+                if retries and (len(cleaned) < minlen or len(cleaned) > maxlen):
+                    continue
+                total_tokens += tokens
+                result = cleaned
+                break
+            except Exception as err:
+                lasterr = err
+        if result is None:
+            logger.warning('OCR fair copy chunk %d failed: %s', i, lasterr)
+        results.append(result or chunk)
     return '\n'.join(results), total_tokens
 
 
@@ -241,15 +255,25 @@ def process_translation(client, model, text, src_lang=None):
     results, total_tokens = [], 0
     for i, chunk in enumerate(chunks):
         logger.info('Translation chunk %d / %d (%d)', i + 1, len(chunks), len(chunk))
-        try:
-            translated, tok = query_llm(
-                client, model,
-                f'{TRANSLATE_PROMPT}\n\nOriginal ({src_lang}):\n{chunk}')
-            total_tokens += tok
-            results.append(translated)
-        except Exception as err:
-            logger.warning('Translation chunk %d failed: %s', i, err)
-            results.append(chunk)
+        result = None
+        lasterr = ''
+        minlen, maxlen = len(chunk) // 4, len(chunk) * 2
+        for retries in range(5, -1, -1):
+            try:
+                translated, tokens = query_llm(
+                    client, model,
+                    f'{TRANSLATE_PROMPT}\n\nOriginal ({src_lang}):\n{chunk}',
+                    stop_after=maxlen + 1)
+                if retries and (len(translated) < minlen or len(translated) > maxlen):
+                    continue
+                total_tokens += tokens
+                result = translated
+                break
+            except Exception as err:
+                lasterr = err
+        if result is None:
+            logger.warning('Translation chunk %d failed: %s', i, lasterr)
+        results.append(result or chunk)
     return '\n'.join(results), total_tokens
 
 
@@ -300,8 +324,10 @@ def enrich_formulas(doc, client, model):
         formula = formula.strip()
         if '```' in formula:
             parts = formula.split('```')
-            if parts[1].split('\n', 1)[1].strip():
+            if '\n' in parts[1] and parts[1].split('\n', 1)[1].strip():
                 formula = parts[1].split('\n', 1)[1].strip()
+            elif parts[1].strip():
+                formula = parts[1].strip()
         while '$$' in formula and len(formula.split('$$')[1]):
             formula = formula.split('$$')[1].strip()
         while '$' in formula and len(formula.split('$')[1]):
@@ -387,7 +413,7 @@ def offload_ollama(url):
             pass
 
 
-def process_file(converter, client, filepath, model, args):
+def process_file(converter, client, proc_client, filepath, model, args):
     offload = converter is None
     if converter is None:
         offload_ollama(args.url)
@@ -428,7 +454,7 @@ def process_file(converter, client, filepath, model, args):
         source_text = markdown
         total_tokens = 0
         if process_mode in ('ocr', 'all') and ocr_used:
-            fair_copy_text, ocr_tok = process_ocr_text(client, proc_model, markdown)
+            fair_copy_text, ocr_tok = process_ocr_text(proc_client, proc_model, markdown)
             total_tokens += ocr_tok
             logger.info('OCR fair copy complete (%d tokens)', ocr_tok)
             final_output += '\n\n## FAIR COPY\n\n' + fair_copy_text
@@ -438,7 +464,7 @@ def process_file(converter, client, filepath, model, args):
         logger.debug('Detected source language: %s', src_lang)
         if process_mode in ('translate', 'all') and src_lang != 'English':
             translated_text, trans_tok = process_translation(
-                client, proc_model, source_text, src_lang=src_lang)
+                proc_client, proc_model, source_text, src_lang=src_lang)
             total_tokens += trans_tok
             logger.info('Translation complete (%d tokens)', trans_tok)
             final_output += '\n\n## TRANSLATION\n\n' + translated_text
@@ -466,6 +492,10 @@ def process_directory(args):  # noqa
     if not args.offload:
         converter = get_converter(args)
     client = OpenAI(base_url=args.url.rstrip('/') + '/v1', api_key=args.api_key, max_retries=10)
+    proc_client = client
+    if args.processing_url:
+        proc_client = OpenAI(
+            base_url=args.processing_url.rstrip('/') + '/v1', api_key=args.api_key, max_retries=10)
     suffix = f'.{args.suffix.lstrip(".")}'
     for input_path in args.inputs:
         target = Path(input_path)
@@ -480,7 +510,7 @@ def process_directory(args):  # noqa
         for filepath in file_list:
             if not filepath.is_file():
                 continue
-            if not str(filepath).endswith('.pdf') and filepath not in args.inputs:
+            if not str(filepath).lower().endswith('.pdf') and filepath not in args.inputs:
                 continue
             md_path = filepath.with_suffix(suffix)
             if args.out:
@@ -498,7 +528,8 @@ def process_directory(args):  # noqa
                 continue
             try:
                 print(filepath)
-                description = process_file(converter, client, filepath, args.model, args)
+                description = process_file(
+                    converter, client, proc_client, filepath, args.model, args)
                 logger.info(description)
                 if not args.dry_run:
                     md_path.parent.mkdir(parents=True, exist_ok=True)
@@ -549,10 +580,14 @@ def main():
         '--processing-model', '-p', dest='processing_model', default='',
         help='Text-only LLM for OCR cleanup/translation (uses --model if '
         'empty).  A smaller context than default is fine, for instances, one '
-        'model could be\nqwen3.5-pdf.Modelfile\n```\nFROM qwen3.5:9b\n'
-        'PARAMETER num_ctx 32768\nPARAMETER temperature 0.25\nPARAMETER '
-        'repeat_penalty 1.5\n```\n, ingested with `ollama create '
-        'qwen3.5:9b-pdf -f qwen3.5-pdf.Modelfile`.')
+        'model could be\nqwen3.5-pdf.Modelfile\n```Modelfile\nFROM '
+        'qwen3.5:9b\nPARAMETER num_ctx 32768\nPARAMETER temperature 0.25\n'
+        'PARAMETER repeat_penalty 1.5\n```\n, ingested with `ollama create '
+        'qwen3.5:9b-pdf -f qwen3.5-pdf.Modelfile`. Anecdotally, a full model '
+        'is needed to be reliable.')
+    parser.add_argument(
+        '--processing-url', '--process-url',
+        help='Ollama URL for processing.  Defaults to --url value.')
     parser.add_argument(
         '--process', choices=['none', 'ocr', 'translate', 'all'], default='all',
         help='Apply text processing: none=skip, ocr=fair copy only, '
