@@ -90,7 +90,7 @@ def summary_from_ids(msg_ids, msg_id_to_rec):
     usage_sum = {'input': 0, 'output': 0, 'max': 0}
     data = []
 
-    for mid in msg_ids:
+    for mid in sorted(msg_ids, key=lambda m: (msg_id_to_rec[m].get('timestamp', ''), str(m))):
         rec = msg_id_to_rec.get(mid)
         if not rec or rec.get('type') != 'message':
             continue
