@@ -99,12 +99,12 @@ def prepare_image(filepath: Path, max_dim: int) -> tuple[str, int, int]:
 
 
 def describe_image(
-    url: str, model: str, b64_image: str, system: str, user: str,
+    url: str, api_key: str, model: str, b64_image: str, system: str, user: str,
     options: dict[str, Any] | None = None,
 ) -> str:
     import openai
 
-    client = openai.OpenAI(base_url=f'{url}/v1', api_key='ollama', timeout=300, max_retries=10)
+    client = openai.OpenAI(base_url=f'{url}/v1', api_key=api_key, timeout=300, max_retries=10)
     messages = [{
         'role': 'system',
         'content': [{'type': 'text', 'text': system}],
@@ -152,7 +152,8 @@ def load_specs(
     }]
 
 
-def describe_file(url: str, specs: list[dict], filepath: Path, raise_errors: bool) -> str:
+def describe_file(url: str, api_key: str, specs: list[dict], filepath: Path,
+                  raise_errors: bool) -> str:
     logger.info('Processing %s', url)
     total = sum(len(spec['models']) for spec in specs)
     cache: dict[int, tuple[str, int, int]] = {}
@@ -170,7 +171,7 @@ def describe_file(url: str, specs: list[dict], filepath: Path, raise_errors: boo
             logger.info(' Running %s', model)
             try:
                 response = describe_image(
-                    url, model, b64_image, spec['system'], user, options)
+                    url, api_key, model, b64_image, spec['system'], user, options)
             except Exception:
                 if raise_errors:
                     raise
@@ -185,8 +186,8 @@ def describe_file(url: str, specs: list[dict], filepath: Path, raise_errors: boo
 
 def process_directory(  # noqa
     inputs: str, recurse: bool, out: str | None, suffix: str,
-    specs: list[dict], url: str, deep: bool, overwrite: bool, dry_run: bool,
-    raise_errors: bool, list_files: bool,
+    specs: list[dict], url: str, api_key: str, deep: bool, overwrite: bool,
+    dry_run: bool, raise_errors: bool, list_files: bool,
 ) -> None:
     suffix = f'.{suffix.lstrip(".")}'
     for input_path in inputs:
@@ -221,7 +222,7 @@ def process_directory(  # noqa
                 print(f'{filepath} -> {md_path}')
                 continue
             try:
-                description = describe_file(url, specs, filepath, raise_errors)
+                description = describe_file(url, api_key, specs, filepath, raise_errors)
                 logger.info(description)
                 if not dry_run:
                     md_path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,6 +283,9 @@ def main() -> None:
         '--url', default=os.environ.get('OLLAMA_HOST', 'http://localhost:11434'),
         help='Ollama base URL.  Default %(default)s.')
     parser.add_argument(
+        '--api-key', default=os.environ.get('OPENAI_API_KEY', 'ollama'),
+        help='API key sent to the endpoint.  Default %(default)s.')
+    parser.add_argument(
         '--overwrite', '-y', action='store_true',
         help='Overwrite existing companion markdown files')
     parser.add_argument(
@@ -315,7 +319,8 @@ def main() -> None:
         sys.exit(0)
     process_directory(
         args.inputs, args.recurse, args.out, args.suffix, specs, args.url,
-        args.deep, args.overwrite, args.dry_run, args.raise_errors, args.list)
+        args.api_key, args.deep, args.overwrite, args.dry_run,
+        args.raise_errors, args.list)
 
 
 if __name__ == '__main__':

@@ -208,7 +208,7 @@ def main():
         '--url', default=os.environ.get('OLLAMA_HOST', 'http://localhost:11434'),
         help='Ollama base URL.  Default %(default)s.')
     parser.add_argument(
-        '--api-key', default='ollama',
+        '--api-key', default=os.environ.get('OPENAI_API_KEY', 'ollama'),
         help='API key sent to the endpoint.  Default %(default)s.')
     parser.add_argument(
         '--model', '-m', default='qwen2.5vl:7b',
