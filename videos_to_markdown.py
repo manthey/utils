@@ -381,7 +381,7 @@ def main():
         'directories to store outputs. Multiple sources will all be relative '
         'to the out directory.')
     parser.add_argument(
-        '--url', default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
+        '--url', default=os.environ.get('OLLAMA_HOST', 'http://localhost:11434'),
         help='Ollama base URL. Default %(default)s.')
     parser.add_argument(
         '--api-key', default='ollama',

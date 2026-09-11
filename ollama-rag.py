@@ -1800,8 +1800,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     for sub in (serve, mcp):
         sub.add_argument(
             '--ollama-base-url', '--url',
-            default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
-            help='Ollama URL; default is http://localhost:11434',
+            default=os.environ.get('OLLAMA_HOST', 'http://localhost:11434'),
+            help='Ollama URL; default is %(default)s',
         )
         sub.add_argument(
             '--embed-url',

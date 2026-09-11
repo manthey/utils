@@ -402,6 +402,7 @@ def get_converter(args):
 
 
 def offload_ollama(url):
+    print('>>>>>>>>>>>>>>>>>>', offload_ollama)  # ##DWM::
     url = url.rstrip('/')
     resp = requests.get(f'{url}/api/ps')
     try:
@@ -604,7 +605,7 @@ def main():
         'directories to store outputs. Multiple sources will all be relative '
         'to the out directory.')
     parser.add_argument(
-        '--url', default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
+        '--url', default=os.environ.get('OLLAMA_HOST', 'http://localhost:11434'),
         help='Ollama base URL.  Default %(default)s.')
     parser.add_argument(
         '--api-key', default='ollama',
@@ -645,7 +646,9 @@ def main():
         '--offload', '-o', action='store_true',
         help='Offload torch models between pdfs.')
     parser.add_argument(
-        '--no-cuda', action='store_true', help='Avoid using cuda for OCR.')
+        '--no-cuda', action='store_true',
+        default=bool(os.environ.get('PDFS_TO_MARKDOWN_NO_CUDA')),
+        help='Avoid using cuda for OCR.')
     parser.add_argument(
         '--sort',
         help='Sort files before processing. "shortest" will sort by size.')
@@ -659,6 +662,17 @@ def main():
         '--verbose', '-v', action='count', default=0,
         help='Increase verbosity')
     args = parser.parse_args()
+    if os.environ.get('PDFS_TO_MARKDOWN_OFFLOAD'):
+        offload = os.environ.get('PDFS_TO_MARKDOWN_OFFLOAD').lower()
+        if offload == 'offload':
+            args.offload = True
+            args.no_cuda = False
+        elif offload in {'no-cuda', 'no_cuda', 'nocuda'}:
+            args.offload = False
+            args.no_cuda = True
+        else:
+            args.offload = False
+            args.no_cuda = False
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
     logger.addHandler(logging.StreamHandler(sys.stderr))
     logger.debug('Parsed arguments: %r', args)

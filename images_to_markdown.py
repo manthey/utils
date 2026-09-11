@@ -279,7 +279,7 @@ def main() -> None:
         '--size', '-s', type=int,
         help='Image size; overrides size in the yaml spec')
     parser.add_argument(
-        '--url', default=os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434'),
+        '--url', default=os.environ.get('OLLAMA_HOST', 'http://localhost:11434'),
         help='Ollama base URL.  Default %(default)s.')
     parser.add_argument(
         '--overwrite', '-y', action='store_true',
