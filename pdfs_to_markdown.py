@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import requests
@@ -222,13 +223,14 @@ def detect_language(text):
     return lang.name.capitalize()
 
 
-def process_ocr_text(client, model, text):
+def process_ocr_text(client, model, text, parallel=1):
     """Apply fair copy processing to clean up OCR text."""
     chunks = chunk_text(text)
-    results, total_tokens = [], 0
-    for i, chunk in enumerate(chunks):
+    total_tokens = 0
+
+    def process_chunk(i_chunk):
+        i, chunk = i_chunk
         logger.info('OCR fair copy chunk %d / %d (%d)', i + 1, len(chunks), len(chunk))
-        result = None
         lasterr = ''
         minlen, maxlen = len(chunk) // 4, len(chunk) * 3 // 2
         for retries in range(5, -1, -1):
@@ -237,25 +239,33 @@ def process_ocr_text(client, model, text):
                     client, model, f'{FAIR_COPY_PROMPT}\n\n{chunk}', stop_after=maxlen + 1)
                 if retries and (len(cleaned) < minlen or len(cleaned) > maxlen):
                     continue
-                total_tokens += tokens
-                result = cleaned
-                break
+                return i, cleaned, tokens, None
             except Exception as err:
                 lasterr = err
-        if result is None:
-            logger.warning('OCR fair copy chunk %d failed: %s', i, lasterr)
-        results.append(result or chunk)
+        logger.warning('OCR fair copy chunk %d failed: %s', i, lasterr)
+        return i, chunk, 0, lasterr
+
+    indexed_chunks = list(enumerate(chunks))
+    results = [None] * len(indexed_chunks)
+    with ThreadPoolExecutor(max_workers=min(1, parallel)) as executor:
+        futures = {executor.submit(process_chunk, i_chunk): i_chunk
+                   for i_chunk in indexed_chunks}
+        for future in as_completed(futures):
+            result_i, result_text, tokens, error = future.result()
+            results[result_i] = result_text
+            total_tokens += tokens
     return '\n'.join(results), total_tokens
 
 
-def process_translation(client, model, text, src_lang=None):
+def process_translation(client, model, text, src_lang=None, parallel=1):
     if src_lang.lower() == 'english':
         return text, 0
     chunks = chunk_text(text)
-    results, total_tokens = [], 0
-    for i, chunk in enumerate(chunks):
+    total_tokens = 0
+
+    def translate_chunk(i_chunk):
+        i, chunk = i_chunk
         logger.info('Translation chunk %d / %d (%d)', i + 1, len(chunks), len(chunk))
-        result = None
         lasterr = ''
         minlen, maxlen = len(chunk) // 4, len(chunk) * 2
         for retries in range(5, -1, -1):
@@ -266,14 +276,21 @@ def process_translation(client, model, text, src_lang=None):
                     stop_after=maxlen + 1)
                 if retries and (len(translated) < minlen or len(translated) > maxlen):
                     continue
-                total_tokens += tokens
-                result = translated
-                break
+                return i, translated, tokens, None
             except Exception as err:
                 lasterr = err
-        if result is None:
-            logger.warning('Translation chunk %d failed: %s', i, lasterr)
-        results.append(result or chunk)
+        logger.warning('Translation chunk %d failed: %s', i, lasterr)
+        return i, chunk, 0, lasterr
+
+    indexed_chunks = list(enumerate(chunks))
+    results = [None] * len(indexed_chunks)
+    with ThreadPoolExecutor(max_workers=min(1, parallel)) as executor:
+        futures = {executor.submit(translate_chunk, i_chunk): i_chunk
+                   for i_chunk in indexed_chunks}
+        for future in as_completed(futures):
+            result_i, result_text, tokens, error = future.result()
+            results[result_i] = result_text
+            total_tokens += tokens
     return '\n'.join(results), total_tokens
 
 
@@ -297,84 +314,105 @@ def crop_item_image(doc, item):
     return page_image.crop((left, top, right, bottom))
 
 
-def enrich_formulas(doc, client, model):
+def enrich_formulas(doc, client, model, parallel=1):  # noqa
     from docling_core.types.doc.labels import DocItemLabel
 
+    formula_items = []
+    for item, _ in doc.iterate_items():
+        if getattr(item, 'label', None) == DocItemLabel.FORMULA:
+            image = crop_item_image(doc, item)
+            if image is not None:
+                formula_items.append((item, image))
+    count = len(formula_items)
+    if count == 0:
+        return {}, 0
     formulas = {}
     max_tokens = 0
-    processed = 0
-    count = len([item for item, _ in doc.iterate_items()
-                 if getattr(item, 'label', None) == DocItemLabel.FORMULA])
-    for item, _ in doc.iterate_items():
-        if getattr(item, 'label', None) != DocItemLabel.FORMULA:
-            continue
-        image = crop_item_image(doc, item)
-        if image is None:
-            count -= 1
-            continue
+
+    def process_formula(idx_item):
+        idx, (item, image) = idx_item
         try:
-            logger.debug('Formula %d / %d', processed + 1, count)
+            logger.debug('Formula %d / %d', idx + 1, count)
             formula, tokens = query_vision_model(
                 client, model, image, FORMULA_PROMPT, max_tokens=2048)
-            max_tokens = max(tokens, max_tokens)
+            formula = formula.strip()
+            if '```' in formula:
+                parts = formula.split('```')
+                if '\n' in parts[1] and parts[1].split('\n', 1)[1].strip():
+                    formula = parts[1].split('\n', 1)[1].strip()
+                elif parts[1].strip():
+                    formula = parts[1].strip()
+            while '$$' in formula and len(formula.split('$$')[1]):
+                formula = formula.split('$$')[1].strip()
+            while '$' in formula and len(formula.split('$')[1]):
+                formula = formula.split('$')[1].strip()
+            logger.debug(formula.strip())
+            return idx, item, formula, tokens, None
         except Exception as error:
             msg = f'Formula enrichment failed: {error}'
             logger.warning(msg)
-            count -= 1
-            continue
-        formula = formula.strip()
-        if '```' in formula:
-            parts = formula.split('```')
-            if '\n' in parts[1] and parts[1].split('\n', 1)[1].strip():
-                formula = parts[1].split('\n', 1)[1].strip()
-            elif parts[1].strip():
-                formula = parts[1].strip()
-        while '$$' in formula and len(formula.split('$$')[1]):
-            formula = formula.split('$$')[1].strip()
-        while '$' in formula and len(formula.split('$')[1]):
-            formula = formula.split('$')[1].strip()
-        logger.debug(formula.strip())
-        item.text = f'formula_{processed}'
-        formulas[processed] = formula
-        processed += 1
-    if processed:
-        msg = f'Processed {processed} formula{"" if processed == 1 else "s"}'
+            return idx, item, None, 0, error
+
+    indexed_items = list(enumerate(formula_items))
+    with ThreadPoolExecutor(max_workers=min(1, parallel)) as executor:
+        futures = {executor.submit(process_formula, idx_item): idx_item
+                   for idx_item in indexed_items}
+        for future in as_completed(futures):
+            result_idx, result_item, formula, tokens, error = future.result()
+            if error is None:
+                result_item.text = f'formula_{result_idx}'
+                formulas[result_idx] = formula
+                max_tokens = max(tokens, max_tokens)
+
+    if formulas:
+        msg = f'Processed {len(formulas)} formula{"" if len(formulas) == 1 else "s"}'
         logger.info(msg)
     return formulas, max_tokens
 
 
-def enrich_pictures(doc, client, model):
+def enrich_pictures(doc, client, model, parallel=1):
     from docling_core.types.doc.document import (DescriptionMetaField,
                                                  PictureItem, PictureMeta)
 
+    picture_items = []
+    for item, _ in doc.iterate_items():
+        if isinstance(item, PictureItem):
+            image = item.get_image(doc) or crop_item_image(doc, item)
+            if image is not None:
+                picture_items.append((item, image))
+
+    count = len(picture_items)
+    if count == 0:
+        return {}, 0
     pictures = {}
     max_tokens = 0
-    processed = 0
-    count = len([item for item, _ in doc.iterate_items() if isinstance(item, PictureItem)])
-    for item, _ in doc.iterate_items():
-        if not isinstance(item, PictureItem):
-            continue
-        image = item.get_image(doc) or crop_item_image(doc, item)
-        if image is None:
-            count -= 1
-            continue
+
+    def process_picture(idx_item):
+        idx, (item, image) = idx_item
         try:
-            logger.debug('Picture %d / %d', processed + 1, count)
+            logger.debug('Picture %d / %d', idx + 1, count)
             description, tokens = query_vision_model(
                 client, model, image, PICTURE_PROMPT, max_tokens=16384)
             logger.debug(description)
-            max_tokens = max(tokens, max_tokens)
+            return idx, item, description, tokens, None
         except Exception as error:
             msg = f'Picture description failed: {error}'
             logger.warning(msg)
-            count -= 1
-            continue
-        item.meta = PictureMeta(description=DescriptionMetaField(
-            text=f'<!-- picture_{processed} -->', created_by=model))
-        pictures[processed] = description
-        processed += 1
-    if processed:
-        msg = f'Processed {processed} picture{"" if processed == 1 else "s"}'
+            return idx, item, None, 0, error
+
+    indexed_items = list(enumerate(picture_items))
+    with ThreadPoolExecutor(max_workers=min(1, parallel)) as executor:
+        futures = {executor.submit(process_picture, idx_item): idx_item
+                   for idx_item in indexed_items}
+        for future in as_completed(futures):
+            result_idx, result_item, description, tokens, error = future.result()
+            if error is None:
+                result_item.meta = PictureMeta(description=DescriptionMetaField(
+                    text=f'<!-- picture_{result_idx} -->', created_by=model))
+                pictures[result_idx] = description
+                max_tokens = max(tokens, max_tokens)
+    if pictures:
+        msg = f'Processed {len(pictures)} picture{"" if len(pictures) == 1 else "s"}'
         logger.info(msg)
     return pictures, max_tokens
 
@@ -402,7 +440,6 @@ def get_converter(args):
 
 
 def offload_ollama(url):
-    print('>>>>>>>>>>>>>>>>>>', offload_ollama)  # ##DWM::
     url = url.rstrip('/')
     resp = requests.get(f'{url}/api/ps')
     try:
@@ -447,8 +484,8 @@ def process_file(converter, client, proc_client, filepath, model, args):
     pictures = {}
     formulas = {}
     try:
-        pictures, tokens = enrich_pictures(doc, client, model)
-        formulas, ftokens = enrich_formulas(doc, client, model)
+        pictures, tokens = enrich_pictures(doc, client, model, parallel=args.parallel)
+        formulas, ftokens = enrich_formulas(doc, client, model, parallel=args.parallel)
         tokens = max(tokens, ftokens)
         logger.debug('Max tokens in any vision request: %d', tokens)
     finally:
@@ -472,8 +509,10 @@ def process_file(converter, client, proc_client, filepath, model, args):
                     ocr_used, process_mode)
         source_text = markdown
         total_tokens = 0
+        proc_parallel = args.processing_parallel or args.parallel
         if process_mode in ('ocr', 'all') and ocr_used:
-            fair_copy_text, ocr_tok = process_ocr_text(proc_client, proc_model, markdown)
+            fair_copy_text, ocr_tok = process_ocr_text(
+                proc_client, proc_model, markdown, parallel=proc_parallel)
             total_tokens += ocr_tok
             logger.info('OCR fair copy complete (%d tokens)', ocr_tok)
             output += '\n\n## FAIR COPY\n\n' + fair_copy_text
@@ -483,7 +522,7 @@ def process_file(converter, client, proc_client, filepath, model, args):
         logger.debug('Detected source language: %s', src_lang)
         if process_mode in ('translate', 'all') and src_lang != 'English':
             translated_text, trans_tok = process_translation(
-                proc_client, proc_model, source_text, src_lang=src_lang)
+                proc_client, proc_model, source_text, src_lang=src_lang, parallel=proc_parallel)
             total_tokens += trans_tok
             logger.info('Translation complete (%d tokens)', trans_tok)
             output += '\n\n## TRANSLATION\n\n' + translated_text
@@ -661,6 +700,14 @@ def main():
     parser.add_argument(
         '--verbose', '-v', action='count', default=0,
         help='Increase verbosity')
+    parser.add_argument(
+        '--parallel', '--jobs', '-j', type=int, default=1,
+        help='Number of parallel jobs for vision tasks (image descriptions, '
+        'formula transcription). Default: %(default)s')
+    parser.add_argument(
+        '--processing-parallel', type=int,
+        help='Number of parallel jobs for processing tasks (OCR cleanup, '
+        'translation). Defaults to --parallel value.')
     args = parser.parse_args()
     if os.environ.get('PDFS_TO_MARKDOWN_OFFLOAD'):
         offload = os.environ.get('PDFS_TO_MARKDOWN_OFFLOAD').lower()
