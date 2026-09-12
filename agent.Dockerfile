@@ -281,6 +281,13 @@ RUN cat <<'EOF' > /home/ubuntu/.pi/agent/models.json
       "models": [
         { "id": "qwen3.6:35b" }
       ]
+    },
+    "local-llm": {
+      "baseUrl": "https://router.huggingface.co/v1",
+      "api": "openai-completions",
+      "apiKey": "hf_xxx",
+      "enabled": true,
+      "models": []
     }
   }
 }
@@ -322,6 +329,56 @@ echo "${TARGET_URL}"
 EOF
 
 RUN chmod a+x /home/ubuntu/.local/bin/set_ollama.sh
+
+RUN cat <<'EOF' > /home/ubuntu/.local/bin/set_hf.sh
+#!/usr/bin/env bash
+# set_hf.sh - Configure HuggingFace token and models for pi agent
+# Usage: set_hf.sh [hf_token] [model1] [context1] [model2] [context2] ...
+MODELS_JSON="$HOME/.pi/agent/models.json"
+SETTINGS_JSON="$HOME/.pi/agent/settings.json"
+DEFAULT_CONTEXT=262144
+HF_TOKEN=""
+declare -a MODELS=()
+declare -A CONTEXTS=()
+LAST_MODEL=""
+for arg in "$@"; do
+  if [[ "$arg" == hf_* ]]; then
+    HF_TOKEN="$arg"
+  elif [[ "$arg" =~ ^[0-9]+$ ]]; then
+    if [[ -n "$LAST_MODEL" ]]; then
+      CONTEXTS["$LAST_MODEL"]="$arg"
+    fi
+  else
+    MODELS+=("$arg")
+    LAST_MODEL="$arg"
+  fi
+done
+if [[ $# -eq 0 ]]; then
+  echo "Current HuggingFace token:"
+  jq -r '.providers["local-llm"].apiKey // "not set"' "$MODELS_JSON"
+  echo ""
+  echo "Current HuggingFace models:"
+  jq -r '.providers["local-llm"].models[].id // "none"' "$MODELS_JSON" 2>/dev/null
+  exit 0
+fi
+if [[ -n "$HF_TOKEN" ]]; then
+  jq --arg token "$HF_TOKEN" '.providers["local-llm"].apiKey = $token' "$MODELS_JSON" > "${MODELS_JSON}.tmp" && mv "${MODELS_JSON}.tmp" "$MODELS_JSON"
+  echo "Token updated"
+fi
+for model in "${MODELS[@]}"; do
+  ctx="${CONTEXTS[$model]:-$DEFAULT_CONTEXT}"
+  jq --arg id "$model" --argjson ctx "$ctx" '.providers["local-llm"].models = [.providers["local-llm"].models[] | select(.id != $id)] + [{id: $id, contextWindow: $ctx}]' "$MODELS_JSON" > "${MODELS_JSON}.tmp" && mv "${MODELS_JSON}.tmp" "$MODELS_JSON"
+  enabled_model="local-llm/$model"
+  jq --arg m "$enabled_model" 'if (.enabledModels // []) | index($m) then . else .enabledModels = ((.enabledModels // []) + [$m]) end' "$SETTINGS_JSON" > "${SETTINGS_JSON}.tmp" && mv "${SETTINGS_JSON}.tmp" "$SETTINGS_JSON"
+  echo "Added model: $model (context: $ctx)"
+done
+if [[ -n "$LAST_MODEL" ]]; then
+  jq --arg m "local-llm/$LAST_MODEL" '.defaultModel = $m' "$SETTINGS_JSON" > "${SETTINGS_JSON}.tmp" && mv "${SETTINGS_JSON}.tmp" "$SETTINGS_JSON"
+  echo "Default model set to: local-llm/$LAST_MODEL"
+fi
+EOF
+
+RUN chmod a+x /home/ubuntu/.local/bin/set_hf.sh
 
 RUN cat <<'EOF' >> /home/ubuntu/.bashrc
 function truncate_current_directory () {
