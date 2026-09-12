@@ -15,6 +15,7 @@
 import argparse
 import base64
 import functools
+import hashlib
 import io
 import logging
 import os
@@ -411,7 +412,16 @@ def enrich_formulas(doc, client, model, parallel=1):  # noqa
     return formulas, max_tokens
 
 
+def image_to_hash(image):
+    """Compute a hash of an image for duplicate detection."""
+    buffer = io.BytesIO()
+    image.save(buffer, format='PNG')
+    return hashlib.sha256(buffer.getvalue()).hexdigest()
+
+
 def enrich_pictures(doc, client, model, parallel=1):
+    import threading
+
     from docling_core.types.doc.document import (DescriptionMetaField,
                                                  PictureItem, PictureMeta)
 
@@ -427,14 +437,25 @@ def enrich_pictures(doc, client, model, parallel=1):
         return {}, 0
     pictures = {}
     max_tokens = 0
+    seen_hashes = {}
+    hash_lock = threading.Lock()
 
     def process_picture(idx_item):
         idx, (item, image) = idx_item
         try:
             logger.debug('Picture %d / %d', idx + 1, count)
+            img_hash = image_to_hash(image)
+            with hash_lock:
+                if img_hash in seen_hashes:
+                    orig_idx, _ = seen_hashes[img_hash]
+                    description = f'Identical to image {orig_idx + 1}'
+                    logger.debug(description)
+                    return idx, item, description, 0, None
             description, tokens = query_vision_model(
                 client, model, image, PICTURE_PROMPT, max_tokens=16384)
             logger.debug(description)
+            with hash_lock:
+                seen_hashes[img_hash] = (idx, description)
             return idx, item, description, tokens, None
         except Exception as error:
             msg = f'Picture description failed: {error}'
