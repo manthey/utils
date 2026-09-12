@@ -484,8 +484,6 @@ def get_converter(args):
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
-    # from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
-
     pipeline_options = PdfPipelineOptions()
     pipeline_options.generate_page_images = True
     pipeline_options.generate_picture_images = True
@@ -495,12 +493,13 @@ def get_converter(args):
     pipeline_options.do_code_enrichment = True
     pipeline_options.do_formula_enrichment = False
 
+    format_option_kwargs = {'pipeline_options': pipeline_options}
+    if args.alt_backend:
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+        format_option_kwargs['backend'] = PyPdfiumDocumentBackend
     converter = DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(
-                pipeline_options=pipeline_options,
-                # backend=PyPdfiumDocumentBackend,
-            ),
+            InputFormat.PDF: PdfFormatOption(**format_option_kwargs),
         },
     )
     return converter
@@ -775,6 +774,10 @@ def main():
         '--processing-parallel', type=int,
         help='Number of parallel jobs for processing tasks (OCR cleanup, '
         'translation). Defaults to --parallel value.')
+    parser.add_argument(
+        '--alt-backend', action='store_true',
+        help='Use the pdfium backend instead of the default docling backend '
+        '(useful when the default backend crashes on certain PDFs).')
     args = parser.parse_args()
     if os.environ.get('PDFS_TO_MARKDOWN_OFFLOAD'):
         offload = os.environ.get('PDFS_TO_MARKDOWN_OFFLOAD').lower()
