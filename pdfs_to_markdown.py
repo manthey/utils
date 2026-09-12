@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -420,8 +421,6 @@ def image_to_hash(image):
 
 
 def enrich_pictures(doc, client, model, parallel=1):
-    import threading
-
     from docling_core.types.doc.document import (DescriptionMetaField,
                                                  PictureItem, PictureMeta)
 
