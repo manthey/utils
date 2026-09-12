@@ -245,10 +245,20 @@ def get_lang_detector():
 
 
 def detect_language(text):
-    if len(text.strip()) <= 10:
+    if len(text.strip()) <= 50:
         return 'English'
+    chunks = chunk_text(text)
     detector = get_lang_detector()
-    lang = detector.detect_language_of(text)
+    results = {}
+    for chunk in chunks:
+        if len(chunk.strip()) <= 50:
+            continue
+        lang = detector.detect_language_of(chunk)
+        if lang:
+            results[lang] = results.get('name', 0) + 1
+    lang = None
+    if not len(results):
+        lang = max(results, key=results.get)
     if not lang:
         return 'English'
     return lang.name.capitalize()
@@ -453,6 +463,8 @@ def get_converter(args):
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
+    # from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+
     pipeline_options = PdfPipelineOptions()
     pipeline_options.generate_page_images = True
     pipeline_options.generate_picture_images = True
@@ -464,7 +476,10 @@ def get_converter(args):
 
     converter = DocumentConverter(
         format_options={
-            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+            InputFormat.PDF: PdfFormatOption(
+                pipeline_options=pipeline_options,
+                # backend=PyPdfiumDocumentBackend,
+            ),
         },
     )
     return converter
