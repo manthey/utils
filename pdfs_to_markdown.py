@@ -58,6 +58,37 @@ TRANSLATE_PROMPT = (
 )
 
 
+def honor_ctrlc(timeout=5):
+    import os
+    import signal
+    import sys
+    import threading
+    import time
+
+    shutdown = threading.Event()
+    count = {'n': 0}
+    lock = threading.Lock()
+
+    def force_exit():
+        sys.stderr.write('\nForce exiting\n')
+        os._exit(1)
+
+    def handler(signum, frame):
+        with lock:
+            count['n'] += 1
+        if count['n'] >= 2:
+            force_exit()
+        shutdown.set()
+        msg = f'Signal {signum}'
+        raise KeyboardInterrupt(msg)
+
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+    threading.Thread(
+        target=lambda: (shutdown.wait(), time.sleep(timeout), force_exit()),
+        daemon=True).start()
+
+
 def chat_create_process(client, stop_after=None, **kwargs):
     stream = client.chat.completions.create(**kwargs)
     result = []
@@ -247,7 +278,7 @@ def process_ocr_text(client, model, text, parallel=1):
 
     indexed_chunks = list(enumerate(chunks))
     results = [None] * len(indexed_chunks)
-    with ThreadPoolExecutor(max_workers=min(1, parallel)) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, parallel)) as executor:
         futures = {executor.submit(process_chunk, i_chunk): i_chunk
                    for i_chunk in indexed_chunks}
         for future in as_completed(futures):
@@ -284,7 +315,7 @@ def process_translation(client, model, text, src_lang=None, parallel=1):
 
     indexed_chunks = list(enumerate(chunks))
     results = [None] * len(indexed_chunks)
-    with ThreadPoolExecutor(max_workers=min(1, parallel)) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, parallel)) as executor:
         futures = {executor.submit(translate_chunk, i_chunk): i_chunk
                    for i_chunk in indexed_chunks}
         for future in as_completed(futures):
@@ -354,7 +385,7 @@ def enrich_formulas(doc, client, model, parallel=1):  # noqa
             return idx, item, None, 0, error
 
     indexed_items = list(enumerate(formula_items))
-    with ThreadPoolExecutor(max_workers=min(1, parallel)) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, parallel)) as executor:
         futures = {executor.submit(process_formula, idx_item): idx_item
                    for idx_item in indexed_items}
         for future in as_completed(futures):
@@ -401,7 +432,7 @@ def enrich_pictures(doc, client, model, parallel=1):
             return idx, item, None, 0, error
 
     indexed_items = list(enumerate(picture_items))
-    with ThreadPoolExecutor(max_workers=min(1, parallel)) as executor:
+    with ThreadPoolExecutor(max_workers=max(1, parallel)) as executor:
         futures = {executor.submit(process_picture, idx_item): idx_item
                    for idx_item in indexed_items}
         for future in as_completed(futures):
@@ -499,7 +530,7 @@ def process_file(converter, client, proc_client, filepath, model, args):
     process_mode = getattr(args, 'process', 'none')
     proc_model = getattr(args, 'processing_model', '') or model
 
-    ocr_used = is_ocr_used(result)  # Detect OCR from page confidences
+    ocr_used = is_ocr_used(result)
     needs_process = process_mode != 'none' or ocr_used
     output = markdown
 
@@ -723,6 +754,7 @@ def main():
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
     logger.addHandler(logging.StreamHandler(sys.stderr))
     logger.debug('Parsed arguments: %r', args)
+    honor_ctrlc()
     process_directory(args)
 
 
