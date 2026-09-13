@@ -497,10 +497,8 @@ def pdf_has_good_embedded_text(filepath):
         # Patterns that suggest poor OCR quality even when embedded
         # - Unusual Unicode replacement characters
         # - Long runs of the same character
-        import re
         repeated_punct_pattern = re.compile(r'([.,;:!?])\1{3,}')
         replacement_char = '\ufffd'
-
         for i in range(len(doc)):
             page = doc[i]
             text_page = page.get_textpage()
@@ -601,12 +599,12 @@ def clean_blanks(text):
 
 def process_file(converter, client, proc_client, filepath, model, args):
     offload = converter is None
+    has_good_text = pdf_has_good_embedded_text(filepath)
     if converter is None:
         offload_ollama(args.url)
-        # Check if PDF has good embedded text; if not, force OCR
-        has_good_text = pdf_has_good_embedded_text(filepath)
-        force_ocr = not has_good_text
-        converter = get_converter(args, force_ocr=force_ocr)
+        converter = get_converter(args, force_ocr=not has_good_text)
+    else:
+        converter = converter[0] if has_good_text else converter[1]
     try:
         result = converter.convert(filepath)
         doc = result.document
@@ -699,7 +697,7 @@ def process_directory(args):  # noqa
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
     converter = None
     if not args.offload:
-        converter = get_converter(args)
+        converter = get_converter(args), get_converter(args, force_ocr=True)
     client = OpenAI(base_url=args.url.rstrip('/') + '/v1', api_key=args.api_key, max_retries=10)
     proc_client = client
     if args.processing_url:
