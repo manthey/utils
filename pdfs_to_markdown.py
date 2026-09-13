@@ -6,6 +6,7 @@
 #   'lingua-language-detector',
 #   'openai',
 #   'pillow',
+#   'requests',
 # ]
 # ///
 # This can be run via something like
@@ -478,7 +479,68 @@ def enrich_pictures(doc, client, model, parallel=1):
     return pictures, max_tokens
 
 
-def get_converter(args):
+def pdf_has_good_embedded_text(filepath):
+    import pypdfium2
+
+    try:
+        doc = pypdfium2.PdfDocument(str(filepath))
+        if len(doc) == 0:
+            return False
+        pages_with_text = 0
+        total_text_chars = 0
+        suspicious_char_count = 0
+        total_char_count = 0
+
+        # Patterns that suggest poor OCR quality even when embedded
+        # - Unusual Unicode replacement characters
+        # - Long runs of the same character
+        import re
+        repeated_punct_pattern = re.compile(r'([.,;:!?])\1{3,}')
+        replacement_char = '\ufffd'
+
+        for i in range(len(doc)):
+            page = doc[i]
+            text_page = page.get_textpage()
+            text = text_page.get_text_bounded()
+
+            if text and text.strip():
+                pages_with_text += 1
+                stripped = text.strip()
+                total_text_chars += len(stripped)
+                total_char_count += len(stripped)
+
+                # Count suspicious patterns
+                suspicious_char_count += len(re.findall(repeated_punct_pattern, text))
+                suspicious_char_count += text.count(replacement_char)
+        if len(doc) == 0 or total_char_count == 0:
+            return False
+        text_ratio = pages_with_text / len(doc)
+        avg_chars_per_page = total_text_chars / len(doc)
+        suspicious_ratio = suspicious_char_count / max(1, total_char_count)
+
+        # Criteria for "good" text:
+        # 1. At least 50% of pages have text
+        # 2. Average > 200 chars per page (filters out pages with just
+        # headers/footers)
+        # 3. Less than 1% suspicious characters
+        has_text = (
+            text_ratio >= 0.5 and
+            avg_chars_per_page > 200 and
+            suspicious_ratio < 0.01
+        )
+        logger.debug(
+            'PDF %s: %d/%d pages with text (%.1f%%), avg %d chars/page, '
+            'suspicious ratio %.4f -> has_good_text=%s',
+            filepath, pages_with_text, len(doc), text_ratio * 100,
+            avg_chars_per_page, suspicious_ratio, has_text,
+        )
+        return has_text
+    except Exception as exc:
+        logger.warning('Failed to check PDF for embedded text: %s', exc)
+        return False
+
+
+def get_converter(args, force_ocr=False):
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -492,6 +554,11 @@ def get_converter(args):
     pipeline_options.do_code_enrichment = True
     pipeline_options.do_formula_enrichment = False
 
+    # Skip OCR if PDF has good embedded text and OCR not forced
+    if not force_ocr:
+        pipeline_options.do_ocr = False
+        # Use backend's native text extraction when available
+        pipeline_options.force_backend_text = True
     format_option_kwargs = {'pipeline_options': pipeline_options}
     if args.alt_backend:
         from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
@@ -533,7 +600,10 @@ def process_file(converter, client, proc_client, filepath, model, args):
     offload = converter is None
     if converter is None:
         offload_ollama(args.url)
-        converter = get_converter(args)
+        # Check if PDF has good embedded text; if not, force OCR
+        has_good_text = pdf_has_good_embedded_text(filepath)
+        force_ocr = not has_good_text
+        converter = get_converter(args, force_ocr=force_ocr)
     try:
         result = converter.convert(filepath)
         doc = result.document
