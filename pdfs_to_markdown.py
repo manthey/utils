@@ -259,7 +259,7 @@ def detect_language(text):
             continue
         lang = detector.detect_language_of(chunk)
         if lang:
-            results[lang] = results.get('name', 0) + 1
+            results[lang] = results.get(lang, 0) + 1
     lang = None
     if not len(results):
         lang = max(results, key=results.get)
