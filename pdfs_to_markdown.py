@@ -56,9 +56,11 @@ FAIR_COPY_PROMPT = (
     'without explanations.'
 )
 TRANSLATE_PROMPT = (
+    'You are an expert translator for all languages, subjects, and eras. '
     'Translate this text to English. Preserve all markdown formatting, '
     'headers, image/figure markers, tables, and code blocks exactly as they '
-    'are. Output only the translated text without explanations.'
+    'are. Output only the translated text without explanations; if the source '
+    'text is not English, you must produce an English translation.'
 )
 
 
@@ -261,7 +263,7 @@ def detect_language(text):
         if lang:
             results[lang] = results.get(lang, 0) + 1
     lang = None
-    if not len(results):
+    if len(results):
         lang = max(results, key=results.get)
     if not lang:
         return 'English'
