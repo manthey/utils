@@ -247,10 +247,14 @@ def chunk_text(text, limit=None):
 def get_lang_detector():
     import lingua
 
-    return lingua.LanguageDetectorBuilder.from_all_languages().build()
+    lang = lingua.Language.all() - {
+        lingua.Language.SOTHO, lingua.Language.TSONGA, lingua.Language.YORUBA}
+    return lingua.LanguageDetectorBuilder.from_languages(*tuple(lang)).build()
 
 
 def detect_language(text):
+    import lingua
+
     if len(text.strip()) <= 50:
         return 'English'
     chunks = chunk_text(text)
@@ -262,9 +266,12 @@ def detect_language(text):
         lang = detector.detect_language_of(chunk)
         if lang:
             results[lang] = results.get(lang, 0) + 1
+    logger.info('Detect language %r', results)
     lang = None
     if len(results):
         lang = max(results, key=results.get)
+        if results[lang] == results.get(lingua.Language.ENGLISH, 0):
+            lang = lingua.Language.ENGLISH
     if not lang:
         return 'English'
     return lang.name.capitalize()
