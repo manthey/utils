@@ -850,7 +850,7 @@ def main():
         help='Number of parallel jobs for vision tasks (image descriptions, '
         'formula transcription). Default: %(default)s')
     parser.add_argument(
-        '--processing-parallel', type=int,
+        '--processing-parallel', '--processing-jobs', type=int,
         help='Number of parallel jobs for processing tasks (OCR cleanup, '
         'translation). Defaults to --parallel value.')
     parser.add_argument(
