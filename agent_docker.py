@@ -17,7 +17,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from pathlib import Path
 
 import yaml
 
@@ -261,24 +260,33 @@ def main():  # noqa
         ]
         logger.info(cmd)
         subprocess.check_call(cmd)
-
-        def tar_exclusion_filter(tarinfo):
-            basename = os.path.basename(tarinfo.name)
-            subparts = Path(tarinfo.name).parts[1:]
-            for pat in skip_patterns:
-                if fnmatch.fnmatch(basename, pat):
-                    return None
-                if subparts[:len(Path(pat).parts)] == Path(pat).parts:
-                    return None
-                parts = tarinfo.name.split('/')
-                if any(fnmatch.fnmatch(part, pat) for part in parts):
-                    return None
-            return tarinfo
-
+        root = os.path.join('..', current_dir)
         with tempfile.SpooledTemporaryFile() as fp:
             with tarfile.open(fileobj=fp, mode='w') as tf:
-                tf.add(os.path.join('..', current_dir), filter=tar_exclusion_filter,
-                       arcname=current_dir)
+                for dirpath, dirs, files in os.walk(root):
+                    rel = os.path.relpath(dirpath, root).split(os.sep) if dirpath != root else []
+                    if skip_patterns:
+                        safe_dirs = []
+                        for d in sorted(dirs):
+                            is_skipped = False
+                            for p in skip_patterns:
+                                pp = p.replace(os.sep, '/').split('/')
+                                if fnmatch.fnmatch(d, pp[-1]) or (rel + [d])[:len(pp)] == pp:
+                                    is_skipped = True
+                                    break
+                            if not is_skipped:
+                                safe_dirs.append(d)
+                        dirs[:] = safe_dirs
+                    for filename in files:
+                        if skip_patterns and any(
+                                fnmatch.fnmatch(filename, p) for p in skip_patterns):
+                            continue
+                        full_path = os.path.join(dirpath, filename)
+                        rel_path = os.path.relpath(full_path, root).replace(os.sep, '/')
+                        arcname = f'{current_dir}/{rel_path}'
+                        info = tf.gettarinfo(full_path, arcname=arcname)
+                        with open(full_path, 'rb') as fobj:
+                            tf.addfile(info, fobj)
             fp.seek(0)
             cmd = docker_cmd + [
                 'exec', '-i', container_name, 'tar', '-xf', '-', '-C', '/home/ubuntu/']
