@@ -284,6 +284,13 @@ def main():  # noqa
                 'exec', '-i', container_name, 'tar', '-xf', '-', '-C', '/home/ubuntu/']
             logger.info(cmd)
             subprocess.check_call(cmd, stdin=fp)
+        git_restore_cmd = (
+            'cd /home/ubuntu/' + current_dir + ' && '
+            "git ls-files -s 2>/dev/null | grep '^100' | "
+            'while read mode type sha path; do chmod "${mode:3:4}" "$path"; done || true')
+        cmd = docker_cmd + ['exec', '-i', container_name, 'bash', '-c', git_restore_cmd]
+        logger.info(cmd)
+        subprocess.check_call(cmd, stderr=subprocess.DEVNULL)
     if args.command in {'create', 'start', 'exec', 'update'} and args.ollama:
         host = args.ollama
         if '/' not in args.ollama and ':' not in args.ollama:
