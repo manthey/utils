@@ -109,6 +109,7 @@ export default function addGuidelines(pi) {
       "- Always use up-to-date versions (e.g., python 3.10-3.14) when possible.\n" +
       "- If you are in a repo with a .pre-commit-config.yaml, pre-commit must be run and pass on all generated or altered code. You may not alter hooks or ignore rules without first getting approval.\n" +
       "- When modifying existing code, prefer small changes to major refactors unless otherwise instructed.\n" +
+      "- Never perform unrequested refactoring, cleanup, or structural changes. If it wasn't explicitly asked to be changed, leave it intact.\n" +
       "- The current date is " + datestr + ". Treat this as authoritative runtime context.\n" +
       "- Your training data may be outdated. Do not use the apparent absence of a model, package, library, API, or feature from your training data as evidence that it does not exist.\n" +
       "- If you share any links, they must be verified as active and not returning error codes.";
