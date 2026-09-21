@@ -100,6 +100,17 @@ def get_mount_args(is_windows, more=None):
     return args
 
 
+def format_size(val):
+    for mag, unit in enumerate(('b', 'kb', 'MB', 'GB', 'TB')):
+        show = f'{val / 1024 ** mag:.3f}'
+        if '.' in show and show.index('.') <= 4:
+            show = show[:5]
+        show = show.rstrip('0').rstrip('.')
+        if len(show.replace('.', '')) <= 4:
+            return show + unit
+    return show + unit
+
+
 def free_port(docker_cmd, start):
     used = {}
     report = subprocess.check_output(
@@ -292,6 +303,7 @@ def main():  # noqa
                 'exec', '-i', container_name, 'tar', '-xf', '-', '-C', '/home/ubuntu/']
             logger.info(cmd)
             subprocess.check_call(cmd, stdin=fp)
+            logger.warning('%s transferred', format_size(fp.tell()))
         git_restore_cmd = (
             'cd /home/ubuntu/' + current_dir + ' && '
             "git ls-files -s 2>/dev/null | grep '^100' | "
@@ -318,8 +330,8 @@ def main():  # noqa
         subprocess.check_call(cmd)
         cmd = docker_cmd + [
             'exec', '-it', '--user', 'root', container_name, 'bash', '-c',
-            'chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys && '
-            'chmod 0600 /home/ubuntu/.ssh/authorized_keys']
+            ('chown ubuntu:ubuntu /home/ubuntu/.ssh/authorized_keys && '
+             'chmod 0600 /home/ubuntu/.ssh/authorized_keys')]
         logger.info(cmd)
         subprocess.check_call(cmd)
         cmd = docker_cmd + [
