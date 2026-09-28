@@ -9,6 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PI_SKIP_VERSION_CHECK=1 \
     PYENV_ROOT="/.pyenv" \
     CFLAGS="-std=gnu17 -march=native" \
+    NPM_CONFIG_ALLOW_GIT=all \
     PATH="/.pyenv/bin:/.pyenv/shims:$PATH"
 
 RUN apt-get update && \
