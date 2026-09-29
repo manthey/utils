@@ -24,6 +24,7 @@ import os
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -64,6 +65,70 @@ TRANSLATE_PROMPT = (
     'are. Output only the translated text without explanations; if the source '
     'text is not English, you must produce an English translation.'
 )
+#: Substrings that identify a transient, timeout-like failure worth retrying
+#: indefinitely when the user has not capped retries.  Matched
+#: case-insensitively against the string form of the exception.
+TRANSIENT_ERROR_MARKERS = (
+    'timed out',
+    'timeout',
+    'read timed out',
+    'connection reset',
+    'connection aborted',
+    'connection error',
+    'temporarily unavailable',
+    'server disconnected',
+    'bad gateway',
+    'service unavailable',
+    'gateway timeout',
+)
+
+
+def is_transient_error(error):
+    """Return True for timeout/connection errors that are worth retrying."""
+    if isinstance(error, KeyboardInterrupt):
+        return False
+    text = str(error).lower()
+    return any(marker in text for marker in TRANSIENT_ERROR_MARKERS)
+
+
+def run_with_retries(func, *, retries, base_delay=1.0, max_delay=60.0,
+                     description='request', log=None):
+    """Call ``func`` with retries for transient errors.
+
+    Args:
+        func: Zero-argument callable to invoke.
+        retries: Maximum number of retries for transient errors, or ``None``
+            for unlimited retries (timeouts will be retried forever).
+        base_delay: Initial backoff delay in seconds.
+        max_delay: Maximum backoff delay in seconds.
+        description: Label used in log messages.
+        log: Logger to use (defaults to the module logger).
+
+    Returns:
+        Whatever ``func`` returns.  Non-transient exceptions are raised
+        immediately; transient errors are retried until they succeed or the
+        retry budget is exhausted, at which point the last error is raised.
+
+    """
+    log = log or logger
+    attempt = 0
+    delay = base_delay
+    while True:
+        try:
+            return func()
+        except Exception as error:
+            if not is_transient_error(error):
+                raise
+            attempt += 1
+            if retries is not None and attempt > retries:
+                raise
+            wait = min(delay, max_delay)
+            progress = (f'attempt {attempt}' if retries is None
+                        else f'attempt {attempt} / {retries + 1}')
+            log.warning('%s: %s (%s, retrying in %.1fs)',
+                        description, error, progress, wait)
+            time.sleep(wait)
+            delay = min(delay * 2, max_delay)
 
 
 def chat_create_process(client, stop_after=None, **kwargs):
@@ -219,7 +284,8 @@ def get_lang_detector():
     import lingua
 
     lang = lingua.Language.all() - {
-        lingua.Language.SOTHO, lingua.Language.TSONGA, lingua.Language.YORUBA}
+        lingua.Language.AZERBAIJANI, lingua.Language.SOTHO,
+        lingua.Language.TSONGA, lingua.Language.YORUBA}
     return lingua.LanguageDetectorBuilder.from_languages(*tuple(lang)).build()
 
 
@@ -248,7 +314,7 @@ def detect_language(text):
     return lang.name.capitalize()
 
 
-def process_ocr_text(client, model, text, parallel=1):
+def process_ocr_text(client, model, text, parallel=1, retries=None):
     """Apply fair copy processing to clean up OCR text."""
     chunks = chunk_text(text)
     total_tokens = 0
@@ -258,11 +324,15 @@ def process_ocr_text(client, model, text, parallel=1):
         logger.info('OCR fair copy chunk %d / %d (%d)', i + 1, len(chunks), len(chunk))
         lasterr = ''
         minlen, maxlen = len(chunk) // 4, len(chunk) * 3 // 2
-        for retries in range(5, -1, -1):
+        for attempt in range(5, -1, -1):
             try:
-                cleaned, tokens = query_llm(
-                    client, model, f'{FAIR_COPY_PROMPT}\n\n{chunk}', stop_after=maxlen + 1)
-                if retries and (len(cleaned) < minlen or len(cleaned) > maxlen):
+                cleaned, tokens = run_with_retries(
+                    lambda: query_llm(
+                        client, model, f'{FAIR_COPY_PROMPT}\n\n{chunk}',
+                        stop_after=maxlen + 1),
+                    retries=retries, description=f'OCR fair copy chunk {i + 1}',
+                    log=logger)
+                if attempt and (len(cleaned) < minlen or len(cleaned) > maxlen):
                     continue
                 return i, cleaned, tokens, None
             except Exception as err:
@@ -282,7 +352,7 @@ def process_ocr_text(client, model, text, parallel=1):
     return '\n'.join(results), total_tokens
 
 
-def process_translation(client, model, text, src_lang=None, parallel=1):
+def process_translation(client, model, text, src_lang=None, parallel=1, retries=None):
     if src_lang.lower() == 'english':
         return text, 0
     chunks = chunk_text(text)
@@ -293,13 +363,16 @@ def process_translation(client, model, text, src_lang=None, parallel=1):
         logger.info('Translation chunk %d / %d (%d)', i + 1, len(chunks), len(chunk))
         lasterr = ''
         minlen, maxlen = len(chunk) // 4, len(chunk) * 2
-        for retries in range(5, -1, -1):
+        for attempt in range(5, -1, -1):
             try:
-                translated, tokens = query_llm(
-                    client, model,
-                    f'{TRANSLATE_PROMPT}\n\nOriginal ({src_lang}):\n{chunk}',
-                    stop_after=maxlen + 1)
-                if retries and (len(translated) < minlen or len(translated) > maxlen):
+                translated, tokens = run_with_retries(
+                    lambda: query_llm(
+                        client, model,
+                        f'{TRANSLATE_PROMPT}\n\nOriginal ({src_lang}):\n{chunk}',
+                        stop_after=maxlen + 1),
+                    retries=retries, description=f'Translation chunk {i + 1}',
+                    log=logger)
+                if attempt and (len(translated) < minlen or len(translated) > maxlen):
                     continue
                 return i, translated, tokens, None
             except Exception as err:
@@ -339,7 +412,7 @@ def crop_item_image(doc, item):
     return page_image.crop((left, top, right, bottom))
 
 
-def enrich_formulas(doc, client, model, parallel=1):  # noqa
+def enrich_formulas(doc, client, model, parallel=1, retries=None):  # noqa
     from docling_core.types.doc.labels import DocItemLabel
 
     formula_items = []
@@ -358,8 +431,10 @@ def enrich_formulas(doc, client, model, parallel=1):  # noqa
         idx, (item, image) = idx_item
         try:
             logger.debug('Formula %d / %d', idx + 1, count)
-            formula, tokens = query_vision_model(
-                client, model, image, FORMULA_PROMPT, max_tokens=2048)
+            formula, tokens = run_with_retries(
+                lambda: query_vision_model(
+                    client, model, image, FORMULA_PROMPT, max_tokens=2048),
+                retries=retries, description=f'Formula {idx + 1}', log=logger)
             formula = formula.strip()
             if '```' in formula:
                 parts = formula.split('```')
@@ -405,7 +480,7 @@ def images_are_similar(image1, image2, max_diff=20, rms=8.0):
     return np.max(diff) <= max_diff and np.sqrt(np.mean(diff ** 2)) <= rms
 
 
-def enrich_pictures(doc, client, model, parallel=1):
+def enrich_pictures(doc, client, model, parallel=1, retries=None):
     from docling_core.types.doc.document import (DescriptionMetaField,
                                                  PictureItem, PictureMeta)
 
@@ -434,8 +509,10 @@ def enrich_pictures(doc, client, model, parallel=1):
                         description = f'Identical to image {orig_idx + 1}'
                         logger.debug(description)
                         return idx, item, description, 0, None
-            description, tokens = query_vision_model(
-                client, model, image, PICTURE_PROMPT, max_tokens=16384)
+            description, tokens = run_with_retries(
+                lambda: query_vision_model(
+                    client, model, image, PICTURE_PROMPT, max_tokens=16384),
+                retries=retries, description=f'Picture {idx + 1}', log=logger)
             logger.debug(description)
             with img_lock:
                 seen_images[idx] = (image.size, image.mode, image)
@@ -600,8 +677,10 @@ def process_file(converter, client, proc_client, filepath, model, args):
     pictures = {}
     formulas = {}
     try:
-        pictures, tokens = enrich_pictures(doc, client, model, parallel=args.parallel)
-        formulas, ftokens = enrich_formulas(doc, client, model, parallel=args.parallel)
+        pictures, tokens = enrich_pictures(
+            doc, client, model, parallel=args.parallel, retries=args.max_retries)
+        formulas, ftokens = enrich_formulas(
+            doc, client, model, parallel=args.parallel, retries=args.max_retries)
         tokens = max(tokens, ftokens)
         logger.debug('Max tokens in any vision request: %d', tokens)
     finally:
@@ -628,7 +707,8 @@ def process_file(converter, client, proc_client, filepath, model, args):
         proc_parallel = args.processing_parallel or args.parallel
         if process_mode in ('ocr', 'all') and ocr_used:
             fair_copy_text, ocr_tok = process_ocr_text(
-                proc_client, proc_model, markdown, parallel=proc_parallel)
+                proc_client, proc_model, markdown, parallel=proc_parallel,
+                retries=args.max_retries)
             total_tokens += ocr_tok
             logger.info('OCR fair copy complete (%d tokens)', ocr_tok)
             output += '\n\n## FAIR COPY\n\n' + fair_copy_text
@@ -638,7 +718,8 @@ def process_file(converter, client, proc_client, filepath, model, args):
         logger.debug('Detected source language: %s', src_lang)
         if process_mode in ('translate', 'all') and src_lang != 'English':
             translated_text, trans_tok = process_translation(
-                proc_client, proc_model, source_text, src_lang=src_lang, parallel=proc_parallel)
+                proc_client, proc_model, source_text, src_lang=src_lang,
+                parallel=proc_parallel, retries=args.max_retries)
             total_tokens += trans_tok
             logger.info('Translation complete (%d tokens)', trans_tok)
             output += '\n\n## TRANSLATION\n\n' + translated_text
@@ -670,19 +751,32 @@ def sort_file_list(file_list, sort):
     return [entry[-1] for entry in sorted(new_list)]
 
 
-def process_directory(args):  # noqa
+def make_client(url, api_key, args):
+    """Build an OpenAI-compatible client for an Ollama-style endpoint.
+
+    The client imposes no artificial request timeout by default (``None``
+    waits as long as the server needs), which matters for slow local models.
+    Transient errors are additionally retried by ``run_with_retries`` around
+    each request.
+    """
     from openai import OpenAI
 
+    timeout = None if args.timeout is None else args.timeout
+    return OpenAI(
+        base_url=url.rstrip('/') + '/v1', api_key=api_key,
+        timeout=timeout, max_retries=args.client_retries)
+
+
+def process_directory(args):  # noqa
     if args.no_cuda:
         os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
     converter = None
     if not args.offload:
         converter = get_converter(args), get_converter(args, force_ocr=True)
-    client = OpenAI(base_url=args.url.rstrip('/') + '/v1', api_key=args.api_key, max_retries=10)
+    client = make_client(args.url, args.api_key, args)
     proc_client = client
     if args.processing_url:
-        proc_client = OpenAI(
-            base_url=args.processing_url.rstrip('/') + '/v1', api_key=args.api_key, max_retries=10)
+        proc_client = make_client(args.processing_url, args.api_key, args)
     suffix = f'.{args.suffix.lstrip(".")}'
     for input_path in args.inputs:
         target = Path(input_path)
@@ -791,6 +885,20 @@ def main():
     parser.add_argument(
         '--images-scale', type=float, default=2.0,
         help='Rendering scale for page images.  Default %(default)s.')
+    parser.add_argument(
+        '--timeout', type=float, default=None,
+        help='Per-request client timeout in seconds.  The default (None) '
+        'waits indefinitely, which is useful for slow local models.')
+    parser.add_argument(
+        '--max-retries', type=int, default=None,
+        help='Maximum number of retries for transient (timeout/connection) '
+        'errors on each vision or processing request.  The default (None) '
+        'retries indefinitely, so a slow local model is never abandoned due '
+        'to a timeout.  Set to 0 to disable retries.')
+    parser.add_argument(
+        '--client-retries', type=int, default=10,
+        help='Number of retries the OpenAI client performs internally.  '
+        'Default %(default)s.  This is independent of --max-retries.')
     parser.add_argument(
         '--overwrite', '-y', action='store_true',
         help='Overwrite existing companion markdown files')
