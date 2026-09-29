@@ -401,6 +401,8 @@ export PI_SKIP_VERSION_CHECK=1
 export PYENV_ROOT="/.pyenv"
 export CFLAGS="-std=gnu17 -march=native"
 export PATH="$HOME/.local/bin:$HOME/.nvm/current:$HOME/.nvm:$HOME/.env:$HOME/.env:/.pyenv/bin:/.pyenv/shims:$PATH"
+# because nvm use <version> doesn't work due to our fixed path
+set_node() { nvm use "$1" && ln -sfn "$(dirname "$(nvm which "$1")")" "$NVM_DIR/current" && hash -r; }
 EOF
 
 RUN cat <<'EOF' > /home/ubuntu/.tmux.conf

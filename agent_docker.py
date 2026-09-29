@@ -295,9 +295,27 @@ def main():  # noqa
                         full_path = os.path.join(dirpath, filename)
                         rel_path = os.path.relpath(full_path, root).replace(os.sep, '/')
                         arcname = f'{current_dir}/{rel_path}'
+                        if os.path.islink(full_path):
+                            target = os.readlink(full_path)
+                            info = tarfile.TarInfo(arcname)
+                            info.type = tarfile.SYMTYPE
+                            info.linkname = target
+                            tf.addfile(info)
+                            continue
                         info = tf.gettarinfo(full_path, arcname=arcname)
                         with open(full_path, 'rb') as fobj:
                             tf.addfile(info, fobj)
+                    for dirname in dirs:
+                        full_path = os.path.join(dirpath, dirname)
+                        if os.path.islink(full_path):
+                            rel_path = os.path.relpath(full_path, root).replace(os.sep, '/')
+                            arcname = f'{current_dir}/{rel_path}'
+                            target = os.readlink(full_path)
+                            info = tarfile.TarInfo(arcname)
+                            info.type = tarfile.SYMTYPE
+                            info.linkname = target
+                            tf.addfile(info)
+                            continue
             fp.seek(0)
             cmd = docker_cmd + [
                 'exec', '-i', container_name, 'tar', '-xf', '-', '-C', '/home/ubuntu/']
