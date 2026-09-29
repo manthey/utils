@@ -3,6 +3,7 @@
 # requires-python = '>=3.12'
 # dependencies = [
 #   'docling',
+#   'interruptible',
 #   'lingua-language-detector',
 #   'numpy',
 #   'openai',
@@ -26,6 +27,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import interruptible
 import numpy as np
 import requests
 
@@ -62,37 +64,6 @@ TRANSLATE_PROMPT = (
     'are. Output only the translated text without explanations; if the source '
     'text is not English, you must produce an English translation.'
 )
-
-
-def honor_ctrlc(timeout=5):
-    import os
-    import signal
-    import sys
-    import threading
-    import time
-
-    shutdown = threading.Event()
-    count = {'n': 0}
-    lock = threading.Lock()
-
-    def force_exit():
-        sys.stderr.write('\nForce exiting\n')
-        os._exit(1)
-
-    def handler(signum, frame):
-        with lock:
-            count['n'] += 1
-        if count['n'] >= 2:
-            force_exit()
-        shutdown.set()
-        msg = f'Signal {signum}'
-        raise KeyboardInterrupt(msg)
-
-    signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGTERM, handler)
-    threading.Thread(
-        target=lambda: (shutdown.wait(), time.sleep(timeout), force_exit()),
-        daemon=True).start()
 
 
 def chat_create_process(client, stop_after=None, **kwargs):
@@ -872,9 +843,8 @@ def main():
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
     logger.addHandler(logging.StreamHandler(sys.stderr))
     logger.debug('Parsed arguments: %r', args)
-    honor_ctrlc()
     process_directory(args)
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(interruptible.run(main))
