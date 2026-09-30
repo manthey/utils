@@ -267,7 +267,8 @@ def main():  # noqa
             '--add-host', f'host.docker.internal:{gateway}',
             '--log-opt', 'max-size=10m', '--log-opt', 'max-file=5',
             '--shm-size', '1024M'] + other_opts + [
-            '-t', 'manthey/agent:latest', 'bash', '-c', 'while true; do date; sleep 300; done',
+            '-t', 'manthey/agent:latest', 'bash', '-c',
+            'while true; do date; sleep 60; echo -n . >> /tmp/.keepalive; done',
         ]
         logger.info(cmd)
         subprocess.check_call(cmd)
