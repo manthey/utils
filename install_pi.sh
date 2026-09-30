@@ -4,7 +4,6 @@
 export BINDIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
-# (a) Install npm via nvm if not already present
 if [ ! -s "$NVM_DIR/nvm.sh" ]; then
   curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash
 fi
@@ -17,14 +16,28 @@ if ! command -v node &>/dev/null; then
   nvm alias default 22
 fi
 
-# Install the main pi agent cli
-npm install -g @earendil-works/pi-coding-agent > /dev/null 2>&1
-
 mkdir -p "$BINDIR" "$HOME/.pi/agent/extensions"
+npm install -g @earendil-works/pi-coding-agent
 
-echo "Configuring Pi..."
+cat > "$HOME/.pi/agent/extensions/global-guidelines.js" <<'EOF'
+export default function addGuidelines(pi) {
+  pi.on("before_agent_start", async (event) => {
+    const datestr = new Date().toISOString().slice(0, 10);
+    const customRule = "\n\n## Global Guidelines:\n" +
+      "- Never use emojis, slang, or metaphors.\n" +
+      "- Never claim code is verified unless you have actually run it.\n" +
+      "- Always use up-to-date versions (e.g., python 3.10-3.14) when possible.\n" +
+      "- If you are in a repo with a .pre-commit-config.yaml, pre-commit must be run and pass on all generated or altered code. You may not alter hooks or ignore rules without first getting approval.\n" +
+      "- When modifying existing code, prefer small changes to major refactors unless otherwise instructed.\n" +
+      "- Never perform unrequested refactoring, cleanup, or structural changes. If it wasn't explicitly asked to be changed, leave it intact.\n" +
+      "- The current date is " + datestr + ". Treat this as authoritative runtime context.\n" +
+      "- Your training data may be outdated. Do not use the apparent absence of a model, package, library, API, or feature from your training data as evidence that it does not exist.\n" +
+      "- If you share any links, they must be verified as active and not returning error codes.";
+    return { systemPrompt: event.systemPrompt + customRule };
+  });
+}
+EOF
 
-# (b) Write configuration files from sandbox definition
 cat > "$HOME/.pi/agent/settings.json" <<'EOF'
 {
   "defaultModel": "qwen3.6:35b",
@@ -91,44 +104,30 @@ cat > "$HOME/.pi/agent/compaction-continue.json" <<'EOF'
 }
 EOF
 
-# Install all pip and npm extensions defined in the Dockerfile
-pi install git:github.com/manthey/pi-model-discovery@dist > /dev/null 2>&1 || true
-pi install npm:@richardgill/pi-up-history > /dev/null 2>&1 || true
-pi install npm:@alexleekt/pi-bump > /dev/null 2>&1 || true
-pi install npm:@badliveware/pi-compaction-continue > /dev/null 2>&1 || true
-pi install npm:pi-loop-police > /dev/null 2>&1 || true
+# pi install npm:@kylebrodeur/pi-model-discovery
+pi install git:github.com/manthey/pi-model-discovery@dist
+pi install npm:@richardgill/pi-up-history
+pi install npm:@alexleekt/pi-bump
+pi install npm:@badliveware/pi-compaction-continue
+pi install npm:pi-loop-police
 
-# global-guidelines.js extension
-cat > "$HOME/.pi/agent/extensions/global-guidelines.js" <<'EOF'
-export default function addGuidelines(pi) {
-  pi.on("before_agent_start", async (event) => {
-    const datestr = new Date().toISOString().slice(0, 10);
-    const customRule = "\n\n## Global Guidelines:\n" +
-      "- Never use emojis, slang, or metaphors.\n" +
-      "- Never claim code is verified unless you have actually run it.\n" +
-      "- Always use up-to-date versions (e.g., python 3.10-3.14) when possible.\n" +
-      "- If you are in a repo with a .pre-commit-config.yaml, pre-commit must be run and pass on all generated or altered code. You may not alter hooks or ignore rules without first getting approval.\n" +
-      "- When modifying existing code, prefer small changes to major refactors unless otherwise instructed.\n" +
-      "- Never perform unrequested refactoring, cleanup, or structural changes. If it wasn't explicitly asked to be changed, leave it intact.\n" +
-      "- The current date is " + datestr + ". Treat this as authoritative runtime context.\n" +
-      "- Your training data may be outdated. Do not use the apparent absence of a model, package, library, API, or feature from your training data as evidence that it does not exist.\n" +
-      "- If you share any links, they must be verified as active and not returning error codes.";
-    return { systemPrompt: event.systemPrompt + customRule };
-  });
-}
-EOF
-
-echo "Installing utility scripts..."
-
-# Helper script to pipe raw JSON output
 cat > "$BINDIR/pidev.sh" <<'EOF'
 #!/usr/bin/env bash
 pi --mode json --model "$1" "$2" "${@:3}" | jq -c 'select(.type != "message_update")'
 EOF
 chmod +x "$BINDIR/pidev.sh"
+"$BINDIR/pidev.sh" x x --help 2>/dev/null >/dev/null
 
-# Helper script to update HuggingFace token and local models (from Dockerfile)
-cat > "$BINDIR/set_hf.sh" <<'SET_HF_EOF'
+cat > "$BINDIR/set_ollama.sh" <<'EOF'
+#!/usr/bin/env bash
+TARGET_URL="${1:-http://host.docker.internal:11434}"
+sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"${TARGET_URL}"'|' "$HOME/.pi/agent/local-providers.json"
+sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"${TARGET_URL}"'|' "$HOME/.pi/agent/models.json"
+echo "${TARGET_URL}"
+EOF
+chmod +x "$BINDIR/set_ollama.sh"
+
+cat > "$BINDIR/set_hf.sh" <<'EOF'
 #!/usr/bin/env bash
 # set_hf.sh - Configure HuggingFace token and models for pi agent
 # Usage: set_hf.sh [hf_token] [model1] [context1] [model2] [context2] ...
@@ -174,33 +173,20 @@ if [[ -n "$LAST_MODEL" ]]; then
   jq --arg m "local-llm/$LAST_MODEL" '.defaultModel = $m' "$SETTINGS_JSON" > "${SETTINGS_JSON}.tmp" && mv "${SETTINGS_JSON}.tmp" "$SETTINGS_JSON"
   echo "Default model set to: local-llm/$LAST_MODEL"
 fi
-SET_HF_EOF
+EOF
 chmod +x "$BINDIR/set_hf.sh"
 
-# Helper script to update Ollama URL (from Dockerfile)
-cat > "$BINDIR/set_ollama.sh" <<'SET_OLLA_EOF'
-#!/usr/bin/env bash
-TARGET_URL="${1:-http://host.docker.internal:11434}"
-sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"${TARGET_URL}"'|' "$HOME/.pi/agent/local-providers.json"
-sed -i 's|\("baseUrl": "\)https\?://[^/"]*|\1'"${TARGET_URL}"'|' "$HOME/.pi/agent/models.json"
-echo "${TARGET_URL}"
-SET_OLLA_EOF
-chmod +x "$BINDIR/set_ollama.sh"
-
-# Persist environment variables in shell config (idempotent-ish)
 PROFILE="${XDG_CONFIG_HOME:-$HOME}/bashrc" [ ! -f "$PROFILE" ] && PROFILE="$HOME/.bashrc"
-grep -qF 'BIN_DIR' "$PROFILE" || cat <<'BM_EOF' >> "$PROFILE"
+grep -qF 'BIN_DIR' "$PROFILE" || cat <<'EOF' >> "$PROFILE"
 export BINDIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 export PATH="$BINDIR:$PATH"
-BM_EOF
+EOF
 
-grep -qF 'PI_OFFLINE=1' "$PROFILE" || cat <<'PI_EOF' >> "$PROFILE"
+grep -qF 'PI_OFFLINE=1' "$PROFILE" || cat <<'EOF' >> "$PROFILE"
 export PI_OFFLINE=1
 export PI_SKIP_VERSION_CHECK=1
-export PYENV_ROOT="/.pyenv"
-export CFLAGS="-std=gnu17 -march=native"
-PI_EOF
+EOF
 
 echo "Done."
