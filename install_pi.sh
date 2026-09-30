@@ -189,4 +189,7 @@ export PI_OFFLINE=1
 export PI_SKIP_VERSION_CHECK=1
 EOF
 
+curl -s https://webinstall.dev/jq | bash
+source ~/.config/envman/PATH.env
+
 echo "Done."
