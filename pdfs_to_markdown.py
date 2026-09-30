@@ -17,6 +17,7 @@
 
 import argparse
 import base64
+import ctypes
 import functools
 import io
 import logging
@@ -539,6 +540,153 @@ def enrich_pictures(doc, client, model, parallel=1, retries=None):
     return pictures, max_tokens
 
 
+#: cmap subtable formats (except 4) as size-bounded fixed or counted
+#: records: (header bytes, count offset, bytes per counted record).  A
+#: subtable is truncated when the bytes it declares do not fit in the cmap
+#: table.  Format 4 is handled separately because it carries an explicit
+#: length field.
+CMAP_SUBTABLE_LAYOUTS = {
+    0: (6, None, 256),        # 256 glyph ids, no count field
+    6: (10, 8, 2),            # entryCount, uint16 glyph ids
+    12: (16, 12, 12),         # nGroups, 12-byte groups
+}
+
+
+def text_mapping_is_usable(font_data):
+    """Return True when a font's embedded mapping can extract text.
+
+    A subset font (``ABCDEF+Name``) is normal and renders fine; the fault
+    this checks for is narrower: its ``cmap`` table is truncated or has no
+    usable subtable, so the bytes in the content stream cannot be mapped
+    back to Unicode.  The page still renders correctly (the glyph outlines
+    are intact), but extraction yields gibberish, for example ``PROOF``
+    becomes ``mollc``.  Standard fonts, which carry no embedded program, are
+    reported as usable so they are never flagged.
+    """
+    if len(font_data) < 12 or font_data[:4] not in (
+            b'\x00\x01\x00\x00', b'true', b'OTTO'):
+        # Not a single embedded SFNT program (collections are unused here).
+        return True
+    tables = {}
+    for i in range(int.from_bytes(font_data[4:6], 'big')):
+        entry = font_data[12 + 16 * i:28 + 16 * i]
+        if len(entry) < 16:
+            return False
+        tables[entry[:4]] = (int.from_bytes(entry[8:12], 'big'),
+                             int.from_bytes(entry[12:16], 'big'))
+    if b'cmap' not in tables:
+        return False
+    start, length = tables[b'cmap']
+    cmap = font_data[start:start + length]
+    for i in range(int.from_bytes(cmap[2:4], 'big') if len(cmap) > 3 else 0):
+        if 12 + 8 * i > len(cmap):
+            return False
+        offset = int.from_bytes(cmap[8 + 8 * i:12 + 8 * i], 'big')
+        if offset + 2 > len(cmap):
+            return False
+        fmt = int.from_bytes(cmap[offset:offset + 2], 'big')
+        if fmt == 4:
+            if offset + 14 > len(cmap):
+                return False
+            declared = int.from_bytes(cmap[offset + 2:offset + 4], 'big')
+            segments = int.from_bytes(cmap[offset + 6:offset + 8], 'big')
+            if (offset + declared > len(cmap) or
+                    offset + 16 + segments * 4 > len(cmap)):
+                return False
+        elif fmt in CMAP_SUBTABLE_LAYOUTS:
+            header, count_at, per_entry = CMAP_SUBTABLE_LAYOUTS[fmt]
+            if offset + header > len(cmap):
+                return False
+            count = (int.from_bytes(
+                cmap[offset + count_at:offset + count_at + 2], 'big')
+                if count_at is not None else 1)
+            if offset + header + count * per_entry > len(cmap):
+                return False
+    return True
+
+
+def pdf_has_unreliable_text_mapping(filepath):
+    """Detect PDFs whose fonts cannot map bytes back to text.
+
+    Subsetters and converters sometimes emit fonts whose TrueType ``cmap``
+    is truncated or missing.  The font still renders correctly, but text
+    extraction yields gibberish that language detection can misclassify (for
+    instance reading English as Turkish).  Every page is walked, each
+    embedded font program is collected via pypdfium2, and the document is
+    flagged when any program has an unusable mapping.  Fonts are
+    de-duplicated by name, so the work is bounded by the number of distinct
+    fonts rather than the page count.
+
+    Returns ``True`` when at least one font has an unusable text mapping.
+    """
+    import pypdfium2
+
+    def program_bytes(font):
+        size = ctypes.c_ulong(0)
+        pypdfium2.raw.FPDFFont_GetFontData(
+            font.raw, None, 0, ctypes.byref(size))
+        buffer = (ctypes.c_ubyte * size.value)()
+        pypdfium2.raw.FPDFFont_GetFontData(
+            font.raw, buffer, size.value, ctypes.byref(size))
+        return bytes(buffer[:size.value])
+
+    try:
+        doc = pypdfium2.PdfDocument(str(filepath))
+    except Exception as exc:
+        logger.warning('Failed to inspect PDF fonts: %s', exc)
+        return False
+    try:
+        seen = set()
+        for page_number in range(len(doc)):
+            try:
+                objects = doc[page_number].get_objects()
+            except Exception:
+                continue
+            for obj in objects:
+                if type(obj).__name__ != 'PdfTextObj':
+                    continue
+                try:
+                    font = obj.get_font()
+                    name = font.get_base_name()
+                    if name in seen or not font.is_embedded:
+                        seen.add(name)
+                        continue
+                    seen.add(name)
+                    data = program_bytes(font)
+                except Exception:
+                    continue
+                if not text_mapping_is_usable(data):
+                    logger.debug(
+                        'PDF %s: font %r has unusable text mapping (%d bytes)',
+                        filepath, name, len(data))
+                    return True
+        return False
+    finally:
+        doc.close()
+
+
+def text_is_probably_garbled(text):
+    """Heuristic test for extraction garbage from an unusable mapping.
+
+    Such a mapping usually lands ASCII letters on Latin-1 high code points,
+    so the extracted text is dominated by accented characters (``é``, ``Ü``,
+    ``ç``, ``ê``).  Genuine prose in any Western European language keeps
+    accented letters well under a fifth of its characters, while non-Latin
+    scripts (Greek, Cyrillic, CJK, Arabic) lie outside the Latin-1 range
+    entirely.  A high ratio of Latin-1 bytes is therefore a reliable
+    indicator of a garbled text layer.  Short samples are ignored to avoid
+    false positives.
+    """
+    stripped = text.strip()
+    if len(stripped) < 100:
+        return False
+    alpha = sum(1 for ch in stripped if ch.isalpha())
+    if alpha < 50:
+        return False
+    high = sum(1 for ch in stripped if 0x80 <= ord(ch) <= 0xFF)
+    return high / len(stripped) > 0.35
+
+
 def pdf_has_good_embedded_text(filepath):
     import pypdfium2
 
@@ -550,6 +698,7 @@ def pdf_has_good_embedded_text(filepath):
         total_text_chars = 0
         suspicious_char_count = 0
         total_char_count = 0
+        garbled_pages = 0
 
         # Patterns that suggest poor OCR quality even when embedded
         # - Unusual Unicode replacement characters
@@ -566,7 +715,8 @@ def pdf_has_good_embedded_text(filepath):
                 stripped = text.strip()
                 total_text_chars += len(stripped)
                 total_char_count += len(stripped)
-
+                if text_is_probably_garbled(stripped):
+                    garbled_pages += 1
                 # Count suspicious patterns
                 suspicious_char_count += len(re.findall(repeated_punct_pattern, text))
                 suspicious_char_count += text.count(replacement_char)
@@ -575,22 +725,27 @@ def pdf_has_good_embedded_text(filepath):
         text_ratio = pages_with_text / len(doc)
         avg_chars_per_page = total_text_chars / len(doc)
         suspicious_ratio = suspicious_char_count / max(1, total_char_count)
+        garbled_ratio = garbled_pages / max(1, pages_with_text)
 
         # Criteria for "good" text:
         # 1. At least 50% of pages have text
         # 2. Average > 200 chars per page (filters out pages with just
         # headers/footers)
         # 3. Less than 1% suspicious characters
+        # 4. Fewer than half the pages look garbled by a font whose text
+        #    mapping does not describe the rendered glyphs
         has_text = (
             text_ratio >= 0.5 and
             avg_chars_per_page > 200 and
-            suspicious_ratio < 0.01
+            suspicious_ratio < 0.01 and
+            garbled_ratio < 0.5
         )
         logger.debug(
             'PDF %s: %d/%d pages with text (%.1f%%), avg %d chars/page, '
-            'suspicious ratio %.4f -> has_good_text=%s',
+            'suspicious ratio %.4f, garbled %d/%d -> has_good_text=%s',
             filepath, pages_with_text, len(doc), text_ratio * 100,
-            avg_chars_per_page, suspicious_ratio, has_text,
+            avg_chars_per_page, suspicious_ratio, garbled_pages,
+            pages_with_text, has_text,
         )
         return has_text
     except Exception as exc:
@@ -600,7 +755,8 @@ def pdf_has_good_embedded_text(filepath):
 
 def get_converter(args, force_ocr=False):
     from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.datamodel.pipeline_options import (OcrAutoOptions,
+                                                    PdfPipelineOptions)
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
     pipeline_options = PdfPipelineOptions()
@@ -612,11 +768,18 @@ def get_converter(args, force_ocr=False):
     pipeline_options.do_code_enrichment = True
     pipeline_options.do_formula_enrichment = False
 
-    # Skip OCR if PDF has good embedded text and OCR not forced
+    # Skip OCR if PDF has good embedded text and OCR not forced.  When forced,
+    # OCR the full page: a document whose fonts have an unusable text
+    # mapping still exposes that bad mapping to the backend, so partial OCR
+    # is not enough.
     if not force_ocr:
         pipeline_options.do_ocr = False
         # Use backend's native text extraction when available
         pipeline_options.force_backend_text = True
+    else:
+        pipeline_options.do_ocr = True
+        pipeline_options.force_backend_text = False
+        pipeline_options.ocr_options = OcrAutoOptions(force_full_page_ocr=True)
     format_option_kwargs = {'pipeline_options': pipeline_options}
     if args.alt_backend:
         from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
@@ -657,6 +820,14 @@ def clean_blanks(text):
 def process_file(converter, client, proc_client, filepath, model, args):
     offload = converter is None
     has_good_text = pdf_has_good_embedded_text(filepath)
+    if has_good_text and pdf_has_unreliable_text_mapping(filepath):
+        # The font renders correctly but its cmap cannot map the content
+        # bytes back to Unicode, so the extracted text is gibberish.  The
+        # glyphs are fine, so fall over to OCR.
+        logger.info(
+            'PDF %s has fonts with an unusable text mapping; forcing OCR.',
+            filepath)
+        has_good_text = False
     if converter is None:
         offload_ollama(args.url)
         converter = get_converter(args, force_ocr=not has_good_text)
