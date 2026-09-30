@@ -325,7 +325,8 @@ def main():  # noqa
         git_restore_cmd = (
             'cd /home/ubuntu/' + current_dir + ' && '
             "git ls-files -s 2>/dev/null | grep '^100' | "
-            'while read mode type sha path; do chmod "\\${mode:3:4}" "\\$path"; done || true')
+            'while read mode type sha path; do chmod "\\${mode:3:4}" "\\$path"; done || true;'
+            'if [ -f .git/hooks/pre-commit ]; then chmod a+x .git/hooks/pre-commit; fi')
         cmd = docker_cmd + ['exec', '-i', container_name, 'bash', '-c', git_restore_cmd]
         logger.info(cmd)
         subprocess.check_call(cmd, stderr=subprocess.DEVNULL)
