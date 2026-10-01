@@ -4,28 +4,6 @@ import json
 import os
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Summarize traces from the pi agentic coding agent.',
-    )
-    parser.add_argument(
-        '--branch',
-        choices=['all', 'recent', 'longest'],
-        default='recent',
-        help=(
-            "Branch selection mode: 'all' shows every user message, "
-            "'recent' selects the branch with the most recent activity, "
-            "'longest' selects the deepest tree branch. (default: %(default)s)"
-        ),
-    )
-    parser.add_argument(
-        '--sessions-dir',
-        default='~/.pi/agent/sessions',
-        help='Root session directory (default: %(default)s)',
-    )
-    return parser.parse_args()
-
-
 def load_records(filepath):
     """Return a list of parsed JSON records from a .jsonl file."""
     records = []
@@ -49,7 +27,6 @@ def build_tree(records):
     msg_recs = [r for r in records if r.get('type') == 'message']
     msg_id_to_rec = {}
     children = {}  # parentId -> list of child ids
-
     for rec in msg_recs:
         mid = rec.get('id')
         parent_id = rec.get('parentId')
@@ -64,8 +41,8 @@ def build_tree(records):
 def find_roots(msg_id_to_rec, children):
     """Return sorted list of message ids that have no parent in the file."""
     all_children = set()
-    for kids in children.values():
-        all_children.update(kids)
+    for child in children.values():
+        all_children.update(child)
     return sorted(mid for mid in msg_id_to_rec if mid not in all_children)
 
 
@@ -111,7 +88,8 @@ def summary_from_ids(msg_ids, msg_id_to_rec):
 
 
 def select_branch(roots, msg_id_to_rec, children_map, mode):
-    """Select which branch to process based on args.branch.
+    """
+    Select which branch to process based on args.branch.
 
     Returns the chosen set of message ids for this trace file.
     """
@@ -136,13 +114,35 @@ def select_branch(roots, msg_id_to_rec, children_map, mode):
     return set(chosen[1]) if chosen else set()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description='Summarize traces from the pi agentic coding agent.',
+    )
+    parser.add_argument(
+        '--branch', choices=['all', 'recent', 'longest'], default='recent',
+        help='"all" shows every user message, "recent" shows the branch with '
+        'the most recent activity, "longest" shows the deepest tree branch. '
+        '(default: %(default)s)',
+    )
+    parser.add_argument(
+        '--dir', default='~/.pi/agent/sessions',
+        help='Root session directory (default: %(default)s)',
+    )
+    parser.add_argument(
+        '--rmzero', action='store_true',
+        help='Remove traces that had no response (usage max is zero). These '
+        'are terminated sessions.',
+    )
+    return parser.parse_args()
+
+
 def main():
     args = parse_args()
 
-    sessions_dir = os.path.expanduser(args.sessions_dir)
+    sessions_dir = os.path.expanduser(args.dir)
     totalcount = 0
     if not os.path.isdir(sessions_dir):
-        print(f'Sessions directory not found: {sessions_dir}', flush=True)
+        print(f'Sessions directory not found: {sessions_dir}')
         return
     for session_dir in sorted(os.listdir(sessions_dir)):
         full_dir = os.path.join(sessions_dir, session_dir)
@@ -167,15 +167,14 @@ def main():
                 if not chosen_ids:
                     chosen_ids = set(msg_id_to_rec.keys())
             count, usage_sum, data = summary_from_ids(chosen_ids, msg_id_to_rec)
+            if args.rmzero and (not data or usage_sum['max'] == 0):
+                os.unlink(filepath)
+                continue
             if not data:
                 continue
             print(f'## {filepath}')
             branch_label = args.branch.upper()
-            if args.branch == 'recent':
-                branch_label += ' (most recent branch)'
-            elif args.branch == 'longest':
-                branch_label += ' (longest branch)'
-            print('- Calls (%s): ' % branch_label + ', '.join(
+            print(f'- Calls ({branch_label}): ' + ', '.join(
                 f'{k}: {count[k]}' for k in sorted(count)
             ))
             display_usage = {
