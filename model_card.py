@@ -2109,7 +2109,7 @@ def main():  # noqa
         if not args.metadata_only:
             ClientKwargs.update(dict(
                 base_url=f'{ollama_base_url}/v1',
-                api_key='ollama',
+                api_key=os.environ.get('OPENAI_API_KEY', 'ollama'),
                 timeout=args.timeout,
             ))
             client = OpenAI(**ClientKwargs)
