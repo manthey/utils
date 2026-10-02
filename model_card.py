@@ -34,6 +34,8 @@ import yaml
 from openai import OpenAI
 
 ClientKwargs = {}
+HF_BASE_URL = 'https://router.huggingface.co/v1'
+HfMode = False
 
 
 @dataclass
@@ -218,9 +220,115 @@ def get_model_metadata(ollama_base_url: str, model_name: str) -> dict[str, Any]:
 
 
 def determine_source(model_name: str) -> str:
+    if HfMode:
+        return 'huggingface'
     if model_name.startswith('hf.co/') or 'huggingface' in model_name.lower():
         return 'huggingface'
     return 'ollama'
+
+
+def split_hf_model(model_name: str, base_url: str = '') -> tuple[str, str | None]:
+    """Split a Hugging Face router model id into its base id and routing policy.
+
+    The router accepts a suffix after the colon that is either a routing
+    policy (':cheapest', ':fastest', ':preferred') or an inference provider
+    name (for example ':groq' or ':novita') to control provider selection.
+    The base model id (the part before the colon) is what the Hugging Face hub
+    API expects.  Other OpenAI-compatible servers use colons in model tags
+    (for example 'qwen3.6:35b'), so the suffix is only treated as a selection
+    hint for Hugging Face hosts.
+    """
+    if 'huggingface' not in base_url:
+        return model_name, None
+    base_id, sep, suffix = model_name.partition(':')
+    return base_id, (suffix if sep else None)
+
+
+def get_hf_model_info(base_id: str, hub_url: str) -> dict[str, Any]:
+    response = requests.get(f'{hub_url}/api/models/{base_id}', timeout=30)
+    response.raise_for_status()
+    return response.json()
+
+
+def list_server_models(base_url: str) -> list[dict[str, Any]]:
+    """Fetch the OpenAI-compatible model listing, if the server has one.
+
+    Returns an empty list when the endpoint is absent or unavailable so that
+    servers which do not expose a catalog still work.
+    """
+    try:
+        response = requests.get(f'{base_url}/models', timeout=30)
+        response.raise_for_status()
+        return response.json().get('data', []) or []
+    except requests.exceptions.RequestException:
+        return []
+
+
+def get_model_metadata_hf(base_url: str, model_name: str) -> dict[str, Any]:
+    """Collect metadata without any Ollama-specific endpoints.
+
+    Uses the OpenAI-compatible model listing when the server exposes one.  For
+    the Hugging Face router, the public hub API is also consulted for details
+    that the listing does not carry (architecture, parameter count).
+    """
+    base_id, suffix = split_hf_model(model_name, base_url)
+    entry = next(
+        (m for m in list_server_models(base_url) if m.get('id') == base_id), {})
+    info: dict[str, Any] = {}
+    if 'huggingface' in base_url and '/' in base_id:
+        hub_url = ('https://huggingface.co' if 'router.' in base_url
+                   else base_url.split('/v1')[0])
+        try:
+            info = get_hf_model_info(base_id, hub_url)
+        except requests.exceptions.RequestException:
+            info = {}
+    config = info.get('config') or {}
+    architectures = config.get('architectures') or []
+    model_type = config.get('model_type', 'unknown')
+    parameter_count = (info.get('safetensors') or {}).get('total')
+    quantization = (config.get('quantization_config') or {}).get(
+        'quant_method', 'unknown')
+    tags = [t.lower() for t in info.get('tags', [])]
+    providers = entry.get('providers') or []
+    live_providers = [p for p in providers if p.get('status') == 'live']
+    context_length = max(
+        (p.get('context_length') or 0 for p in live_providers), default=0) or None
+    has_tool = any(p.get('supports_tools') for p in live_providers)
+    modalities = (entry.get('architecture') or {}).get('input_modalities', []) or []
+    has_vision = any(m in ('image', 'video') for m in modalities) or (
+        info.get('pipeline_tag') in ('image-text-to-text', 'visual-question-answering'))
+    families = sorted({model_type} | {a.lower() for a in architectures})
+    if suffix:
+        kind = 'policy' if suffix in ('cheapest', 'fastest', 'preferred') else 'provider'
+        families = sorted(set(families) | {f'{kind}:{suffix}'})
+    last_modified = info.get('lastModified')
+    if not last_modified and entry.get('created'):
+        last_modified = datetime.datetime.fromtimestamp(
+            entry['created'], datetime.timezone.utc).isoformat()
+    return {
+        'name': model_name,
+        'source': determine_source(model_name),
+        'family': model_type,
+        'families': families,
+        'format': info.get('library_name') or 'unknown',
+        'parameter_size': (
+            f'{parameter_count / 1e9:.1f}B' if parameter_count else 'unknown'),
+        'parameter_count': parameter_count,
+        'context_length': context_length,
+        'quantization': quantization,
+        'has_vision': has_vision,
+        'has_tool': has_tool,
+        'has_reasoning': any('reasoning' in t or 'thinking' in t for t in tags),
+        'has_embedding': info.get('pipeline_tag') == 'feature-extraction' or
+        any('embedding' in t for t in tags),
+        'modified_at': last_modified or 'unknown',
+    }
+
+
+def get_model_metadata_any(base_url: str, model_name: str) -> dict[str, Any]:
+    if HfMode:
+        return get_model_metadata_hf(base_url, model_name)
+    return get_model_metadata(base_url, model_name)
 
 
 def generate_red_png_base64() -> str:
@@ -428,6 +536,7 @@ def extract_answer_from_reasoning(content: str) -> str:
 def test_first_load(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
+    result: dict[str, Any] = {}
     try:
         result = chat_completion(
             client,
@@ -446,6 +555,14 @@ def test_first_load(
             result = {'duration': time.time() - start}
         except Exception:
             pass
+    if HfMode:
+        return TestResult(
+            passed=True,
+            output='Non-Ollama server: not applicable (no local memory use)',
+            details={'duration': result.get('duration')},
+            timestamp=get_timestamp(),
+            usage=result.get('usage'),
+        )
     ps = requests.get(f'{ollama_base_url}/api/ps', timeout=10)
     ps.raise_for_status()
     ps = ps.json()
@@ -869,6 +986,14 @@ def test_embedding(
     has_nonzero = any(v != 0.0 for v in vector)
     results = [dimensions > 0, has_nonzero]
     passed = [len([r for r in results if r]), len(results)]
+    if HfMode:
+        return TestResult(
+            passed=passed,
+            output=f'Generated embedding with {dimensions} dimensions',
+            metadata={'embedding_dimensions': dimensions},
+            details={'has_nonzero_values': has_nonzero},
+            timestamp=get_timestamp(),
+        )
     ps = requests.get(f'{ollama_base_url}/api/ps', timeout=10)
     ps.raise_for_status()
     ps = ps.json()
@@ -1689,7 +1814,7 @@ def summary_table(summary, models):
             tval = model['tests'].get(t, {})
             row += [tval.get('status', ''), tval.get('duration', ''), tval.get('tokens', '')]
         row.append(covered_by(model, summary))
-        row.append('Yes' if model['metadata']['Name'] in models else '')
+        row.append('' if HfMode else ('Yes' if model['metadata']['Name'] in models else ''))
         row.append(str(idx + 1))
         rows.append(row)
     # Get rid of columns with all identical values
@@ -2055,7 +2180,17 @@ def main():  # noqa
     parser.add_argument(
         '--collect', action='store_true',
         help='Collect older model cards for the summary and report.')
+    parser.add_argument(
+        '--hf', action='store_true',
+        help='Use an OpenAI-compatible server that exposes model listings '
+        'rather than Ollama.  Requires --base-url (for example %s).  A model '
+        'must be named explicitly (for example '
+        'deepseek-ai/DeepSeek-V4.1-Flash:cheapest); model enumeration is not '
+        'used.  Ollama-only endpoints (/api/show, /api/ps, /api/tags) are '
+        'replaced by Hugging Face hub queries where available.' % HF_BASE_URL)
     args = parser.parse_args()
+    global HfMode
+    HfMode = args.hf
     load_yaml_tests(args.yaml)
     if args.list_tests:
         for t in TEST_REGISTRY:
@@ -2065,12 +2200,27 @@ def main():  # noqa
         sys.exit(0)
     if not args.dry_run:
         restart_command(args.restart)
-    ollama_base_url = (args.base_url or 'http://localhost:11434').rstrip('/')
+    if HfMode:
+        if not args.base_url:
+            sys.stderr.write(
+                'Error: --hf requires --base-url (for example '
+                f'{HF_BASE_URL})\n')
+            sys.exit(1)
+        if args.models is not None or not args.model:
+            sys.stderr.write(
+                'Error: --hf requires an explicit model name; model '
+                'enumeration is not supported\n')
+            sys.exit(1)
+        ollama_base_url = args.base_url.rstrip('/')
+    else:
+        ollama_base_url = (args.base_url or 'http://localhost:11434').rstrip('/')
     ollama_docker_url = (
         args.docker_url or args.base_url or 'http://host.docker.internal:11434').rstrip('/')
     if args.remove_tests and not args.tests:
         args.tests = 'skip_all_tests'
-    if not args.model or args.models is not None:
+    if HfMode:
+        models = [args.model]
+    elif not args.model or args.models is not None:
         models = list_models(ollama_base_url)
         if args.models:
             pattern = re.compile(args.models, re.IGNORECASE)
@@ -2093,10 +2243,10 @@ def main():  # noqa
         if not args.dry_run:
             sys.stderr.write(f'Fetching metadata for {model}\n')
         try:
-            metadata = get_model_metadata(ollama_base_url, model)
+            metadata = get_model_metadata_any(ollama_base_url, model)
         except requests.exceptions.ConnectionError:
             sys.stderr.write(
-                f'Error: cannot connect to Ollama at {ollama_base_url}\n',
+                f'Error: cannot connect to {ollama_base_url}\n',
             )
             sys.exit(1)
         except requests.exceptions.HTTPError as exc:
@@ -2108,7 +2258,7 @@ def main():  # noqa
         test_results: list[tuple[TestDefinition, TestResult]] = []
         if not args.metadata_only:
             ClientKwargs.update(dict(
-                base_url=f'{ollama_base_url}/v1',
+                base_url=ollama_base_url if HfMode else f'{ollama_base_url}/v1',
                 api_key=os.environ.get('OPENAI_API_KEY', 'ollama'),
                 timeout=args.timeout,
             ))
