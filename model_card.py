@@ -704,6 +704,8 @@ def bash_test(client: OpenAI, model_name: str, ollama_base_url: str, ollama_dock
         '{testtag}': testtag,
         '{ollamaurl}': ollama_base_url,
         '{dockerurl}': ollama_docker_url,
+        '{hfmode}': 'true' if Config['hfmode'] else 'false',
+        '{OPENAI_API_KEY}': os.environ.get('OPENAI_API_KEY', 'ollama'),
     }
     env = os.environ.copy()
     localenv = {str(k): str(repdict.get(v, v))
@@ -2105,7 +2107,7 @@ def main():  # noqa
         'lists of regex to match with the output of the chat or final main '
         'bash command.')
     parser.add_argument(
-        'model', nargs='?',
+        'model', nargs='*',
         help='Exact model name (e.g. llama3.2:latest).  Use --models for '
         'filtering by regex.')
     parser.add_argument(
@@ -2228,7 +2230,7 @@ def main():  # noqa
     if args.remove_tests and not args.tests:
         args.tests = 'skip_all_tests'
     if Config['hfmode']:
-        models = [args.model]
+        models = args.model
     elif not args.model or args.models is not None:
         models = list_models(ollama_base_url)
         if args.models:
@@ -2237,7 +2239,7 @@ def main():  # noqa
         if args.summary:
             models = sort_models(args.summary, args.output, models)
     else:
-        models = [args.model]
+        models = args.model
     model_metadata = {}
     summary = {}
     for model in models:
