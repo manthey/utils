@@ -227,6 +227,14 @@ def determine_source(model_name: str) -> str:
     return 'ollama'
 
 
+def normalize_base_url(url: str) -> str:
+    """Strip a trailing '/v1' so callers can append it uniformly."""
+    url = url.rstrip('/')
+    if url.endswith('/v1'):
+        url = url[:-len('/v1')].rstrip('/')
+    return url
+
+
 def split_hf_model(model_name: str, base_url: str = '') -> tuple[str, str | None]:
     """Split a Hugging Face router model id into its base id and routing policy.
 
@@ -257,7 +265,7 @@ def list_server_models(base_url: str) -> list[dict[str, Any]]:
     servers which do not expose a catalog still work.
     """
     try:
-        response = requests.get(f'{base_url}/models', timeout=30)
+        response = requests.get(f'{base_url}/v1/models', timeout=30)
         response.raise_for_status()
         return response.json().get('data', []) or []
     except requests.exceptions.RequestException:
@@ -277,7 +285,7 @@ def get_model_metadata_hf(base_url: str, model_name: str) -> dict[str, Any]:
     info: dict[str, Any] = {}
     if 'huggingface' in base_url and '/' in base_id:
         hub_url = ('https://huggingface.co' if 'router.' in base_url
-                   else base_url.split('/v1')[0])
+                   else base_url)
         try:
             info = get_hf_model_info(base_id, hub_url)
         except requests.exceptions.RequestException:
@@ -2211,9 +2219,10 @@ def main():  # noqa
                 'Error: --hf requires an explicit model name; model '
                 'enumeration is not supported\n')
             sys.exit(1)
-        ollama_base_url = args.base_url.rstrip('/')
+        ollama_base_url = normalize_base_url(args.base_url)
     else:
-        ollama_base_url = (args.base_url or 'http://localhost:11434').rstrip('/')
+        ollama_base_url = normalize_base_url(
+            args.base_url or 'http://localhost:11434')
     ollama_docker_url = (
         args.docker_url or args.base_url or 'http://host.docker.internal:11434').rstrip('/')
     if args.remove_tests and not args.tests:
@@ -2258,7 +2267,7 @@ def main():  # noqa
         test_results: list[tuple[TestDefinition, TestResult]] = []
         if not args.metadata_only:
             ClientKwargs.update(dict(
-                base_url=ollama_base_url if Config['hfmode'] else f'{ollama_base_url}/v1',
+                base_url=f'{ollama_base_url}/v1',
                 api_key=os.environ.get('OPENAI_API_KEY', 'ollama'),
                 timeout=args.timeout,
             ))
