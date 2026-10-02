@@ -35,7 +35,7 @@ from openai import OpenAI
 
 ClientKwargs = {}
 HF_BASE_URL = 'https://router.huggingface.co/v1'
-HfMode = False
+Config = {'hfmode': False}
 
 
 @dataclass
@@ -220,7 +220,7 @@ def get_model_metadata(ollama_base_url: str, model_name: str) -> dict[str, Any]:
 
 
 def determine_source(model_name: str) -> str:
-    if HfMode:
+    if Config['hfmode']:
         return 'huggingface'
     if model_name.startswith('hf.co/') or 'huggingface' in model_name.lower():
         return 'huggingface'
@@ -326,7 +326,7 @@ def get_model_metadata_hf(base_url: str, model_name: str) -> dict[str, Any]:
 
 
 def get_model_metadata_any(base_url: str, model_name: str) -> dict[str, Any]:
-    if HfMode:
+    if Config['hfmode']:
         return get_model_metadata_hf(base_url, model_name)
     return get_model_metadata(base_url, model_name)
 
@@ -555,7 +555,7 @@ def test_first_load(
             result = {'duration': time.time() - start}
         except Exception:
             pass
-    if HfMode:
+    if Config['hfmode']:
         return TestResult(
             passed=True,
             output='Non-Ollama server: not applicable (no local memory use)',
@@ -986,7 +986,7 @@ def test_embedding(
     has_nonzero = any(v != 0.0 for v in vector)
     results = [dimensions > 0, has_nonzero]
     passed = [len([r for r in results if r]), len(results)]
-    if HfMode:
+    if Config['hfmode']:
         return TestResult(
             passed=passed,
             output=f'Generated embedding with {dimensions} dimensions',
@@ -1814,7 +1814,8 @@ def summary_table(summary, models):
             tval = model['tests'].get(t, {})
             row += [tval.get('status', ''), tval.get('duration', ''), tval.get('tokens', '')]
         row.append(covered_by(model, summary))
-        row.append('' if HfMode else ('Yes' if model['metadata']['Name'] in models else ''))
+        row.append('' if Config['hfmode'] else (
+            'Yes' if model['metadata']['Name'] in models else ''))
         row.append(str(idx + 1))
         rows.append(row)
     # Get rid of columns with all identical values
@@ -2189,8 +2190,7 @@ def main():  # noqa
         'used.  Ollama-only endpoints (/api/show, /api/ps, /api/tags) are '
         'replaced by Hugging Face hub queries where available.' % HF_BASE_URL)
     args = parser.parse_args()
-    global HfMode
-    HfMode = args.hf
+    Config['hfmode'] = args.hf
     load_yaml_tests(args.yaml)
     if args.list_tests:
         for t in TEST_REGISTRY:
@@ -2200,7 +2200,7 @@ def main():  # noqa
         sys.exit(0)
     if not args.dry_run:
         restart_command(args.restart)
-    if HfMode:
+    if Config['hfmode']:
         if not args.base_url:
             sys.stderr.write(
                 'Error: --hf requires --base-url (for example '
@@ -2218,7 +2218,7 @@ def main():  # noqa
         args.docker_url or args.base_url or 'http://host.docker.internal:11434').rstrip('/')
     if args.remove_tests and not args.tests:
         args.tests = 'skip_all_tests'
-    if HfMode:
+    if Config['hfmode']:
         models = [args.model]
     elif not args.model or args.models is not None:
         models = list_models(ollama_base_url)
@@ -2258,7 +2258,7 @@ def main():  # noqa
         test_results: list[tuple[TestDefinition, TestResult]] = []
         if not args.metadata_only:
             ClientKwargs.update(dict(
-                base_url=ollama_base_url if HfMode else f'{ollama_base_url}/v1',
+                base_url=ollama_base_url if Config['hfmode'] else f'{ollama_base_url}/v1',
                 api_key=os.environ.get('OPENAI_API_KEY', 'ollama'),
                 timeout=args.timeout,
             ))
