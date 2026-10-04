@@ -18,9 +18,10 @@ import logging
 import shutil
 import sqlite3
 import sys
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 import requests
@@ -31,9 +32,36 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 logging.getLogger('paperscraper.load_dumps').setLevel(logging.WARNING + 1)
 logging.getLogger('paperscraper.pdf.fallbacks').setLevel(logging.CRITICAL)
+logging.getLogger('paperscraper.pdf.pdf').setLevel(logging.CRITICAL)
 logging.getLogger('pypaperretriever').setLevel(logging.CRITICAL)
 logging.getLogger('PyPaperRetriever').setLevel(logging.CRITICAL)
 logging.getLogger('HttpClient').setLevel(logging.WARNING + 1)
+
+# urllib3/requests and pypaperretriever emit noisy warnings during
+# downloads (deprecated pymupdf API, Unpaywall 404s); keep them out.
+warnings.filterwarnings('ignore', message='.*fitz.*')
+logging.getLogger('urllib3').setLevel(logging.ERROR)
+
+
+def normalize_doi(value: str) -> str | None:
+    """Normalize a DOI to its bare form.
+
+    Accepts plain DOIs (``10.1234/abc``), ``doi:`` prefixed identifiers, and
+    ``https://doi.org/`` URLs. Returns ``None`` if the value does not look like
+    a DOI.
+    """
+    if not value:
+        return None
+    doi = value.strip()
+    for prefix in ('https://doi.org/', 'http://doi.org/', 'https://dx.doi.org/',
+                   'http://dx.doi.org/', 'doi:'):
+        if doi.lower().startswith(prefix):
+            doi = doi[len(prefix):]
+            break
+    doi = doi.strip()
+    if doi.lower().startswith('10.'):
+        return doi
+    return None
 
 
 @dataclass
@@ -104,6 +132,15 @@ class PaperDatabase:
                 paper_count INTEGER NOT NULL,
                 identities TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS wanted_dois (
+                doi TEXT PRIMARY KEY,
+                added TEXT NOT NULL,
+                resolved INTEGER DEFAULT 0,
+                pdf_path TEXT,
+                last_attempt TEXT,
+                last_error TEXT
+            );
         """)
         self.conn.commit()
 
@@ -113,8 +150,27 @@ class PaperDatabase:
         ).fetchone()
         return row is not None
 
+    def is_excluded(self, paper: Paper) -> bool:
+        """Return True if the paper is acknowledged or has a wanted DOI entry."""
+        row = self.conn.execute(
+            'SELECT acknowledged FROM seen_papers WHERE identity = ?',
+            (paper.identity,),
+        ).fetchone()
+        if row is not None and row['acknowledged']:
+            return True
+        normalized = normalize_doi(paper.doi) if paper.doi else None
+        if normalized:
+            wanted = self.conn.execute(
+                'SELECT 1 FROM wanted_dois WHERE doi = ?', (normalized,),
+            ).fetchone()
+            if wanted is not None:
+                return True
+        return False
+
     def add_paper(self, paper: Paper, search_name: str, score: float):
         if self.is_known(paper.identity):
+            return False
+        if self.is_excluded(paper):
             return False
         self.conn.execute(
             """INSERT INTO seen_papers
@@ -145,6 +201,51 @@ class PaperDatabase:
         self.conn.commit()
         return True
 
+    def add_wanted_doi(self, doi: str) -> bool:
+        normalized = normalize_doi(doi)
+        if not normalized:
+            return False
+        existing = self.conn.execute(
+            'SELECT resolved FROM wanted_dois WHERE doi = ?', (normalized,),
+        ).fetchone()
+        if existing is not None:
+            if existing['resolved']:
+                self.conn.execute(
+                    'UPDATE wanted_dois SET resolved = 0 WHERE doi = ?', (normalized,),
+                )
+                self.conn.commit()
+                return True
+            return False
+        self.conn.execute(
+            'INSERT INTO wanted_dois (doi, added) VALUES (?, ?)',
+            (normalized, datetime.now(UTC).isoformat()),
+        )
+        self.conn.commit()
+        return True
+
+    def get_wanted_dois(self, unresolved_only: bool = True) -> list[dict]:
+        query = 'SELECT * FROM wanted_dois'
+        if unresolved_only:
+            query += ' WHERE resolved = 0'
+        query += ' ORDER BY added'
+        rows = self.conn.execute(query).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_wanted_resolved(self, doi: str, pdf_path: str):
+        self.conn.execute(
+            'UPDATE wanted_dois SET resolved = 1, pdf_path = ?, last_attempt = ?, '
+            'last_error = NULL WHERE doi = ?',
+            (pdf_path, datetime.now(UTC).isoformat(), doi),
+        )
+        self.conn.commit()
+
+    def mark_wanted_attempt(self, doi: str, error: str | None):
+        self.conn.execute(
+            'UPDATE wanted_dois SET last_attempt = ?, last_error = ? WHERE doi = ?',
+            (datetime.now(UTC).isoformat(), error, doi),
+        )
+        self.conn.commit()
+
     def get_unreported(self, search_name: str, limit: int) -> list[dict]:
         rows = self.conn.execute(
             """SELECT * FROM seen_papers
@@ -170,10 +271,24 @@ class PaperDatabase:
         self.conn.commit()
 
     def mark_acknowledged(self, identity: str):
-        self.conn.execute(
+        """Acknowledge a paper, inserting a stub row if it is not yet known.
+
+        This lets a user preemptively exclude a DOI that no search has seen yet.
+        """
+        cur = self.conn.execute(
             'UPDATE seen_papers SET acknowledged = 1 WHERE identity = ?',
             (identity,),
         )
+        if cur.rowcount == 0:
+            doi = identity[len('doi:'):] if identity.startswith('doi:') else None
+            self.conn.execute(
+                """INSERT INTO seen_papers
+                   (identity, title, doi, source, first_seen, reported,
+                    acknowledged, metadata)
+                   VALUES (?, ?, ?, ?, ?, 1, 1, '{}')""",
+                (identity, '(acknowledged)', doi, 'manual',
+                 datetime.now(UTC).isoformat()),
+            )
         self.conn.commit()
 
     def mark_downloaded(self, identity: str, pdf_path: str, success: bool, error: str = None):
@@ -335,92 +450,104 @@ class PubmedBackend(ArchiveBackend):
         return papers[:max_results]
 
 
+def search_biorxiv_family(
+    server: str,
+    source: str,
+    query_terms: list[list[str]],
+    max_results: int,
+    earliest: str = '2000-01-01',
+    max_pages: int = 50,
+) -> list[Paper]:
+    """Search a biorxiv-family server, paginating via cursor.
+
+    The biorxiv/medrxiv API offers no server-side keyword search, so this scans
+    the date range page by page and filters locally. ``max_results <= 0`` means
+    no result cap; ``max_pages`` bounds how much of the range is scanned.
+    """
+    papers: list[Paper] = []
+    lower_groups = [[t.lower() for t in g] for g in query_terms]
+    page_size = 100
+    cursor = 0
+    start_date = earliest
+    end_date = datetime.now(UTC).strftime('%Y-%m-%d')
+    base_url = f'https://api.biorxiv.org/details/{server}'
+    for _page in range(max_pages):
+        url = f'{base_url}/{start_date}/{end_date}/{cursor}/{page_size}'
+        try:
+            resp = requests.get(url, timeout=60)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as exc:
+            logger.error('%s search failed at cursor %s: %s', source, cursor, exc)
+            break
+        collection = data.get('collection', [])
+        if not collection:
+            break
+        for rec in collection:
+            title_lower = (rec.get('title', '') + ' ' + rec.get('abstract', '')).lower()
+            if not all(
+                any(t in title_lower for t in group) for group in lower_groups
+            ):
+                continue
+            doi = rec.get('doi')
+            pdf_url = None
+            if doi:
+                host = 'biorxiv' if source == 'biorxiv' else 'medrxiv'
+                pdf_url = f'https://www.{host}.org/content/{doi}v1.full.pdf'
+            papers.append(Paper(
+                title=rec.get('title', ''),
+                authors=rec.get('authors', '').split('; ') if rec.get('authors') else [],
+                doi=doi,
+                url=f'https://doi.org/{doi}' if doi else None,
+                abstract=rec.get('abstract'),
+                source=source,
+                published_date=rec.get('date'),
+                citation_count=0,
+                is_open_access=True,
+                is_peer_reviewed=False,
+                pdf_url=pdf_url,
+                relevance_score=0.85,
+            ))
+            if 0 < max_results <= len(papers):
+                return papers[:max_results]
+        cursor += len(collection)
+        total = None
+        messages = data.get('messages') or []
+        if messages:
+            total = messages[0].get('total')
+        if total is not None and cursor >= int(total):
+            break
+        if len(collection) < page_size:
+            break
+    return papers
+
+
 class BiorxivBackend(ArchiveBackend):
     name = 'biorxiv'
+    _server = 'biorxiv'
 
     @sleep_and_retry
     @limits(calls=1, period=5)
     def search(self, query_terms: list[list[str]], max_results: int) -> list[Paper]:
-        papers = []
-        flat_terms = []
-        for group in query_terms:
-            flat_terms.extend(group)
-        try:
-            base_url = 'https://api.biorxiv.org/details/biorxiv'
-            yesterday = (datetime.now(UTC) - timedelta(days=30)).strftime('%Y-%m-%d')
-            today = datetime.now(UTC).strftime('%Y-%m-%d')
-            url = f'{base_url}/{yesterday}/{today}/0/100'
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            for rec in data.get('collection', []):
-                title_lower = (rec.get('title', '') + ' ' + rec.get('abstract', '')).lower()
-                if all(any(t in title_lower for t in group_lower)
-                       for group_lower in [[t.lower() for t in g] for g in query_terms]):
-                    doi = rec.get('doi')
-                    paper = Paper(
-                        title=rec.get('title', ''),
-                        authors=rec.get('authors', '').split('; ') if rec.get('authors') else [],
-                        doi=doi,
-                        url=f'https://doi.org/{doi}' if doi else None,
-                        abstract=rec.get('abstract'),
-                        source='biorxiv',
-                        published_date=rec.get('date'),
-                        citation_count=0,
-                        is_open_access=True,
-                        is_peer_reviewed=False,
-                        pdf_url=(
-                            f'https://www.biorxiv.org/content/{doi}v1.full.pdf'
-                            if doi else None,
-                        ),
-                        relevance_score=0.85,
-                    )
-                    papers.append(paper)
-        except Exception as exc:
-            logger.error('biorxiv search failed: %s', exc)
-        return papers[:max_results]
+        return search_biorxiv_family(
+            self._server, 'biorxiv', query_terms, max_results,
+            earliest=self.config.get('earliest_date', '2000-01-01'),
+            max_pages=self.config.get('max_pages', 50),
+        )
 
 
 class MedrxivBackend(ArchiveBackend):
     name = 'medrxiv'
+    _server = 'medrxiv'
 
     @sleep_and_retry
     @limits(calls=1, period=5)
     def search(self, query_terms: list[list[str]], max_results: int) -> list[Paper]:
-        papers = []
-        try:
-            base_url = 'https://api.biorxiv.org/details/medrxiv'
-            yesterday = (datetime.now(UTC) - timedelta(days=30)).strftime('%Y-%m-%d')
-            today = datetime.now(UTC).strftime('%Y-%m-%d')
-            url = f'{base_url}/{yesterday}/{today}/0/100'
-            resp = requests.get(url, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            for rec in data.get('collection', []):
-                title_lower = (rec.get('title', '') + ' ' + rec.get('abstract', '')).lower()
-                if all(any(t.lower() in title_lower for t in group) for group in query_terms):
-                    doi = rec.get('doi')
-                    paper = Paper(
-                        title=rec.get('title', ''),
-                        authors=rec.get('authors', '').split('; ') if rec.get('authors') else [],
-                        doi=doi,
-                        url=f'https://doi.org/{doi}' if doi else None,
-                        abstract=rec.get('abstract'),
-                        source='medrxiv',
-                        published_date=rec.get('date'),
-                        citation_count=0,
-                        is_open_access=True,
-                        is_peer_reviewed=False,
-                        pdf_url=(
-                            f'https://www.medrxiv.org/content/{doi}v1.full.pdf'
-                            if doi else None,
-                        ),
-                        relevance_score=0.85,
-                    )
-                    papers.append(paper)
-        except Exception as exc:
-            logger.error('medrxiv search failed: %s', exc)
-        return papers[:max_results]
+        return search_biorxiv_family(
+            self._server, 'medrxiv', query_terms, max_results,
+            earliest=self.config.get('earliest_date', '2000-01-01'),
+            max_pages=self.config.get('max_pages', 50),
+        )
 
 
 class ChemrxivBackend(ArchiveBackend):
@@ -851,11 +978,37 @@ class PaperDownloader:
         usage = shutil.disk_usage(self.download_dir)
         return usage.free > self.min_free_bytes
 
+    @staticmethod
+    def safe_filename(title: str) -> str:
+        return ''.join(
+            c if c.isalnum() or c in ' -_' else '_' for c in title[:80]).strip()
+
+    def download_by_doi(self, doi: str) -> tuple[bool, str | None, str | None]:
+        """Download a paper by DOI via all available methods.
+
+        Used for the persistent wanted-DOI list; no archive metadata is needed.
+        """
+        if not self.has_disk_space():
+            return False, None, 'insufficient disk space'
+        normalized = normalize_doi(doi) or doi
+        safe_doi = ''.join(c if c.isalnum() or c in '._-' else '_' for c in normalized)
+        filepath = self.download_dir / f'{safe_doi}.pdf'
+        if filepath.exists() and filepath.stat().st_size > 1000:
+            return True, str(filepath), None
+        success, error = self.download_via_paperscraper(normalized, filepath)
+        if success:
+            return True, str(filepath), None
+        logger.debug('paperscraper download failed for %s: %s', normalized, error)
+        success, error = self.download_via_pypaperretriever(normalized, filepath)
+        if success:
+            return True, str(filepath), None
+        logger.debug('pypaperretriever download failed for %s: %s', normalized, error)
+        return False, None, 'all download methods exhausted'
+
     def download(self, paper: Paper) -> tuple[bool, str | None, str | None]:
         if not self.has_disk_space():
             return False, None, 'insufficient disk space'
-        safe_title = ''.join(
-            c if c.isalnum() or c in ' -_' else '_' for c in paper.title[:80]).strip()
+        safe_title = self.safe_filename(paper.title)
         filename = f'{safe_title}.pdf'
         filepath = self.download_dir / filename
         if filepath.exists():
@@ -908,41 +1061,34 @@ class PaperDownloader:
             return False, str(exc)
 
     def download_via_pypaperretriever(self, doi: str, filepath: Path) -> tuple[bool, str | None]:
+        import tempfile
         try:
             from pypaperretriever import PaperRetriever
 
-            retriever = PaperRetriever(
-                email=self.email,
-                doi=doi,
-                download_directory=str(filepath.parent),
-                allow_scihub=self.allow_scihub,
-            )
-            retriever.download()
-            downloaded_files = list(filepath.parent.glob(f'*{doi.replace("/", "_")}*'))
-            if not downloaded_files:
-                downloaded_files = sorted(
-                    filepath.parent.glob('*.pdf'),
-                    key=lambda p: p.stat().st_mtime,
-                    reverse=True,
+            # PaperRetriever creates doi-* subdirectories next to the download
+            # directory. Run it in a temporary directory so those are always
+            # cleaned up, then move the produced PDF into place.
+            with tempfile.TemporaryDirectory(prefix='paper_search_') as staging:
+                staging_dir = Path(staging)
+                retriever = PaperRetriever(
+                    email=self.email,
+                    doi=doi,
+                    download_directory=str(staging_dir),
+                    allow_scihub=self.allow_scihub,
                 )
-            success = False
-            if downloaded_files:
-                newest = downloaded_files[0]
-                if newest != filepath and newest.exists():
-                    newest.rename(filepath)
-                if filepath.exists() and filepath.stat().st_size > 1000:
-                    success = True
-            filepath.unlink(missing_ok=True)
-            for subdir in list(filepath.parent.iterdir()):
-                if subdir.name.startswith('doi-') and subdir.is_dir():
-                    try:
-                        if not any(subdir.iterdir()):
-                            shutil.rmtree(str(subdir), ignore_errors=True)
-                    except OSError:
-                        pass
-            if success:
+                retriever.download()
+                candidates = [
+                    p for p in staging_dir.rglob('*.pdf') if p.is_file()
+                ]
+                if not candidates:
+                    return False, 'pypaperretriever did not produce a valid file'
+                candidates.sort(key=lambda p: p.stat().st_size, reverse=True)
+                chosen = candidates[0]
+                if chosen.stat().st_size < 1000:
+                    return False, 'pypaperretriever produced file too small'
+                filepath.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(chosen), str(filepath))
                 return True, None
-            return False, 'pypaperretriever did not produce a valid file'
         except Exception as exc:
             filepath.unlink(missing_ok=True)
             return False, str(exc)
@@ -951,6 +1097,75 @@ class PaperDownloader:
 def load_config(config_path: Path) -> dict:
     with open(config_path) as f:
         return yaml.safe_load(f)
+
+
+def save_config(config_path: Path, config: dict):
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+
+
+def parse_term_groups(term_args: list[str]) -> list[list[str]]:
+    """Parse ``--term`` arguments into AND-groups.
+
+    Each ``--term`` is one AND-group; comma-separated values within a term are
+    OR alternatives, so ``--term "a,b" --term c`` yields ``[["a", "b"], ["c"]]``.
+    """
+    groups = []
+    for term in term_args:
+        alternatives = [t.strip() for t in term.split(',') if t.strip()]
+        if alternatives:
+            groups.append(alternatives)
+    return groups
+
+
+def cmd_searches_list(args, config):
+    searches = parse_search_queries(config)
+    if not searches:
+        print('no searches configured')
+        return
+    for search in searches:
+        groups = search.get('terms', [])
+        rendered = ' AND '.join(
+            '(' + ' OR '.join(group) + ')' for group in groups
+        )
+        print(f'{search["name"]}: {rendered}  [max_results={search.get("max_results", 50)}]')
+
+
+def cmd_searches_add(args, config):
+    searches = parse_search_queries(config)
+    terms = parse_term_groups(args.term)
+    if not terms:
+        print('at least one --term is required', file=sys.stderr)
+        sys.exit(1)
+    if any(s['name'] == args.name for s in searches):
+        print(f'search {args.name!r} already exists; use remove first', file=sys.stderr)
+        sys.exit(1)
+    entry = {'name': args.name, 'terms': terms, 'max_results': args.max_results}
+    searches.append(entry)
+    config['searches'] = searches
+    save_config(Path(args.config), config)
+    rendered = ' AND '.join('(' + ' OR '.join(g) + ')' for g in terms)
+    print(f'added search {args.name!r}: {rendered}')
+
+
+def cmd_searches_remove(args, config):
+    searches = parse_search_queries(config)
+    remaining = [s for s in searches if s['name'] != args.name]
+    if len(remaining) == len(searches):
+        print(f'no search named {args.name!r}', file=sys.stderr)
+        sys.exit(1)
+    config['searches'] = remaining
+    save_config(Path(args.config), config)
+    print(f'removed search {args.name!r}')
+
+
+def cmd_searches(args, config):
+    handlers = {
+        'list': cmd_searches_list,
+        'add': cmd_searches_add,
+        'remove': cmd_searches_remove,
+    }
+    handlers[args.searches_command](args, config)
 
 
 def build_backends(config: dict) -> list[ArchiveBackend]:
@@ -977,35 +1192,43 @@ def run_search(
     backends: list[ArchiveBackend],
     search_def: dict,
     config: dict,
+    max_results_override: int | None = None,
 ):
     search_name = search_def['name']
     query_terms = search_def['terms']
     max_results_per_backend = search_def.get('max_results', 50)
-    logger.info('running search: %s', search_name)
+    if max_results_override is not None:
+        max_results_per_backend = max_results_override
+    logger.info('search "%s": querying %d backend(s)', search_name, len(backends))
     all_papers = []
     for backend in backends:
-        logger.info('  querying %s ...', backend.name)
+        logger.debug('  querying %s ...', backend.name)
         try:
             papers = backend.search(query_terms, max_results_per_backend)
-            logger.info('  %s returned %d papers', backend.name, len(papers))
+            logger.debug('  %s returned %d papers', backend.name, len(papers))
             all_papers.extend(papers)
         except Exception as exc:
             logger.error('  %s raised: %s', backend.name, exc)
     new_count = 0
+    excluded_count = 0
     for paper in all_papers:
+        if db.is_excluded(paper):
+            excluded_count += 1
+            continue
         score = compute_score(paper, config)
         if db.add_paper(paper, search_name, score):
             new_count += 1
-    logger.info('search "%s": %d total results, %d new papers',
-                search_name, len(all_papers), new_count)
+    logger.info(
+        'search "%s": %d total results, %d new, %d excluded',
+        search_name, len(all_papers), new_count, excluded_count,
+    )
 
 
 def report_top_k(db: PaperDatabase, search_name: str, top_k: int) -> list[dict]:
     unreported = db.get_unreported(search_name, top_k)
     if not unreported:
-        logger.info('search "%s": no unreported papers', search_name)
+        logger.debug('search "%s": no unreported papers', search_name)
         return []
-    logger.info('search "%s": reporting top %d papers:', search_name, len(unreported))
     for i, row in enumerate(unreported, 1):
         meta = json.loads(row.get('metadata', '{}'))
         oa_marker = 'OA' if meta.get('is_open_access') else 'closed'
@@ -1033,13 +1256,13 @@ def download_top_l(
         (search_name, top_l),
     ).fetchall()
     if not rows:
-        logger.info('search "%s": no papers to download', search_name)
+        logger.debug('search "%s": no papers to download', search_name)
         return
     for row in rows:
         row = dict(row)
         meta = json.loads(row.get('metadata', '{}'))
         if not meta.get('is_open_access') and not meta.get('pdf_url'):
-            logger.info('  skipping non-OA paper without pdf_url: %s', row['title'][:60])
+            logger.debug('  skipping non-OA paper without pdf_url: %s', row['title'][:60])
             continue
         paper = Paper(
             title=row['title'],
@@ -1055,11 +1278,11 @@ def download_top_l(
             pdf_url=meta.get('pdf_url'),
             relevance_score=meta.get('relevance_score', 0.0),
         )
-        logger.info('  downloading: %s', paper.title[:60])
+        logger.debug('  downloading: %s', paper.title[:60])
         success, pdf_path, error = downloader.download(paper)
         db.mark_downloaded(row['identity'], pdf_path or '', success, error)
         if success:
-            logger.info('    saved to %s', pdf_path)
+            print(f'downloaded: {pdf_path}')
         else:
             logger.debug('    failed: %s', error)
         if not downloader.has_disk_space():
@@ -1067,15 +1290,50 @@ def download_top_l(
             break
 
 
+def download_wanted_dois(db: PaperDatabase, downloader: PaperDownloader):
+    """Attempt to download every unresolved DOI on the persistent wanted list.
+
+    Entries stay on the list until a download succeeds, so a DOI added once is
+    retried on every subsequent ``download`` run.
+    """
+    wanted = db.get_wanted_dois(unresolved_only=True)
+    if not wanted:
+        return
+    logger.info('wanted DOIs: %d unresolved', len(wanted))
+    for entry in wanted:
+        doi = entry['doi']
+        if not downloader.has_disk_space():
+            logger.warning('disk space reserve reached; stopping downloads')
+            break
+        logger.debug('  downloading wanted DOI: %s', doi)
+        success, pdf_path, error = downloader.download_by_doi(doi)
+        if success:
+            print(f'downloaded {doi} -> {pdf_path}')
+            db.mark_wanted_resolved(doi, pdf_path)
+        else:
+            db.mark_wanted_attempt(doi, error)
+            logger.debug('    failed for %s: %s', doi, error)
+
+
 def cmd_search(args, config):
     db = PaperDatabase(Path(config['database']))
     backends = build_backends(config)
     searches = parse_search_queries(config)
     top_k = config.get('top_k', 10)
+    max_results = getattr(args, 'max_results', None)
+    if getattr(args, 'all_results', False):
+        max_results = 0
+    if getattr(args, 'search_name', None):
+        searches = [s for s in searches if s['name'] == args.search_name]
+        if not searches:
+            print(f'no configured search named {args.search_name!r}', file=sys.stderr)
+            sys.exit(1)
     try:
         for search_def in searches:
-            run_search(db, backends, search_def, config)
-            report_top_k(db, search_def['name'], top_k)
+            run_search(db, backends, search_def, config,
+                       max_results_override=max_results)
+            if not getattr(args, 'no_report', False):
+                report_top_k(db, search_def['name'], top_k)
     finally:
         db.close()
 
@@ -1092,20 +1350,98 @@ def cmd_download(args, config):
                                  email, allow_scihub=allow_scihub)
     searches = parse_search_queries(config)
     try:
+        for value in collect_dois(args):
+            normalized = normalize_doi(value)
+            if not normalized:
+                print(f'not a DOI: {value!r}', file=sys.stderr)
+                continue
+            if db.add_wanted_doi(normalized):
+                print(f'wanted: {normalized}')
         for search_def in searches:
             download_top_l(db, downloader, search_def['name'], top_l)
+        download_wanted_dois(db, downloader)
+    finally:
+        db.close()
+
+
+def collect_dois(args) -> list[str]:
+    dois = list(getattr(args, 'doi', None) or [])
+    dois_file = getattr(args, 'dois_file', None)
+    if dois_file:
+        for line in Path(dois_file).read_text().splitlines():
+            line = line.split('#', 1)[0].strip()
+            if line:
+                dois.append(line)
+    return dois
+
+
+def cmd_want(args, config):
+    """Add DOIs to the persistent download wishlist."""
+    db = PaperDatabase(Path(config['database']))
+    try:
+        dois = collect_dois(args)
+        added = 0
+        for value in dois:
+            normalized = normalize_doi(value)
+            if not normalized:
+                print(f'not a DOI: {value!r}', file=sys.stderr)
+                continue
+            if db.add_wanted_doi(normalized):
+                added += 1
+                print(f'wanted: {normalized}')
+            else:
+                print(f'already wanted: {normalized}')
+        logger.debug('added %d wanted DOI(s)', added)
+        for entry in db.get_wanted_dois(unresolved_only=True):
+            print(f'  pending: {entry["doi"]}')
+    finally:
+        db.close()
+
+
+def cmd_unwant(args, config):
+    db = PaperDatabase(Path(config['database']))
+    try:
+        for value in collect_dois(args):
+            normalized = normalize_doi(value)
+            if not normalized:
+                print(f'not a DOI: {value!r}', file=sys.stderr)
+                continue
+            db.conn.execute('DELETE FROM wanted_dois WHERE doi = ?', (normalized,))
+            db.conn.commit()
+            print(f'removed from wanted list: {normalized}')
     finally:
         db.close()
 
 
 def cmd_acknowledge(args, config):
+    """Mark papers as acknowledged so they are excluded from future searches.
+
+    Accepts bare DOIs (``10.1234/abc``), ``doi:``-prefixed identities, or
+    ``https://doi.org/`` URLs.
+    """
     db = PaperDatabase(Path(config['database']))
     try:
-        for identity in args.identities:
+        identities = list(getattr(args, 'identities', None) or [])
+        for line in read_identity_file(getattr(args, 'dois_file', None)):
+            identities.append(line)
+        for raw in identities:
+            normalized = normalize_doi(raw)
+            identity = f'doi:{normalized}' if normalized else raw
             db.mark_acknowledged(identity)
-            logger.info('acknowledged: %s', identity)
+            print(f'acknowledged: {identity}')
     finally:
         db.close()
+
+
+def read_identity_file(path):
+    if not path:
+        return []
+    values = []
+    for line in Path(path).read_text().splitlines():
+        line = line.split('#', 1)[0].strip()
+        if line:
+            values.append(line)
+    return values
 
 
 def cmd_list(args, config):
@@ -1170,8 +1506,16 @@ def cmd_init_config(args, config):
         'archives': {
             'arxiv': {'enabled': True},
             'pubmed': {'enabled': True},
-            'biorxiv': {'enabled': True},
-            'medrxiv': {'enabled': False},
+            'biorxiv': {
+                'enabled': True,
+                'earliest_date': '2000-01-01',
+                'max_pages': 50,
+            },
+            'medrxiv': {
+                'enabled': False,
+                'earliest_date': '2000-01-01',
+                'max_pages': 50,
+            },
             'chemrxiv': {'enabled': False},
             'openalex': {
                 'enabled': True,
@@ -1228,10 +1572,91 @@ def main():
         '--verbose', '-v', action='count', default=0,
         help='Increase verbosity')
     subparsers = parser.add_subparsers(dest='command', required=True)
-    subparsers.add_parser('search', help='run configured searches and report top-k new papers')
-    subparsers.add_parser('download', help='download top-l undownloaded papers per search')
-    ack_parser = subparsers.add_parser('acknowledge', help='mark papers as acknowledged')
-    ack_parser.add_argument('identities', nargs='+', help='paper identity strings to acknowledge')
+    search_parser = subparsers.add_parser(
+        'search', help='run configured searches and report top-k new papers',
+    )
+    search_parser.add_argument(
+        '-s', '--search-name', default=None, help='run only the named search',
+    )
+    search_parser.add_argument(
+        '-m', '--max', '--max-results', dest='max_results', type=int, default=None,
+        help='cap results per backend (overrides config; 0 means no cap)',
+    )
+    search_parser.add_argument(
+        '--all', dest='all_results', action='store_true',
+        help='fetch all matching papers (no result cap)',
+    )
+    search_parser.add_argument(
+        '--no-report', action='store_true',
+        help='do not print the top-k report (just record results)',
+    )
+    download_parser = subparsers.add_parser(
+        'download', help='download top-l undownloaded papers per search',
+    )
+    download_parser.add_argument(
+        '-d', '--doi', action='append', default=None, metavar='DOI',
+        help='also attempt to download this DOI (added to the persistent wanted list)',
+    )
+    download_parser.add_argument(
+        '--dois-file', default=None, metavar='PATH',
+        help='text file of DOIs to add to the wanted list (one per line, # comments)',
+    )
+    ack_parser = subparsers.add_parser(
+        'acknowledge',
+        help='exclude papers from future searches by DOI',
+        description=(
+            'Mark papers as acknowledged so they are excluded from future '
+            'searches. Accepts bare DOIs (10.1234/abc), doi:-prefixed '
+            'identities, or https://doi.org/ URLs.'
+        ),
+    )
+    ack_parser.add_argument(
+        'identities', nargs='*', help='DOIs to acknowledge (bare, doi:, or doi.org URL)',
+    )
+    ack_parser.add_argument(
+        '--dois-file', default=None, metavar='PATH',
+        help='text file of DOIs to acknowledge (one per line, # comments)',
+    )
+    want_parser = subparsers.add_parser(
+        'want',
+        help='add DOIs to download persistently until they succeed',
+        description=(
+            'Add DOIs to the persistent wanted list. Every subsequent '
+            '"download" run retries unresolved DOIs until a download succeeds.'
+        ),
+    )
+    want_parser.add_argument('doi', nargs='+', help='DOIs to add to the wanted list')
+    want_parser.add_argument(
+        '--dois-file', default=None, metavar='PATH',
+        help='text file of DOIs to add (one per line, # comments)',
+    )
+    unwant_parser = subparsers.add_parser(
+        'unwant', help='remove DOIs from the wanted list',
+    )
+    unwant_parser.add_argument('doi', nargs='*', help='DOIs to remove')
+    unwant_parser.add_argument(
+        '--dois-file', default=None, metavar='PATH',
+        help='text file of DOIs to remove (one per line, # comments)',
+    )
+    searches_parser = subparsers.add_parser(
+        'searches', help='list, add, or remove searches in the config',
+    )
+    searches_sub = searches_parser.add_subparsers(
+        dest='searches_command', required=True,
+    )
+    searches_sub.add_parser('list', help='list configured searches')
+    add_parser = searches_sub.add_parser('add', help='add a search')
+    add_parser.add_argument('name', help='name of the search')
+    add_parser.add_argument(
+        '-t', '--term', action='append', default=[], metavar='TERMS',
+        help='one AND-group; comma-separate values for OR (repeatable)',
+    )
+    add_parser.add_argument(
+        '-m', '--max-results', type=int, default=50,
+        help='max results per backend (default: 50)',
+    )
+    remove_parser = searches_sub.add_parser('remove', help='remove a search')
+    remove_parser.add_argument('name', help='name of the search to remove')
     list_parser = subparsers.add_parser('list', help='list known papers')
     list_parser.add_argument('-s', '--search-name', default=None, help='filter by search name')
 
@@ -1261,6 +1686,9 @@ def main():
         'search': cmd_search,
         'download': cmd_download,
         'acknowledge': cmd_acknowledge,
+        'want': cmd_want,
+        'unwant': cmd_unwant,
+        'searches': cmd_searches,
         'list': cmd_list,
     }
     commands[args.command](args, config)
