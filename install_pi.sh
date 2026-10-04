@@ -49,8 +49,9 @@ cat > "$HOME/.pi/agent/settings.json" <<'EOF'
   "hideThinkingBlock": true,
   "httpIdleTimeoutMs": 0,
   "outputPad": 0,
+  "quietStartup": true,
   "steeringMode": "all",
-  "quietStartup": true
+  "tuiMode": "regular"
 }
 EOF
 
@@ -189,7 +190,7 @@ export PI_OFFLINE=1
 export PI_SKIP_VERSION_CHECK=1
 EOF
 
-curl -s https://webinstall.dev/jq | bash
+command -v jq >/dev/null 2>&1 || curl -s https://webinstall.dev/jq | bash
 source ~/.config/envman/PATH.env
 
 echo "Done."
