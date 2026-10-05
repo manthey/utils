@@ -2,22 +2,119 @@
 
 # Standardize binary directory based on XDG spec or default fallback
 export BINDIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
-NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+# Node version pi requires. Keep this independent of whatever node the host
+# container provides so pi can run even when no common version exists.
+PI_NODE_VERSION="${PI_NODE_VERSION:-22}"
+
+# Decide which NVM_DIR to use. We must not mutate the container's node setup:
+# `nvm install`, `nvm alias default`, and repointing `$NVM_DIR/current` are all
+# write operations. So we reuse the container's nvm ONLY when it is the same
+# NVM_DIR, already has PI_NODE_VERSION installed, and already has default and
+# `current` pointing at that version (i.e. all our writes would be no-ops).
+# Otherwise we isolate into a private NVM_DIR and leave the container alone.
+# This covers container node supplied by nvm, by a distro package, or by any
+# other version manager.
+PI_NVM_DIR_DEFAULT="${PI_NVM_DIR:-$HOME/.nvm-pi}"
+SHARED_NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+
+# Identify the nvm installation, if any, that owns the active node.
+active_node="$(command -v node 2>/dev/null || true)"
+active_real=""
+[ -n "$active_node" ] && active_real="$(readlink -f "$active_node" 2>/dev/null || echo "$active_node")"
+active_nvm=""
+case "$active_real" in
+  */versions/node/*/bin/node) active_nvm="${active_real%%/versions/node/*}" ;;
+esac
+
+REUSE_SHARED=0
+if [ -z "$active_node" ]; then
+  # No node at all: safe to use the shared nvm as the container has none.
+  REUSE_SHARED=1
+elif [ "$active_nvm" = "$SHARED_NVM_DIR" ] && [ -s "$SHARED_NVM_DIR/nvm.sh" ]; then
+  # Same nvm installation. Probe read-only whether our writes would be no-ops.
+  # subshell so sourcing nvm here cannot alter the caller's environment.
+  if ( # shellcheck disable=SC1090,SC1091
+    \. "$SHARED_NVM_DIR/nvm.sh" >/dev/null 2>&1
+    nvm which "$PI_NODE_VERSION" >/dev/null 2>&1 || exit 1
+    wanted_ver="$(nvm version "$PI_NODE_VERSION" 2>/dev/null)"
+    def="$(nvm alias default 2>/dev/null | sed -n 's/.*-> \([^ ]*\).*/\1/p')"
+    def_ver="$(nvm version "$def" 2>/dev/null)"
+    [ "$def_ver" = "$wanted_ver" ] || exit 1
+    wanted_bin="$(dirname "$(nvm which "$PI_NODE_VERSION")")"
+    cur_target="$(readlink -f "$SHARED_NVM_DIR/current" 2>/dev/null || true)"
+    [ "$cur_target" = "$(readlink -f "$wanted_bin")" ]
+  ); then
+    REUSE_SHARED=1
+  fi
+fi
+
+if [ "$REUSE_SHARED" -eq 1 ]; then
+  NVM_DIR="$SHARED_NVM_DIR"
+else
+  NVM_DIR="$PI_NVM_DIR_DEFAULT"
+fi
+export NVM_DIR
 
 if [ ! -s "$NVM_DIR/nvm.sh" ]; then
   curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash
 fi
 
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion" 2>/dev/null || true
+# shellcheck disable=SC1091
+\. "$NVM_DIR/nvm.sh"
+# shellcheck disable=SC1091
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion" 2>/dev/null || true
 
-# Ensure node is available
-if ! command -v node &>/dev/null; then
-  nvm install 22
-  nvm alias default 22
+# Install pi's node into nvm if this version is not already present. This runs
+# regardless of whether some other node exists, which was the original bug.
+if ! nvm which "$PI_NODE_VERSION" >/dev/null 2>&1; then
+  nvm install "$PI_NODE_VERSION"
 fi
+nvm use "$PI_NODE_VERSION" >/dev/null 2>&1 || true
+
+# In the isolated case, only set the default alias inside the private nvm so
+# the container's own default is never touched.
+if [ "$REUSE_SHARED" -eq 0 ]; then
+  nvm alias default "$PI_NODE_VERSION" >/dev/null 2>&1 || true
+fi
+
+# Pin a stable symlink to the selected node's bin, mirroring the Dockerfile.
+# Fresh shells do not inherit `nvm use`, so this is what makes pi resolvable
+# regardless of the container's node path.
+PI_NODE_BIN="$(dirname "$(nvm which "$PI_NODE_VERSION")")"
+ln -sfn "$PI_NODE_BIN" "$NVM_DIR/current"
 
 mkdir -p "$BINDIR" "$HOME/.pi/agent/extensions"
 npm install -g @earendil-works/pi-coding-agent
+
+# Expose pi through BINDIR without touching the container's own node. The
+# wrapper prepends pi's node bin to PATH for that invocation only, so the
+# npm shim's `#!/usr/bin/env node` shebang always resolves to the matching
+# node even when the host PATH points at a different version. "pi" is the
+# only name that must be global; the container keeps its own node/npm.
+PI_BIN="$PI_NODE_BIN"
+cat > "$BINDIR/pi" <<EOF
+#!/usr/bin/env bash
+PATH="$PI_BIN:\$PATH" exec "$PI_BIN/pi" "\$@"
+EOF
+chmod +x "$BINDIR/pi"
+
+# Only add pi's node to PATH if we did not have to isolate from a foreign node.
+# In both cases BINDIR (which carries the pi wrapper) must be on PATH.
+# CASE_PATH_LINE is written verbatim into the profile so $NVM_DIR/$BINDIR
+# expand at login time, hence the single quotes and SC2016 disable.
+# shellcheck disable=SC2016
+if [ "$REUSE_SHARED" -eq 1 ]; then
+  CASE_PATH_LINE='export PATH="$NVM_DIR/current:$BINDIR:$PATH"'
+else
+  CASE_PATH_LINE='export PATH="$BINDIR:$PATH"'
+fi
+
+# Make pi resolvable in the current shell for the remaining commands.
+case ":$PATH:" in
+  *":$BINDIR:"*) ;;
+  *) PATH="$BINDIR:$PATH" ;;
+esac
 
 cat > "$HOME/.pi/agent/extensions/global-guidelines.js" <<'EOF'
 export default function addGuidelines(pi) {
@@ -178,11 +275,11 @@ EOF
 chmod +x "$BINDIR/set_hf.sh"
 
 PROFILE="${XDG_CONFIG_HOME:-$HOME}/bashrc" [ ! -f "$PROFILE" ] && PROFILE="$HOME/.bashrc"
-grep -qF 'BIN_DIR' "$PROFILE" || cat <<'EOF' >> "$PROFILE"
-export BINDIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
-export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-export PATH="$BINDIR:$PATH"
+grep -qF 'BIN_DIR' "$PROFILE" || cat <<EOF >> "$PROFILE"
+export BINDIR="\${XDG_BIN_HOME:-\$HOME/.local/bin}"
+export NVM_DIR="$NVM_DIR"
+[ -s "\$NVM_DIR/nvm.sh" ] && \. "\$NVM_DIR/nvm.sh"
+$CASE_PATH_LINE
 EOF
 
 grep -qF 'PI_OFFLINE=1' "$PROFILE" || cat <<'EOF' >> "$PROFILE"
