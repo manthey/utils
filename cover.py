@@ -81,6 +81,8 @@ def add_xml_to_coverage(xml, cover, onlyLocal=False):
             continue
         lines = {}
         partial = {}
+        if '<methods>' in part:
+            part = part.split('<methods>', 1)[0] + part.split('</methods>', 1)[1]
         for line in part.split('<line ')[1:]:
             number = int(line.split('number="')[1].split('"')[0])
             hits = int(line.split('hits="')[1].split('"')[0])
