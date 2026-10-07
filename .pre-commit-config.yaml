@@ -60,7 +60,7 @@ repos:
       - id: pyupgrade
         args: [--py310-plus, --keep-percent-format]
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.8
+    rev: v0.16.10
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
@@ -70,12 +70,12 @@ repos:
     hooks:
       - id: autopep8
   - repo: https://github.com/PyCQA/flake8
-    rev: 7.3.0
+    rev: 7.4.1
     hooks:
       - id: flake8
         args: [--config=.flake8]
   - repo: https://github.com/pycqa/isort
-    rev: 9.0.1
+    rev: 9.0.2
     hooks:
       - id: isort
         name: isort (python)
@@ -129,7 +129,7 @@ repos:
         language: system
         types_or: [dockerfile]
   - repo: https://github.com/manthey/agent-reformat
-    rev: v1.0.38
+    rev: v1.0.39
     hooks:
       - id: agent-reformat
         args: [--fix]
