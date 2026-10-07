@@ -285,8 +285,8 @@ def get_lang_detector():
     import lingua
 
     lang = lingua.Language.all() - {
-        lingua.Language.AZERBAIJANI, lingua.Language.SOTHO,
-        lingua.Language.TSONGA, lingua.Language.YORUBA}
+        lingua.Language.AZERBAIJANI, lingua.Language.ESPERANTO,
+        lingua.Language.SOTHO, lingua.Language.TSONGA, lingua.Language.YORUBA}
     return lingua.LanguageDetectorBuilder.from_languages(*tuple(lang)).build()
 
 
@@ -681,10 +681,10 @@ def text_is_probably_garbled(text):
     if len(stripped) < 100:
         return False
     alpha = sum(1 for ch in stripped if ch.isalpha())
+    high = sum(1 for ch in stripped if 0x80 <= ord(ch) <= 0xFF)
     if alpha < 50:
         return False
-    high = sum(1 for ch in stripped if 0x80 <= ord(ch) <= 0xFF)
-    return high / len(stripped) > 0.35
+    return high / len(stripped) > 0.35 or alpha / len(stripped) < 0.3
 
 
 def pdf_has_good_embedded_text(filepath):
