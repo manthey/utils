@@ -2,6 +2,7 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
+#     "numpy",
 #     "openai",
 #     "python-dateutil",
 #     "pyyaml",
@@ -14,6 +15,7 @@ import base64
 import datetime
 import html
 import json
+import math
 import multiprocessing
 import os
 import queue
@@ -29,6 +31,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import dateutil.parser
+import numpy as np
 import requests
 import yaml
 from openai import OpenAI
@@ -47,6 +50,7 @@ class TestResult:
     version: int = 0
     timestamp: str | None = None
     usage: dict[str, int] | None = None
+    score: float | None = None
 
 
 @dataclass
@@ -1028,6 +1032,129 @@ def test_embedding(
     )
 
 
+def embedding_corpus():
+    """Git-tracked text files, chunked. Labels are repo-relative paths."""
+    root = os.path.dirname(os.path.realpath(__file__))
+    try:
+        tracked = subprocess.check_output(
+            ['git', '-C', root, 'ls-files', '-z']).decode('utf-8', 'replace')
+    except (OSError, subprocess.CalledProcessError):
+        return [], []
+    texts, labels = [], []
+    for rel in tracked.split('\0'):
+        if not rel:
+            continue
+        ext = os.path.splitext(rel)[1].lower()
+        name = os.path.basename(rel)
+        if ext in {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.db', '.pyc'}:
+            continue
+        if ext not in {'.py', '.md', '.yaml', '.yml', '.txt', '.toml', '.json',
+                       '.sh', '.cfg', '.ini', '.rst', '.vimrc', '.gitignore',
+                       '.flake8'} and name not in {'Dockerfile', 'Modelfile'}:
+            continue
+        try:
+            lines = open(os.path.join(root, rel), encoding='utf-8',
+                         errors='ignore').read().splitlines()
+        except OSError:
+            continue
+        if len(lines) < 5:
+            continue
+        for start in range(0, len(lines), 30):
+            chunk = '\n'.join(lines[start:start + 40]).strip()
+            if len(chunk) >= 80:
+                texts.append(chunk)
+                labels.append(rel)
+    return texts, labels
+
+
+def mrr_chance(group_sizes):
+    """Expected MRR under random ranking, from same-file group sizes."""
+    total = sum(group_sizes)
+    if total <= 1:
+        return 0.0
+    expected = 0.0
+    for group in group_sizes:
+        if group <= 1:
+            continue
+        others, same = total - 1, group - 1
+        value = 0.0
+        for rank in range(1, others + 1):
+            if rank - 1 > others - same:
+                break
+            p = (math.comb(others - same, rank - 1) / math.comb(others, rank - 1) *
+                 same / (others - rank + 1))
+            value += p / rank
+        expected += group * value
+    return expected / total
+
+
+def embedding_metrics(vectors, labels):
+    """MRR and exact pair AUC, both normalised to chance, then averaged."""
+    arr = np.asarray(vectors, dtype=np.float64)
+    norm = np.linalg.norm(arr, axis=1, keepdims=True)
+    arr = arr / np.where(norm == 0, 1.0, norm)
+    sims = arr @ arr.T
+    dim = arr.shape[1]
+    lab = np.asarray(labels)
+    same_mask = lab[:, None] == lab[None, :]
+    np.fill_diagonal(same_mask, False)
+    # MRR: rank of the best same-file chunk, self excluded.
+    masked = np.where(same_mask, sims, -np.inf)
+    best = masked.max(axis=1)
+    valid = np.isfinite(best)
+    other = np.where(np.eye(len(lab), dtype=bool), -np.inf, sims)
+    better = (other > best[:, None]).sum(axis=1)
+    mrr = float(np.mean(1.0 / (better[valid] + 1))) if valid.any() else 0.0
+    # Exact pair AUC via the Mann-Whitney rank-sum statistic.
+    iu = np.triu_indices(len(lab), k=1)
+    same_sims = sims[iu][same_mask[iu]]
+    diff_sims = sims[iu][~same_mask[iu]]
+    if same_sims.size == 0 or diff_sims.size == 0:
+        return 0.0, 0.0, 0.0, dim
+    order = np.argsort(np.concatenate([same_sims, diff_sims]), kind='stable')
+    ranks = np.empty_like(order)
+    ranks[order] = np.arange(1, order.size + 1)
+    n1, n0 = same_sims.size, diff_sims.size
+    auc = float((ranks[:n1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
+    groups = {}
+    for label in labels:
+        groups[label] = groups.get(label, 0) + 1
+    chance = mrr_chance(list(groups.values()))
+    norm_mrr = (mrr - chance) / (1 - chance) if chance < 1 else 0.0
+    norm_auc = (auc - 0.5) / 0.5
+    return (norm_mrr + norm_auc) / 2, mrr, auc, dim
+
+
+@register_test('embedding_quality', 'Embedding quality (repo retrieval)',
+               category='embedding', version=1)
+def test_embedding_quality(
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
+) -> TestResult:
+    sys.stdout.write('.')
+    sys.stdout.flush()
+    texts, labels = embedding_corpus()
+    vectors = []
+    for start in range(0, len(texts), 32):
+        response = client.embeddings.create(model=model_name,
+                                            input=texts[start:start + 32])
+        vectors.extend(item.embedding for item in response.data)
+    score, mrr, auc, dim = embedding_metrics(vectors, labels)
+    return TestResult(
+        passed=[round(score * 1000), 1000],
+        output=f'Embedding quality score {score:.3f}',
+        score=score,
+        metadata={
+            'quality_score': round(score, 4),
+            'embedding_mrr': round(mrr, 4),
+            'embedding_auc': round(auc, 4),
+            'corpus_files': len(set(labels)),
+            'corpus_chunks': len(labels),
+        },
+        details={'embedding_dimensions': dim},
+        timestamp=get_timestamp(),
+    )
+
+
 @register_test('vision', 'Image understanding', category='vision')
 def test_vision(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
@@ -1681,6 +1808,7 @@ def add_to_summary(summary, model, metadata, test_results):
             'tokens': result.usage['completion_tokens'] if result.usage else '',
             'output': result.details.get('extracted_answer') or result.output,
             'timestamp': result.timestamp,
+            'score': result.score,
         }
 
 
@@ -1735,6 +1863,7 @@ def covered_by(model, summary):
 
 def model_rank(model, summary, category=None):
     passed = 0
+    score_sum = 0.0
     ptime = 0.0
     sval = []
     stime = []
@@ -1757,16 +1886,19 @@ def model_rank(model, summary, category=None):
             elif category != 'all' and test_cat != category:
                 continue  # Only include tests in the requested category (except for 'all')
 
-        s = model['tests'][t].get('status', '')
+        test = model['tests'][t]
+        s = test.get('status', '')
         sc = 1.0 if s == 'PASSED' else (0.0 if s == 'Failed'
                                         else int(s.split('/')[0]) / int(s.split('/')[1]))
         sval.append(sc)
-        st = model['tests'][t].get('duration', '')
+        st = test.get('duration', '')
         stime.append(10000 if not st else float(st[:-1]))
+        if test.get('score') is not None:
+            score_sum += test['score']
         if sc == 1.0:
             passed += 1
             ptime += stime[-1]
-    return (-passed, ptime, -sum(sval), sum(stime))
+    return (-passed, -score_sum, ptime, -sum(sval), sum(stime))
 
 
 def rank_all_models(summary) -> list[str]:
