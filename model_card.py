@@ -1125,8 +1125,8 @@ def embedding_metrics(vectors, labels):
     return (norm_mrr + norm_auc) / 2, mrr, auc, dim
 
 
-@register_test('embedding_quality', 'Embedding quality (repo retrieval)',
-               category='embedding', version=1)
+@register_test('embedding_quality', 'Embedding quality',
+               category='embedding', version=0)
 def test_embedding_quality(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
