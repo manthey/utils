@@ -1626,7 +1626,9 @@ def load_existing_results(path: str | None) -> dict[str, TestResult]:
                 output=data.get('output', ''),
                 metadata=data.get('metadata') or {},
                 timestamp=data.get('timestamp'),
-                details=data.get('details') or {}, usage=data.get('usage'))
+                details=data.get('details') or {},
+                score=data.get('score'),
+                usage=data.get('usage'))
     return record.get('metadata'), results
 
 
