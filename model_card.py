@@ -1126,7 +1126,7 @@ def embedding_metrics(vectors, labels):
 
 
 @register_test('embedding_quality', 'Embedding quality',
-               category='embedding', version=0)
+               category='embedding', version=1)
 def test_embedding_quality(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
@@ -1140,17 +1140,17 @@ def test_embedding_quality(
         vectors.extend(item.embedding for item in response.data)
     score, mrr, auc, dim = embedding_metrics(vectors, labels)
     return TestResult(
-        passed=[round(score * 1000), 1000],
+        passed=[1 if score > 0 else 0, 1],
         output=f'Embedding quality score {score:.3f}',
         score=score,
-        metadata={
+        details={
             'quality_score': round(score, 4),
+            'embedding_dimensions': dim,
             'embedding_mrr': round(mrr, 4),
             'embedding_auc': round(auc, 4),
             'corpus_files': len(set(labels)),
             'corpus_chunks': len(labels),
         },
-        details={'embedding_dimensions': dim},
         timestamp=get_timestamp(),
     )
 
