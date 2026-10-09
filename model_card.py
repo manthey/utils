@@ -1948,7 +1948,7 @@ def summary_table(summary, models):
     cols = list(summary['columns'])
     rows = []
     for t in summary['tests']:
-        cols += [f'{known.get(t, t)}', 'Duration', 'Tokens']
+        cols += [f'{known.get(t, t)}', 'Duration', 'Score', 'Tokens']
     cols += ['Covered', 'Present', 'Rank']
     sorted_models = rank_all_models(summary)
     for idx, mname in enumerate(sorted_models):
@@ -1956,7 +1956,10 @@ def summary_table(summary, models):
         row = [model['metadata'].get(col, '') for col in summary['columns']]
         for t in summary['tests']:
             tval = model['tests'].get(t, {})
-            row += [tval.get('status', ''), tval.get('duration', ''), tval.get('tokens', '')]
+            score = tval.get('score')
+            score_str = '' if score is None else f'{score:.5f}'.rstrip('0').rstrip('.')
+            row += [tval.get('status', ''), tval.get('duration', ''),
+                    score_str, tval.get('tokens', '')]
         row.append(covered_by(model, summary))
         row.append('' if Config['hfmode'] else (
             'Yes' if model['metadata']['Name'] in models else ''))
