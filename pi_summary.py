@@ -133,6 +133,9 @@ def parse_args():
         help='Remove traces that had no response (usage max is zero). These '
         'are terminated sessions.',
     )
+    parser.add_argument(
+        '--src', help='Only show sessions for the specified source path.',
+    )
     return parser.parse_args()
 
 
@@ -145,6 +148,8 @@ def main():
         print(f'Sessions directory not found: {sessions_dir}')
         return
     for session_dir in sorted(os.listdir(sessions_dir)):
+        if args.src and session_dir != f'--home-ubuntu-{args.src}--':
+            continue
         full_dir = os.path.join(sessions_dir, session_dir)
         if not os.path.isdir(full_dir):
             continue
