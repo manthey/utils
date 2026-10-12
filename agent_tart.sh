@@ -16,6 +16,11 @@
 #   list       list known sandboxes
 #   delete     stop + delete a clone
 #   ip         print the VM IP
+#   cp         copy files to/from the VM; one endpoint prefixed vm:
+#
+# cp usage: agent_tart.sh cp [--name NAME] vm:<guest path> <local path>
+#           agent_tart.sh cp [--name NAME] <local path> vm:<guest path>
+#           (like docker cp; directories are copied recursively)
 #
 # The in-VM provisioning lives in agent_tart_provision.sh; pi is installed by
 # install_pi.sh (shared with the docker flow). mini-swe-agent support from
@@ -55,6 +60,7 @@ OLLAMA=""
 CONFIG_FILE="$SELF_DIR/agent_tart.yaml"
 MOUNTS=()
 SKIPS=()
+POSITIONALS=()
 
 die() {
     echo "agent_tart: $*" >&2
@@ -68,7 +74,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -81,7 +87,7 @@ parse_args() {
     SKIPS=()
     while [ $# -gt 0 ]; do
         case "$1" in
-        provision | create | start | stop | exec | ssh | sync | update | list | delete | ip)
+        provision | create | start | stop | exec | ssh | sync | update | list | delete | ip | cp)
             COMMAND="$1"
             ;;
         --name)
@@ -152,7 +158,7 @@ parse_args() {
             set -x
             ;;
         *)
-            usage
+            POSITIONALS+=("$1")
             ;;
         esac
         shift
@@ -308,6 +314,39 @@ run_scp() {
         -o ConnectTimeout=10 \
         -o BatchMode=yes \
         "$src" "$TART_USER@$ip:$dst"
+}
+
+# docker-cp-style copy: exactly one endpoint is prefixed vm: and refers to a
+# path in the VM (relative paths are relative to the guest home). scp -r
+# copies directories recursively and is harmless for plain files.
+do_cp() {
+    local src="$1"
+    local dst="$2"
+    if [ "${src#vm:}" != "$src" ] && [ "${dst#vm:}" != "$dst" ]; then
+        die "cp: only one endpoint may be a vm: path"
+    fi
+    if [ "${src#vm:}" = "$src" ] && [ "${dst#vm:}" = "$dst" ]; then
+        die "cp: one endpoint must be a vm: path"
+    fi
+    local ip
+    ip="$(vm_ip "$VM_NAME" 10)" || die "no IP for VM $VM_NAME (is it running?)"
+    if [ "${src#vm:}" != "$src" ]; then
+        info "copying $VM_NAME:${src#vm:} to $dst"
+        scp -r -i "$SSH_KEY" \
+            -o UserKnownHostsFile="$KNOWN_HOSTS" \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o BatchMode=yes \
+            "$TART_USER@$ip:${src#vm:}" "$dst"
+    else
+        info "copying $src to $VM_NAME:${dst#vm:}"
+        scp -r -i "$SSH_KEY" \
+            -o UserKnownHostsFile="$KNOWN_HOSTS" \
+            -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -o BatchMode=yes \
+            "$src" "$TART_USER@$ip:${dst#vm:}"
+    fi
 }
 
 # Interactive ssh (no BatchMode so the user can authenticate themselves).
@@ -678,5 +717,12 @@ delete)
 
 ip)
     vm_ip "$VM_NAME" 5 || die "no IP for $VM_NAME"
+    ;;
+
+cp)
+    if [ "${#POSITIONALS[@]}" -ne 2 ]; then
+        usage
+    fi
+    do_cp "${POSITIONALS[${#POSITIONALS[@]} - 2]}" "${POSITIONALS[${#POSITIONALS[@]} - 1]}"
     ;;
 esac
