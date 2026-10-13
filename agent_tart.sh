@@ -14,6 +14,7 @@
 #   exec       interactive shell in a running sandbox
 #   update     apply --ollama to a running sandbox
 #   list       list known sandboxes
+#   ip         print the VM IP
 #   cp         copy files to/from the VM; one endpoint prefixed in:
 #
 # cp usage: agent_tart.sh cp [--name NAME] in:<guest path> <local path>
@@ -70,7 +71,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -83,7 +84,18 @@ parse_args() {
     SKIPS=()
     while [ $# -gt 0 ]; do
         case "$1" in
-        provision | create | start | stop | exec | update | list | cp)
+        --*=*)
+            # Accept the --option=value spelling, like argparse does in
+            # agent_docker.py, by splitting the argument into two words.
+            if [ $# -gt 1 ]; then
+                set -- "${1%%=*}" "${1#*=}" "${@:2}"
+            else
+                set -- "${1%%=*}" "${1#*=}"
+            fi
+            ;;
+        esac
+        case "$1" in
+        provision | create | start | stop | exec | update | list | ip | cp)
             COMMAND="$1"
             ;;
         --name)
@@ -317,6 +329,9 @@ do_cp() {
     fi
     if [ "${src#in:}" = "$src" ] && [ "${dst#in:}" = "$dst" ]; then
         die "cp: one endpoint must be a in: path"
+    fi
+    if ! vm_exists "$VM_NAME"; then
+        die "VM $VM_NAME does not exist; run $0 create in the project directory (or use --src)"
     fi
     local ip
     ip="$(vm_ip "$VM_NAME" 10)" || die "no IP for VM $VM_NAME (is it running?)"
@@ -575,7 +590,7 @@ set_ollama_url() {
 # Every command that talks to a VM over ssh needs the key resolved first;
 # ensure_ssh_key is a no-op when it is already set.
 case "$COMMAND" in
-list | stop) ;;
+list | stop | ip) ;;
 *) ensure_ssh_key ;;
 esac
 
@@ -674,6 +689,10 @@ list)
         .[] | select(.Source == "local")
         | [.Name, (if .Running then "running" else "stopped" end), .State, (.Size // "")]
         | @tsv'
+    ;;
+
+ip)
+    vm_ip "$VM_NAME" 5 || die "no IP for $VM_NAME"
     ;;
 
 cp)
