@@ -156,8 +156,14 @@ def main():  # noqa
     parser = argparse.ArgumentParser()
     parser.add_argument(
         'command',
-        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'run'],
-        help='Command.  create is the same as start followed by exec.')
+        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp'],
+        help='Command.  create is the same as start followed by exec.  stop '
+        'destroys the container.')
+    parser.add_argument(
+        'operands', nargs='*', metavar='operand',
+        help='For cp: two paths, exactly one prefixed in:.  Relative '
+        'container paths are relative to /home/ubuntu.  Example: '
+        'agent_docker.py cp out.txt in:/tmp/in.txt')
     parser.add_argument('--name', help='Docker container name')
     parser.add_argument('--num', type=int, help='Docker container suffix')
     parser.add_argument('--src', help='Source path.  Defaults to current working directory.')
@@ -229,6 +235,26 @@ def main():  # noqa
         docker_cmd = ['docker']
     if args.command in {'list'}:
         list_known(docker_cmd, container_name)
+    if args.command in {'cp'}:
+        if len(args.operands) != 2:
+            parser.error('cp requires exactly two operands')
+        prefix = 'in:'
+        src, dst = args.operands
+        src_in = src.startswith(prefix)
+        dst_in = dst.startswith(prefix)
+        if src_in == dst_in:
+            parser.error('cp requires exactly one endpoint prefixed ' + prefix)
+        if src_in:
+            src = src[len(prefix):]
+            src = container_name + ':' + (
+                src if src.startswith('/') else '/home/ubuntu/' + src)
+        if dst_in:
+            dst = dst[len(prefix):]
+            dst = container_name + ':' + (
+                dst if dst.startswith('/') else '/home/ubuntu/' + dst)
+        cmd = docker_cmd + ['cp', src, dst]
+        logger.info(cmd)
+        subprocess.check_call(cmd)
     if args.command in {'create', 'start', 'stop'}:
         renamed_id = rename_if_exists(docker_cmd, container_name)
         if renamed_id:
