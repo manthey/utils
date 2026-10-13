@@ -146,7 +146,7 @@ def add_config(args, src, parser):
             args = config[src] + args
         if 'all' in config:
             args = config['all'] + args
-        return parser.parse_args(sys.argv[1:2] + args)
+        return parser.parse_intermixed_args(sys.argv[1:2] + args)
     except Exception as exc:
         print('Failed to merge config file', args, exc)
         return args
@@ -215,7 +215,7 @@ def main():  # noqa
     parser.add_argument(
         '--verbose', '-v', action='count', default=0,
         help='Increase verbosity')
-    args = parser.parse_args()
+    args = parser.parse_intermixed_args()
     if args.src:
         os.chdir(os.path.expanduser(args.src))
     current_dir = os.path.basename(os.getcwd())
