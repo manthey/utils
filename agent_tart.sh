@@ -3,31 +3,29 @@
 #
 # agent_docker.py builds agentic-programming sandboxes (running pi) from the
 # agent.Dockerfile docker image. This script does the same on an Apple
-# Silicon Mac with tart VMs:
+# Silicon Mac with tart VMs, with the same command set and semantics as
+# agent_docker.py (sandboxes are ephemeral: stop destroys the VM, and start
+# always rebuilds one from the base) plus a cp command:
 #
-#   provision  create the base VM (equivalent to docker build); always
-#              rebuilds an existing base from the pristine image
-#   create     clone the base VM, boot it, copy the project in, shell in
-#   start      boot an existing clone
-#   stop       ACPI shutdown
-#   exec       interactive shell in the sandbox
-#   sync       rsync the project into the sandbox
-#   update     apply --ollama to an existing sandbox
+#   provision  create the base VM (equivalent to building the docker image)
+#   create     clone the base VM, copy the project in, shell in
+#   start      like create, but does not shell in
+#   stop       destroy the sandbox VM
+#   exec       interactive shell in a running sandbox
+#   update     apply --ollama to a running sandbox
 #   list       list known sandboxes
-#   delete     stop + delete a clone
-#   ip         print the VM IP
-#   cp         copy files to/from the VM; one endpoint prefixed vm:
+#   cp         copy files to/from the VM; one endpoint prefixed in:
 #
-# cp usage: agent_tart.sh cp [--name NAME] vm:<guest path> <local path>
-#           agent_tart.sh cp [--name NAME] <local path> vm:<guest path>
+# cp usage: agent_tart.sh cp [--name NAME] in:<guest path> <local path>
+#           agent_tart.sh cp [--name NAME] <local path> in:<guest path>
 #           (like docker cp; directories are copied recursively)
 #
 # The in-VM provisioning lives in agent_tart_provision.sh; pi is installed by
 # install_pi.sh (shared with the docker flow). mini-swe-agent support from
-# agent.Dockerfile is intentionally omitted. See agent_tart.md.
+# agent.Dockerfile is intentionally omitted.
 #
 # Host requirements:
-#   brew install jq sshpass rsync bash
+#   brew install jq sshpass bash
 #   brew tap openai/tools && brew install openai/tools/tart
 
 set -u
@@ -53,8 +51,6 @@ OVERRIDE_IMAGE=""
 SSH_KEY=""
 SSH_PUB=""
 COMMAND=""
-NO_EXEC=0
-FRESH=0
 LOCAL=0
 OLLAMA=""
 CONFIG_FILE="$SELF_DIR/agent_tart.yaml"
@@ -74,7 +70,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -87,7 +83,7 @@ parse_args() {
     SKIPS=()
     while [ $# -gt 0 ]; do
         case "$1" in
-        provision | create | start | stop | exec | ssh | sync | update | list | delete | ip | cp)
+        provision | create | start | stop | exec | update | list | cp)
             COMMAND="$1"
             ;;
         --name)
@@ -143,12 +139,6 @@ parse_args() {
         --sshkey)
             SSH_PUB="$2"
             shift
-            ;;
-        --fresh)
-            FRESH=1
-            ;;
-        --no-exec)
-            NO_EXEC=1
             ;;
         --config)
             CONFIG_FILE="$2"
@@ -316,36 +306,36 @@ run_scp() {
         "$src" "$TART_USER@$ip:$dst"
 }
 
-# docker-cp-style copy: exactly one endpoint is prefixed vm: and refers to a
+# docker-cp-style copy: exactly one endpoint is prefixed in: and refers to a
 # path in the VM (relative paths are relative to the guest home). scp -r
 # copies directories recursively and is harmless for plain files.
 do_cp() {
     local src="$1"
     local dst="$2"
-    if [ "${src#vm:}" != "$src" ] && [ "${dst#vm:}" != "$dst" ]; then
-        die "cp: only one endpoint may be a vm: path"
+    if [ "${src#in:}" != "$src" ] && [ "${dst#in:}" != "$dst" ]; then
+        die "cp: only one endpoint may be a in: path"
     fi
-    if [ "${src#vm:}" = "$src" ] && [ "${dst#vm:}" = "$dst" ]; then
-        die "cp: one endpoint must be a vm: path"
+    if [ "${src#in:}" = "$src" ] && [ "${dst#in:}" = "$dst" ]; then
+        die "cp: one endpoint must be a in: path"
     fi
     local ip
     ip="$(vm_ip "$VM_NAME" 10)" || die "no IP for VM $VM_NAME (is it running?)"
-    if [ "${src#vm:}" != "$src" ]; then
-        info "copying $VM_NAME:${src#vm:} to $dst"
+    if [ "${src#in:}" != "$src" ]; then
+        info "copying $VM_NAME:${src#in:} to $dst"
         scp -r -i "$SSH_KEY" \
             -o UserKnownHostsFile="$KNOWN_HOSTS" \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             -o BatchMode=yes \
-            "$TART_USER@$ip:${src#vm:}" "$dst"
+            "$TART_USER@$ip:${src#in:}" "$dst"
     else
-        info "copying $src to $VM_NAME:${dst#vm:}"
+        info "copying $src to $VM_NAME:${dst#in:}"
         scp -r -i "$SSH_KEY" \
             -o UserKnownHostsFile="$KNOWN_HOSTS" \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             -o BatchMode=yes \
-            "$src" "$TART_USER@$ip:${dst#vm:}"
+            "$src" "$TART_USER@$ip:${dst#in:}"
     fi
 }
 
@@ -585,7 +575,7 @@ set_ollama_url() {
 # Every command that talks to a VM over ssh needs the key resolved first;
 # ensure_ssh_key is a no-op when it is already set.
 case "$COMMAND" in
-list | stop | delete | ip) ;;
+list | stop) ;;
 *) ensure_ssh_key ;;
 esac
 
@@ -625,12 +615,15 @@ provision)
     info "done. Create sandboxes with: $0 create"
     ;;
 
-create)
+create | start)
     vm_exists "$BASE_NAME" || die "base VM $BASE_NAME does not exist; run $0 provision first"
     if vm_running "$BASE_NAME"; then
         info "base VM $BASE_NAME is running; stopping it so it can be cloned"
         stop_vm "$BASE_NAME"
     fi
+    # Like agent_docker.py, create and start always destroy an existing
+    # sandbox and rebuild it from the base; state worth keeping belongs on
+    # the host, in the project tree, or is pulled out with cp first.
     if vm_exists "$VM_NAME"; then
         info "removing existing VM $VM_NAME"
         delete_vm "$VM_NAME"
@@ -654,48 +647,20 @@ create)
     transfer_project "$VM_NAME"
     restore_git_modes "$VM_NAME"
     [ -z "$OLLAMA" ] || set_ollama_url "$VM_NAME" "$OLLAMA"
-    if [ "$NO_EXEC" != 1 ]; then
+    if [ "$COMMAND" = create ]; then
         ssh_interactive "$VM_NAME"
     else
         info "sandbox ready; connect with: $0 exec --name $VM_NAME"
     fi
     ;;
 
-start)
-    build_mount_args
-    start_vm "$VM_NAME" ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"}
-    link_mounts "$VM_NAME"
-    [ -z "$OLLAMA" ] || set_ollama_url "$VM_NAME" "$OLLAMA"
-    info "$VM_NAME is at $(vm_ip "$VM_NAME")"
-    ;;
-
 stop)
-    stop_vm "$VM_NAME"
+    # Docker semantics: stopping a sandbox destroys it.
+    delete_vm "$VM_NAME"
     ;;
 
-exec | ssh)
+exec)
     ssh_interactive "$VM_NAME"
-    ;;
-
-sync)
-    command -v rsync >/dev/null 2>&1 || die "rsync not found"
-    vm_running "$VM_NAME" || die "$VM_NAME is not running"
-    RSYNC_EXCLUDES=()
-    local_disabled= # placeholder to keep structure clear
-    excludes="$(tar_exclude_args | tr ' ' '\n' | grep '^--exclude=' || true)"
-    while IFS= read -r line; do
-        [ -n "$line" ] && RSYNC_EXCLUDES+=("${line#--exclude=}")
-    done <<EOF
-$excludes
-EOF
-    ip="$(vm_ip "$VM_NAME")"
-    DELETE_FLAG=""
-    [ "$FRESH" = 1 ] && DELETE_FLAG="--delete"
-    # shellcheck disable=SC2086
-    rsync -az $DELETE_FLAG \
-        -e "ssh -i $SSH_KEY -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=accept-new" \
-        ${RSYNC_EXCLUDES[@]+"${RSYNC_EXCLUDES[@]/#/--exclude=}"} \
-        "$PWD/" "$TART_USER@$ip:$CURRENT_DIR/"
     ;;
 
 update)
@@ -709,14 +674,6 @@ list)
         .[] | select(.Source == "local")
         | [.Name, (if .Running then "running" else "stopped" end), .State, (.Size // "")]
         | @tsv'
-    ;;
-
-delete)
-    delete_vm "$VM_NAME"
-    ;;
-
-ip)
-    vm_ip "$VM_NAME" 5 || die "no IP for $VM_NAME"
     ;;
 
 cp)
