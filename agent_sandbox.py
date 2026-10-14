@@ -364,6 +364,21 @@ def create(args, parser):
         handle.write(wsb)
     logger.info('Launching %s', wsb_path)
     subprocess.check_call(['cmd', '/c', 'start', '', wsb_path])
+    # Windows Sandbox takes a moment to appear; if its process never shows
+    # up, the feature is likely not enabled and waiting for an IP would be
+    # pointless.
+    for _ in range(15):
+        if sandbox_running():
+            break
+        time.sleep(1)
+    else:
+        msg = ('Windows Sandbox did not start. Is the Windows Sandbox '
+               'feature enabled (in an admin prompt: Enable-'
+               'WindowsOptionalFeature -Online -FeatureName '
+               '"Containers-DisposableClientVM")? Windows Sandbox needs '
+               'Windows Pro or Enterprise. Test by double-clicking '
+               f'{wsb_path} by hand.')
+        raise SystemExit(msg)
     # The sandbox IP is discovered from the ARP table: candidates are
     # restricted to the Windows Sandbox subnet or Hyper-V virtual MACs.
     print(f'Waiting up to {args.wait_timeout} seconds for the sandbox IP; '
