@@ -61,6 +61,7 @@ class TestDefinition:
     category: str | None
     version: int
     run: Callable[[OpenAI, str, str], TestResult]
+    requires: str | None = None
 
 
 TEST_REGISTRY: list[TestDefinition] = []
@@ -68,13 +69,13 @@ TEST_REGISTRY: list[TestDefinition] = []
 
 def register_test(
     name: str, description: str, skip: bool | str = False, version: int = 0,
-    category: str | None = None,
+    category: str | None = None, requires: str | None = None,
 ):
     def decorator(func: Callable[[OpenAI, str, str], TestResult]) -> Callable:
         func._version = version
         TEST_REGISTRY.append(TestDefinition(
             name=name, description=description, run=func, skip=skip,
-            category=category, version=version,
+            category=category, version=version, requires=requires,
         ))
         return func
 
@@ -477,7 +478,34 @@ def chat_completion_wrapper(
         queue.put(exc)
 
 
-def chat_completion(  # noqa
+def chat_completion(
+    client: OpenAI,
+    model_name: str,
+    messages: list[dict],
+    temperature: float | None = None,
+    max_tokens: int = 16384,
+    tools: list[dict] | None = None,
+    use_stream: bool = True,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any]:
+    try:
+        return chat_completion_request(
+            client, model_name, messages, temperature, max_tokens, tools,
+            use_stream, reasoning_effort)
+    except TypeError as exc:
+        # APIStatusError raised in the worker process cannot be unpickled in
+        # the parent ('missing 2 required keyword-only arguments: response
+        # and body'). Treat this like a model that does not accept a
+        # reasoning parameter and retry without it.
+        if (reasoning_effort is None or 'APIStatusError.__init__() missing 2 '
+                'required keyword-only arguments' not in str(exc)):
+            raise
+    return chat_completion_request(
+        client, model_name, messages, temperature, max_tokens, tools,
+        use_stream, None)
+
+
+def chat_completion_request(  # noqa
     client: OpenAI,
     model_name: str,
     messages: list[dict],
@@ -1126,7 +1154,7 @@ def embedding_metrics(vectors, labels):
 
 
 @register_test('embedding_quality', 'Embedding quality',
-               category='embedding', version=1)
+               category='embedding', version=1, requires='embedding')
 def test_embedding_quality(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
@@ -1176,7 +1204,8 @@ def test_vision(
     })
 
 
-@register_test('histology', 'Histology image understanding', category='vision')
+@register_test('histology', 'Histology image understanding',
+               category='vision', requires='vision')
 def test_histology(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
@@ -1199,7 +1228,8 @@ def test_histology(
     })
 
 
-@register_test('photo', 'Photo understanding', version=1, category='vision')
+@register_test('photo', 'Photo understanding', version=1, category='vision',
+               requires='vision')
 def test_photo(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
@@ -1222,7 +1252,8 @@ def test_photo(
     })
 
 
-@register_test('geospatial_image', 'Geospatial understanding', category='vision', version=2)
+@register_test('geospatial_image', 'Geospatial understanding',
+               category='vision', version=2, requires='vision')
 def test_geospatial_image(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
@@ -1247,7 +1278,7 @@ def test_geospatial_image(
 
 @register_test(
     'geospatial_analysis', 'Geospatial image description for tools',
-    category='vision', version=2)
+    category='vision', version=2, requires='vision')
 def test_geospatial_analysis(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
@@ -1280,7 +1311,7 @@ def test_geospatial_analysis(
 
 @register_test(
     'equation_analysis', 'Equation image to latex',
-    category='vision', version=1)
+    category='vision', version=1, requires='vision')
 def test_equation_analysis(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
@@ -1687,6 +1718,47 @@ def generate_report(
     return '\n'.join(sections) + '\n'
 
 
+def order_tests(test_defs: list[TestDefinition]) -> list[TestDefinition]:
+    """Stably order tests so required tests come before their dependents."""
+    by_name = {td.name: td for td in test_defs}
+    ordered: list[TestDefinition] = []
+    placed: set[str] = set()
+    visiting: set[str] = set()
+
+    def place(td: TestDefinition) -> None:
+        if td.name in placed or td.name in visiting:
+            return
+        visiting.add(td.name)
+        required = by_name.get(td.requires) if td.requires else None
+        if required:
+            place(required)
+        visiting.discard(td.name)
+        placed.add(td.name)
+        ordered.append(td)
+
+    for td in test_defs:
+        place(td)
+    return ordered
+
+
+def requirement_met(
+    test_def: TestDefinition,
+    results: list[tuple[TestDefinition, TestResult]],
+    prior_results: dict[str, TestResult] | None,
+) -> bool:
+    """True when the test's required test exists and passed.
+
+    A result from the current run takes precedence over a recorded result
+    from a previous run.
+    """
+    if not test_def.requires:
+        return True
+    current = {td.name: result for td, result in results}
+    result = current.get(test_def.requires) or (prior_results or {}).get(
+        test_def.requires)
+    return result is not None and result_passed(result)
+
+
 def run_tests(
     client: OpenAI,
     model_name: str,
@@ -1696,28 +1768,49 @@ def run_tests(
     save_progress: Callable[[list[tuple[TestDefinition, TestResult]]], None] | None = None,
     raise_errors: bool = False,
     require_first_load: bool = False,
+    prior_results: dict[str, TestResult] | None = None,
 ) -> list[tuple[TestDefinition, TestResult]]:
     results = []
-    for test_def in TEST_REGISTRY:
-        if test_names is not None and test_def.name not in test_names:
-            continue
-        sys.stderr.write(f'Running test: {test_def.name} ')
-        sys.stderr.flush()
-        start = time.time()
-        try:
-            result = test_def.run(client, model_name, ollama_base_url, ollama_docker_url)
-        except Exception as exc:
-            result = TestResult(passed=False, output=f'Error: {exc}',
-                                timestamp=get_timestamp())
-            if test_def.name == 'first_load' and require_first_load:
-                return None
-            if raise_errors:
-                raise
+    for test_def in order_tests([
+            td for td in TEST_REGISTRY
+            if test_names is None or td.name in test_names]):
+        if not requirement_met(test_def, results, prior_results):
+            current = {td.name: result for td, result in results}
+            req_result = current.get(test_def.requires) or (
+                prior_results or {}).get(test_def.requires)
+            if req_result is None:
+                # The required test was not run and has no recorded result.
+                sys.stderr.write(
+                    f'Skipping test: {test_def.name} '
+                    f'(requires unrecorded test {test_def.requires})\n')
+                continue
+            result = TestResult(
+                passed=False,
+                output=f'Required test {test_def.requires} failed',
+                timestamp=get_timestamp())
+            sys.stderr.write(
+                f'Skipping test: {test_def.name} '
+                f'(required test {test_def.requires} failed)\n')
+        else:
+            sys.stderr.write(f'Running test: {test_def.name} ')
+            sys.stderr.flush()
+            start = time.time()
+            try:
+                result = test_def.run(
+                    client, model_name, ollama_base_url, ollama_docker_url)
+            except Exception as exc:
+                result = TestResult(passed=False, output=f'Error: {exc}',
+                                    timestamp=get_timestamp())
+                if test_def.name == 'first_load' and require_first_load:
+                    return None
+                if raise_errors:
+                    raise
+            elapsed = time.time() - start
+            if not result.details.get('duration', 0):
+                result.details['duration'] = elapsed
+            sys.stderr.write(
+                f' {passed_to_status(result.passed)} ({elapsed:4.2f}s)\n')
         result.version = test_def.version
-        elapsed = time.time() - start
-        if not result.details.get('duration', 0):
-            result.details['duration'] = elapsed
-        sys.stderr.write(f' {passed_to_status(result.passed)} ({elapsed:4.2f}s)\n')
         results.append((test_def, result))
         if save_progress:
             save_progress(results)
@@ -2471,7 +2564,8 @@ def main():  # noqa
             new_results = run_tests(
                 client, model, ollama_base_url, ollama_docker_url, run_names,
                 save_func(out_path, metadata, existing_results),
-                args.raise_errors, args.require_first_load)
+                args.raise_errors, args.require_first_load,
+                prior_results=existing_results)
             if new_results is None:
                 restart_command(args.restart)
                 continue
