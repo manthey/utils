@@ -93,7 +93,8 @@ Files in this repo:
   - `ssh\authorized_keys` (host keypair lives at `~\.agent_sandbox\ssh\`)
   - `install_pi.sh`, `agent_sandbox_provision.ps1`, `VERSIONS.txt`
 - `agent_sandbox_provision.ps1` - runs inside the sandbox at logon (via the
-  `.wsb` LogonCommand). Transcript at `C:\provision.log`. Steps:
+  `.wsb` LogonCommand). Transcript at `%TEMP%\agent_sandbox_provision.log`.
+  Steps:
   1. PATH wiring (payload dirs prepended to user PATH; process PATH keeps
      the machine PATH)
   2. robocopy of the read-only mapped project to `C:\work\<name>`, with
@@ -129,7 +130,8 @@ predictable. ssh runs as `WDAGUtilityAccount` with the host's ed25519 key.
 1. One-time: `Enable-WindowsOptionalFeature -Online -FeatureName
    "Containers-DisposableClientVM" -All`, reboot.
 2. `python agent_sandbox.py provision` (network needed once).
-3. `python agent_sandbox.py create` in a project; watch `C:\provision.log`.
+3. `python agent_sandbox.py create` in a project; watch
+   `%TEMP%\agent_sandbox_provision.log` in the sandbox.
    `python agent_sandbox.py start` is the same but leaves no interactive
    shell; enter with `python agent_sandbox.py exec`.
 4. `python agent_sandbox.py cp in:C:/work/<proj>/somefile.txt .`

@@ -142,6 +142,20 @@ def sandbox_subnets() -> list:
         return []
     subnets = [line.strip().rsplit('.', 1)[0] + '.'
                for line in output.splitlines() if line.strip()]
+    if not subnets:
+        # Nothing matched: dump the host's IPv4 interfaces so a -vv run
+        # shows what the sandbox adapter is actually called here.
+        try:
+            listing = subprocess.check_output(
+                ['powershell', '-NoProfile', '-Command',
+                 ('Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { '
+                  '"{0}: {1}" -f $_.InterfaceAlias, $_.IPAddress }')],
+                text=True, stderr=subprocess.DEVNULL)
+            logger.debug('Host IPv4 interfaces: %s',
+                         [line for line in listing.splitlines()
+                          if line.strip()])
+        except subprocess.SubprocessError as exc:
+            logger.debug('Interface listing failed: %s', exc)
     logger.debug('Windows Sandbox subnets: %s', subnets)
     return subnets
 
@@ -160,6 +174,7 @@ def discover_ip(timeout: float) -> str | None:
             'Could not determine the Windows Sandbox subnet; falling back '
             'to ARP entries with Hyper-V virtual MACs.')
     deadline = time.time() + timeout
+    seen = set()
     while time.time() < deadline:
         table = arp_table()
         # Hyper-V virtual MACs are the sandbox (or another Hyper-V VM); a
@@ -172,10 +187,22 @@ def discover_ip(timeout: float) -> str | None:
             # previous sandbox's still-cached ARP entry.
             candidates |= {ip for ip in table
                            if any(ip.startswith(s) for s in subnets)}
+        seen |= candidates
+        logger.debug('IP discovery candidates: %s', sorted(candidates))
         for ip in sorted(candidates):
             if port_open(ip, SANDBOX_PORT):
                 return ip
         time.sleep(2)
+    if seen:
+        logger.warning(
+            'Saw candidate ARP entries %s but none answered on port %s; is '
+            'sshd running in the sandbox? Check '
+            '%%TEMP%%\\agent_sandbox_provision.log in the sandbox window.',
+            sorted(seen), SANDBOX_PORT)
+    else:
+        logger.warning(
+            'No candidate ARP entries appeared; the sandbox may not be '
+            'running or has not networked yet.')
     return None
 
 
@@ -339,6 +366,8 @@ def create(args, parser):
     subprocess.check_call(['cmd', '/c', 'start', '', wsb_path])
     # The sandbox IP is discovered from the ARP table: candidates are
     # restricted to the Windows Sandbox subnet or Hyper-V virtual MACs.
+    print(f'Waiting up to {args.wait_timeout} seconds for the sandbox IP; '
+          'run with -vv to watch discovery.')
     ip = discover_ip(args.wait_timeout)
     if ip:
         with open(os.path.join(run_dir, 'ip'), 'w') as handle:
@@ -346,8 +375,10 @@ def create(args, parser):
         print(f'Sandbox {name} is up at {ip}')
     else:
         logger.warning(
-            'Could not discover the sandbox IP yet; provisioning may still be '
-            'running. Use `agent_sandbox.py ip %s` later.', name)
+            'Could not discover the sandbox IP yet; provisioning may still '
+            'be running. Use `agent_sandbox.py ip %s` later, and see '
+            '%%TEMP%%\\agent_sandbox_provision.log in the sandbox window.',
+            name)
     print(f'Copy files with: agent_sandbox.py [--name {name}] cp <local path> '
           f'in:<sandbox path> or agent_sandbox.py [--name {name}] cp '
           'in:<sandbox path> <local path>')

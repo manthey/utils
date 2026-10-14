@@ -27,8 +27,10 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$transcript = 'C:\provision.log'
+# Keep the transcript in the user's temp directory rather than C:\ root.
+$transcript = Join-Path $env:TEMP 'agent_sandbox_provision.log'
 Start-Transcript -Path $transcript -Force | Out-Null
+Write-Host "Provisioning log: $transcript"
 try {
     $desktop = [Environment]::GetFolderPath('Desktop')
     $homeDir = [Environment]::GetFolderPath('UserProfile')
