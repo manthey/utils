@@ -65,6 +65,9 @@ SANDBOX_USER = 'WDAGUtilityAccount'
 # The sandbox user's home in msys form, as seen by the payload bash.
 SANDBOX_MSYS_HOME = f'/c/Users/{SANDBOX_USER}'
 SANDBOX_PORT = 22
+# The Microsoft Hyper-V virtual MAC OUI: the sandbox guest's ARP entry
+# carries one of these, unlike physical LAN hosts.
+HYPERV_MAC_PREFIX = '00-15-5d'
 
 
 def safe_filename(name: str) -> str:
@@ -100,14 +103,15 @@ def add_config(args, src, parser):
         return args
 
 
-def arp_entries() -> set:
-    """All IPs currently in the host ARP table."""
+def arp_table() -> dict:
+    """Map of IP to lowercase MAC for all entries in the host ARP table."""
     output = subprocess.check_output(['arp', '-a'], text=True)
-    found = set()
+    found = {}
     for line in output.splitlines():
-        match = re.match(r'\s*(\d+\.\d+\.\d+\.\d+)\s+[0-9a-f-]+\s+\w+', line)
+        match = re.match(
+            r'\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]+)\s+\w+', line)
         if match:
-            found.add(match.group(1))
+            found[match.group(1)] = match.group(2).lower()
     return found
 
 
@@ -120,42 +124,54 @@ def port_open(ip: str, port: int, timeout: float = 1.0) -> bool:
 def sandbox_subnets() -> list:
     """The /24 prefixes of the host's Windows Sandbox virtual adapters.
 
-    Sandbox guests live on the NAT subnet of the host's 'vEthernet (Windows
-    Sandbox)' adapter, which is disjoint from the LAN, so discovery can
+    Sandbox guests live on the NAT subnet of the host's Windows Sandbox
+    virtual adapter, which is disjoint from the LAN, so discovery can
     ignore unrelated hosts (a corporate gateway answering on port 22, say).
     Returns an empty list if no adapter is found (e.g. before the first
-    sandbox launch); discovery then falls back to all ARP candidates.
+    sandbox launch); discovery then falls back to other candidate signals.
     """
     try:
         output = subprocess.check_output(
             ['powershell', '-NoProfile', '-Command',
              ('Get-NetIPAddress -AddressFamily IPv4 | Where-Object { '
-              "$_.InterfaceAlias -like 'vEthernet (Windows Sandbox)*' } | "
+              "$_.InterfaceAlias -like '*Windows Sandbox*' } | "
               'Select-Object -ExpandProperty IPAddress')],
             text=True, stderr=subprocess.DEVNULL)
-    except subprocess.SubprocessError:
+    except subprocess.SubprocessError as exc:
+        logger.debug('Windows Sandbox subnet query failed: %s', exc)
         return []
-    return [line.strip().rsplit('.', 1)[0] + '.'
-            for line in output.splitlines() if line.strip()]
+    subnets = [line.strip().rsplit('.', 1)[0] + '.'
+               for line in output.splitlines() if line.strip()]
+    logger.debug('Windows Sandbox subnets: %s', subnets)
+    return subnets
 
 
-def discover_ip(before: set, timeout: float) -> str | None:
-    """Find the sandbox IP: new ARP entries whose port 22 answers.
+def discover_ip(timeout: float) -> str | None:
+    """Find the sandbox IP: ARP entries whose port 22 answers.
 
-    When the Windows Sandbox subnet is known, candidates are restricted to
-    it; the before snapshot only filters candidates in the fallback case.
+    Candidates are restricted to the Windows Sandbox NAT subnet when that
+    can be determined, and to Hyper-V virtual MACs (the guest is a Hyper-V
+    VM, so this identifies it even when the adapter query fails); a
+    physical host like a LAN gateway answering on port 22 can never match.
     """
     subnets = sandbox_subnets()
+    if not subnets:
+        logger.warning(
+            'Could not determine the Windows Sandbox subnet; falling back '
+            'to ARP entries with Hyper-V virtual MACs.')
     deadline = time.time() + timeout
     while time.time() < deadline:
+        table = arp_table()
+        # Hyper-V virtual MACs are the sandbox (or another Hyper-V VM); a
+        # physical host like a LAN gateway never has one.
+        candidates = {ip for ip, mac in table.items()
+                      if mac.startswith(HYPERV_MAC_PREFIX)}
         if subnets:
-            # Subnet filtering is the candidate protection here; the before
-            # snapshot is not needed, and subtracting it first could mask a
-            # sandbox that reused a previous sandbox's still-cached IP.
-            candidates = {ip for ip in arp_entries()
-                          if any(ip.startswith(s) for s in subnets)}
-        else:
-            candidates = arp_entries() - before
+            # The subnet filter needs no snapshot: it cannot match a LAN
+            # host, and dropping it would mask a sandbox that reused a
+            # previous sandbox's still-cached ARP entry.
+            candidates |= {ip for ip in table
+                           if any(ip.startswith(s) for s in subnets)}
         for ip in sorted(candidates):
             if port_open(ip, SANDBOX_PORT):
                 return ip
@@ -178,15 +194,22 @@ def get_ip(base_dir: str, name: str, wait: float = 120) -> str:
     if os.path.exists(ip_file):
         cached = open(ip_file).read().strip()
         subnets = sandbox_subnets()
-        if not subnets or any(cached.startswith(s) for s in subnets):
+        if subnets:
+            ok = any(cached.startswith(s) for s in subnets)
+        else:
+            # Without a subnet, trust the cache only if its ARP entry has a
+            # Hyper-V MAC, or is absent (it may have aged out).
+            ok = arp_table().get(
+                cached, HYPERV_MAC_PREFIX).startswith(HYPERV_MAC_PREFIX)
+        if ok:
             return cached
-        # A cached address outside the sandbox subnet cannot be the sandbox
-        # (e.g. a false discovery before subnet filtering existed).
+        # A cached address that cannot be the sandbox (e.g. a false
+        # discovery before this filtering existed) is dropped.
         logger.warning(
-            'Cached ip %s for %s is outside the Windows Sandbox subnet; '
-            'rediscovering.', cached, name)
+            'Cached ip %s for %s cannot be the sandbox; rediscovering.',
+            cached, name)
         os.remove(ip_file)
-    ip = discover_ip(set(), wait)
+    ip = discover_ip(wait)
     if not ip:
         msg = (f'Could not determine the IP for sandbox {name}. '
                'Is it running? Try create again with waiting enabled.')
@@ -312,10 +335,11 @@ def create(args, parser):
     wsb_path = os.path.join(run_dir, 'agent.wsb')
     with open(wsb_path, 'w', encoding='utf-8') as handle:
         handle.write(wsb)
-    before = arp_entries()
     logger.info('Launching %s', wsb_path)
     subprocess.check_call(['cmd', '/c', 'start', '', wsb_path])
-    ip = discover_ip(before, args.wait_timeout)
+    # The sandbox IP is discovered from the ARP table: candidates are
+    # restricted to the Windows Sandbox subnet or Hyper-V virtual MACs.
+    ip = discover_ip(args.wait_timeout)
     if ip:
         with open(os.path.join(run_dir, 'ip'), 'w') as handle:
             handle.write(ip + '\n')
