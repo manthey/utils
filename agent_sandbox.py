@@ -280,9 +280,12 @@ def ssh_options(key: str) -> list:
 
 
 def get_ip(base_dir: str, name: str, wait: float = 120) -> str:
-    """Known sandbox IP, discovering it from the ARP table if necessary."""
-    ip_file = os.path.join(base_dir, name, 'ip')
-    if os.path.exists(ip_file):
+    """Known sandbox IP: the guest-published one, then ARP discovery."""
+    run_dir = os.path.join(base_dir, name)
+    for ip_file in (os.path.join(run_dir, 'artifacts', 'ip'),
+                    os.path.join(run_dir, 'ip')):
+        if not os.path.exists(ip_file):
+            continue
         cached = open(ip_file).read().strip()
         subnets = sandbox_subnets()
         if subnets:
@@ -295,19 +298,42 @@ def get_ip(base_dir: str, name: str, wait: float = 120) -> str:
         if ok:
             return cached
         # A cached address that cannot be the sandbox (e.g. a false
-        # discovery before this filtering existed) is dropped.
+        # discovery or a stale file) is dropped.
         logger.warning(
-            'Cached ip %s for %s cannot be the sandbox; rediscovering.',
-            cached, name)
+            'Cached ip %s in %s cannot be the sandbox; removing it.',
+            cached, ip_file)
         os.remove(ip_file)
     ip = discover_ip(wait)
     if not ip:
         msg = (f'Could not determine the IP for sandbox {name}. '
                'Is it running? Try create again with waiting enabled.')
         raise SystemExit(msg)
+    ip_file = os.path.join(run_dir, 'ip')
     os.makedirs(os.path.dirname(ip_file), exist_ok=True)
     with open(ip_file, 'w') as handle:
         handle.write(ip + '\n')
+    return ip
+
+
+def wait_published_ip(artifacts: str, timeout: float) -> str | None:
+    """Wait for the guest to publish its IP into the artifacts folder."""
+    published = os.path.join(artifacts, 'ip')
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if os.path.exists(published):
+            ip = open(published).read().strip()
+            if ip:
+                return ip
+        time.sleep(2)
+    return None
+
+
+def wait_sandbox_ip(artifacts: str, timeout: float) -> str | None:
+    """The guest-published IP, or ARP discovery as a fallback."""
+    ip = wait_published_ip(artifacts, timeout)
+    if not ip:
+        logger.debug('No ip published; falling back to ARP discovery.')
+        ip = discover_ip(timeout)
     return ip
 
 
@@ -420,7 +446,12 @@ def create(args, parser):
     logger.debug('Parsed arguments: %r', args)
 
     # Mapped folders appear on the sandbox Desktop under their host basename.
-    mappings = [(payload_dir, 'ro'), (os.getcwd(), 'ro')]
+    # A read-write artifacts folder is the guest's channel back to the host:
+    # the provisioner publishes its transcript and detected IP there, so
+    # neither the window nor ARP discovery is needed to follow progress.
+    artifacts = os.path.join(run_dir, 'artifacts')
+    os.makedirs(artifacts, exist_ok=True)
+    mappings = [(payload_dir, 'ro'), (os.getcwd(), 'ro'), (artifacts, 'rw')]
     if args.local:
         for staged in stage_local(run_dir):
             mappings.append((staged, 'ro'))
@@ -475,11 +506,11 @@ def create(args, parser):
                'Windows Pro or Enterprise. Test by double-clicking '
                f'{wsb_path} by hand.')
         raise SystemExit(msg)
-    # The sandbox IP is discovered from the ARP table: candidates are
-    # restricted to the Windows Sandbox subnet or Hyper-V virtual MACs.
+    # The guest publishes its IP once the provisioner brings up sshd; ARP
+    # discovery is only the fallback for when that never happens.
     print(f'Waiting up to {args.wait_timeout} seconds for the sandbox IP; '
           'run with -vv to watch discovery.')
-    ip = discover_ip(args.wait_timeout)
+    ip = wait_sandbox_ip(artifacts, args.wait_timeout)
     if ip:
         with open(os.path.join(run_dir, 'ip'), 'w') as handle:
             handle.write(ip + '\n')

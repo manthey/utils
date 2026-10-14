@@ -93,8 +93,9 @@ Files in this repo:
   - `ssh\authorized_keys` (host keypair lives at `~\.agent_sandbox\ssh\`)
   - `install_pi.sh`, `agent_sandbox_provision.ps1`, `VERSIONS.txt`
 - `agent_sandbox_provision.ps1` - runs inside the sandbox at logon (via the
-  `.wsb` LogonCommand). Transcript at `%TEMP%\agent_sandbox_provision.log`.
-  Steps:
+  `.wsb` LogonCommand). Publishes its transcript and detected IP to the
+  read-write mapped `artifacts` folder (fallback:
+  `%TEMP%\agent_sandbox_provision.log`). Steps:
   1. PATH wiring (payload dirs prepended to user PATH; process PATH keeps
      the machine PATH)
   2. robocopy of the read-only mapped project to `C:\work\<name>`, with
@@ -130,13 +131,12 @@ predictable. ssh runs as `WDAGUtilityAccount` with the host's ed25519 key.
 1. One-time: `Enable-WindowsOptionalFeature -Online -FeatureName
    "Containers-DisposableClientVM" -All`, reboot.
 2. `python agent_sandbox.py provision` (network needed once).
-3. `python agent_sandbox.py start` in a project; watch
-   `%TEMP%\agent_sandbox_provision.log` in the sandbox. The sandbox window
-   is the VM's display: it must stay open (minimize it), and closing it
-   destroys the sandbox. Work from the host terminal: `exec`, `cp`,
-   `update`.
-   `python agent_sandbox.py start` is the same but leaves no interactive
-   shell; enter with `python agent_sandbox.py exec`.
+3. `python agent_sandbox.py start` in a project. The sandbox window is the
+   VM's display: it must stay open (it is minimized automatically), and
+   closing it destroys the sandbox. Follow provisioning from the host via
+   `~\.agent_sandbox\<name>\artifacts\provision.log`, and enter the
+   sandbox with `python agent_sandbox.py exec`. (`create` is the same but
+   leaves an interactive shell inside the sandbox window.)
 4. `python agent_sandbox.py cp in:C:/work/<proj>/somefile.txt .`
 5. Check `~\.pi\agent\sessions` on the host fills from sandbox use.
 6. Close the sandbox (or `python agent_sandbox.py stop`), `create` again:

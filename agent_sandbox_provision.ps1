@@ -27,12 +27,19 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-# Keep the transcript in the user's temp directory rather than C:\ root.
-$transcript = Join-Path $env:TEMP 'agent_sandbox_provision.log'
+$desktop = [Environment]::GetFolderPath('Desktop')
+# Prefer the read-write mapped artifacts folder, so the host can read the
+# transcript and the detected IP without opening the sandbox window.
+$artifacts = Join-Path $desktop 'artifacts'
+if (Test-Path $artifacts) {
+    $transcript = Join-Path $artifacts 'provision.log'
+} else {
+    # Fall back to the user's temp directory rather than C:\ root.
+    $transcript = Join-Path $env:TEMP 'agent_sandbox_provision.log'
+}
 Start-Transcript -Path $transcript -Force | Out-Null
 Write-Host "Provisioning log: $transcript"
 try {
-    $desktop = [Environment]::GetFolderPath('Desktop')
     $homeDir = [Environment]::GetFolderPath('UserProfile')
     $payload = Join-Path $desktop 'agent_payload'
     $workRoot = 'C:\work'
@@ -135,6 +142,9 @@ try {
             $_.InterfaceAlias -notmatch 'Loopback' } |
         Select-Object -Last 1).IPAddress
     Write-Host "sshd is running; sandbox IP: $ip"
+    if (Test-Path $artifacts) {
+        Set-Content -Path (Join-Path $artifacts 'ip') -Value $ip
+    }
     $gateway = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
         Sort-Object RouteMetric | Select-Object -First 1).NextHop
 
