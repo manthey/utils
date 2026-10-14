@@ -728,9 +728,7 @@ def main():
         help='exec: remote command (interactive shell if omitted). cp: the '
         'two endpoints, one of which is prefixed in:')
     parser.add_argument(
-        '--force', action='store_true',
-        help='Deprecated: the payload is always rebuilt from scratch.')
-    parser.add_argument('--payload-dir', help='provision: payload directory to assemble')
+        '--payload-dir', help='provision: payload directory to assemble')
     parser.add_argument('--verbose', '-v', action='count', default=0, help='Increase verbosity')
     args = parser.parse_intermixed_args()
     if args.command in {'provision'}:
