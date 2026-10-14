@@ -34,7 +34,7 @@ import dateutil.parser
 import numpy as np
 import requests
 import yaml
-from openai import OpenAI
+from openai import AuthenticationError, OpenAI, PermissionDeniedError
 
 ClientKwargs = {}
 HF_BASE_URL = 'https://router.huggingface.co/v1'
@@ -415,7 +415,11 @@ def chat_completion_worker(  # noqa
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
     sys.stdout.write('.')
     sys.stdout.flush()
-    response = client.chat.completions.create(**kwargs)
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except (AuthenticationError, PermissionDeniedError) as exc:
+        print(f'Error: authentication failed: {exc}')
+        sys.exit(1)
     content_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     usage = None
