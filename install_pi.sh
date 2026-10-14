@@ -204,7 +204,10 @@ fi
 if [ "$IS_TERMUX" -eq 1 ] || [ "$IS_WINDOWS" -eq 1 ]; then
   CASE_PATH_LINE='export PATH="$BINDIR:$PATH"'
 elif [ "$REUSE_SHARED" -eq 1 ]; then
-  CASE_PATH_LINE='export PATH="$NVM_DIR/current:$BINDIR:$PATH"'
+  # Append $NVM_DIR/current rather than prepending it: ahead of nvm's own bin
+  # dirs the symlink shadows every `nvm use`. The pi wrapper in BINDIR pins
+  # pi's node regardless, so the symlink only serves non-interactive shells.
+  CASE_PATH_LINE='export PATH="$BINDIR:$PATH:$NVM_DIR/current"'
 else
   CASE_PATH_LINE='export PATH="$BINDIR:$PATH"'
 fi

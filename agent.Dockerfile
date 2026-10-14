@@ -161,7 +161,7 @@ USER ubuntu
 WORKDIR /home/ubuntu
 # hadolint ignore=SC2016
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/home/ubuntu/.local/bin:/home/ubuntu/.nvm/current:/home/ubuntu/.nvm:/home/ubuntu/.env:$PATH" \
+ENV PATH="/home/ubuntu/.local/bin:/home/ubuntu/.nvm:/home/ubuntu/.env:$PATH:/home/ubuntu/.nvm/current" \
     NVM_DIR="/home/ubuntu/.nvm"
 RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash && \
     . ~/.nvm/nvm.sh && \
@@ -239,8 +239,7 @@ export PI_OFFLINE=1
 export PI_SKIP_VERSION_CHECK=1
 export PYENV_ROOT="/.pyenv"
 export CFLAGS="-std=gnu17 -march=native"
-export PATH="$HOME/.local/bin:$HOME/.nvm/current:$HOME/.nvm:$HOME/.env:$HOME/.env:/.pyenv/bin:/.pyenv/shims:$PATH"
-# because nvm use <version> doesn't work due to our fixed path
+export PATH="$HOME/.local/bin:$HOME/.nvm:$HOME/.env:$HOME/.env:/.pyenv/bin:/.pyenv/shims:$PATH"
 set_node() { nvm use "$1" && ln -sfn "$(dirname "$(nvm which "$1")")" "$NVM_DIR/current" && hash -r; }
 EOF
 
