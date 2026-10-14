@@ -1,199 +1,132 @@
-# agent_sandbox_provision.ps1 - runs inside a Windows agent sandbox at logon
-# (via the .wsb LogonCommand). It is carried inside the read-only payload
-# folder assembled by agent_sandbox_payload.ps1.
+# agent_sandbox_provision.ps1 - prepare a fresh agent sandbox. Runs INSIDE
+# every Windows Sandbox started by `agent_sandbox.py create` / `start` (as
+# SYSTEM via `wsb exec`, or from the .wsb LogonCommand on Windows 10), with:
+#   C:\payload      the provisioned payload (read-only)
+#   C:\mnt\project  the host project directory (read-only)
+#   C:\mnt\run      the per-run exchange folder (read-write)
+#   C:\mnt\mountN   --local / --mount folders
 #
-# What it does, in order:
-#   1. wires the payload tools (git, node, uv, jq, rg, fd) onto PATH
-#   2. copies the read-only mapped project into a local C:\work\<name> tree
-#      (the copy is the isolation: the agent only ever edits this copy)
-#   3. links/copies the --local support folders (.vimrc, .vim, .vim_backup,
-#      pi sessions) into the sandbox user profile
-#   4. installs and starts sshd so the HOST can copy files to and from the
-#      sandbox on demand
-#      (scp from outside; the sandbox has no other egress channel)
-#   5. runs install_pi.sh unmodified under PortableGit bash
-#   6. points pi's ollama provider at the sandbox host gateway
-#   7. leaves an interactive shell in C:\work\<project> (skipped with -NoShell,
-#      for `start`: the sandbox keeps running; work with it via exec/cp)
+# Steps, mirroring agent_docker.py / agent_tart.sh:
+#   1. toolchain to C:\tools, pythons registered (PEP 514), machine PATH
+#   2. non-administrator sandbox user, sshd with the host's public key only
+#   3. the payload home skeleton (pi and friends) into the user's home
+#   4. the project copied to ~\<project> (never the mapped original), with
+#      --skip patterns applied
+#   5. --local / --mount folders linked into the home
+#   6. pre-commit install when the project has the hook, ollama url set
+#   7. IP published to C:\mnt\run\ip and a done marker written
 #
-# Everything except the deliberately mapped folders and the ssh key vanishes
-# when the sandbox closes.
+# See agent_sandbox_common.ps1 for the shared machinery.
 
-param(
-    [Parameter(Mandatory = $true)][string]$ProjectName,
-    [string]$Skips = '',
-    [string]$Ollama = '',
-    [switch]$NoShell
-)
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'agent_sandbox_common.ps1')
 
-$ErrorActionPreference = 'Continue'
-$desktop = [Environment]::GetFolderPath('Desktop')
-# Prefer the read-write mapped artifacts folder, so the host can read the
-# transcript and the detected IP without opening the sandbox window.
-$artifacts = Join-Path $desktop 'artifacts'
-if (Test-Path $artifacts) {
-    $transcript = Join-Path $artifacts 'provision.log'
-} else {
-    # Fall back to the user's temp directory rather than C:\ root.
-    $transcript = Join-Path $env:TEMP 'agent_sandbox_provision.log'
+Start-ProvisionLog
+Invoke-Checked 'reading arguments' { $script:runArgs = Read-RunArgs }
+$runArgs = $script:runArgs
+$project = Get-ArgOr $runArgs 'project' ''
+$skips = @(Get-ArgOr $runArgs 'skips' @())
+$mounts = @(Get-ArgOr $runArgs 'mounts' @())
+$ollama = Get-ArgOr $runArgs 'ollama' ''
+
+if (-not (Test-Path (Join-Path $script:Payload 'home'))) {
+    Fail 'the payload has no home skeleton; run agent_sandbox.py provision'
 }
-Start-Transcript -Path $transcript -Force | Out-Null
-Write-Host "Provisioning log: $transcript"
-try {
-    $homeDir = [Environment]::GetFolderPath('UserProfile')
-    $payload = Join-Path $desktop 'agent_payload'
-    $workRoot = 'C:\work'
-    $work = Join-Path $workRoot $ProjectName
 
-    if (-not (Test-Path (Join-Path $payload 'install_pi.sh'))) {
-        Write-Warning "Payload not found at $payload; aborting provisioning"
-        exit 1
-    }
+$state = Initialize-Sandbox $runArgs $true
+$user = $state.User
+$homeDir = $state.Home
 
-    # --- 1. PATH wiring ------------------------------------------------------
-    $payloadPath = @(
-        (Join-Path $payload 'git\cmd'),
-        (Join-Path $payload 'node'),
-        (Join-Path $payload 'bin'),
-        (Join-Path $homeDir '.npm-global'),
-        (Join-Path $homeDir '.local\bin')
-    ) -join ';'
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    $newPath = "$payloadPath;$userPath"
-    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-    # The process PATH is machine PATH + user PATH; prepend the payload
-    # without dropping the system directories.
-    $env:Path = "$payloadPath;$env:Path"
+# --- 3. home skeleton -------------------------------------------------------
+Invoke-Checked 'installing the home skeleton' {
+    Copy-Tree (Join-Path $script:Payload 'home') $homeDir
+}
 
-    # --- 2. Copy the project: the agent's writable world --------------------
-    $src = Join-Path $desktop $ProjectName
-    if (-not (Test-Path $src)) {
-        Write-Warning "Mapped project $src not found; aborting provisioning"
-        exit 1
-    }
-    New-Item -ItemType Directory -Force -Path $workRoot | Out-Null
-    $skipArgs = @()
-    foreach ($pattern in ($Skips -split ',') | Where-Object { $_ }) {
-        # Apply every pattern to both dirs and files; robocopy treats a
-        # non-matching list entry as a no-op, and patterns like ".venv" may
-        # legitimately be either.
-        $skipArgs += @('/XD', $pattern)
-        $skipArgs += @('/XF', $pattern)
-    }
-    if (Test-Path $work) { Remove-Item -Recurse -Force $work }
-    Write-Host "Copying $src -> $work ..."
-    # robocopy exit codes 0-7 are success-ish; 8+ are failures.
-    & robocopy $src $work /E @skipArgs /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -ge 8) {
-        Write-Warning "robocopy failed with exit code $LASTEXITCODE"
-    }
-    $LASTEXITCODE = 0
-
-    # --- 3. --local support folders -----------------------------------------
-    # agent_sandbox.py maps, when --local was given:
-    #   Desktop\local\        (read-only; contains .vimrc and .vim)
-    #   Desktop\vim_backup    (read-write)
-    #   Desktop\sessions      (read-write; pi's ~/.pi/agent/sessions)
-    $localDir = Join-Path $desktop 'local'
-    if (Test-Path $localDir) {
-        $vimrc = Join-Path $localDir '.vimrc'
-        if (Test-Path $vimrc) { Copy-Item $vimrc (Join-Path $homeDir '.vimrc') -Force }
-        $vim = Join-Path $localDir '.vim'
-        if (Test-Path $vim) {
-            & cmd /c mklink /J "$homeDir\.vim" $vim | Out-Null
+# --- 4. project copy --------------------------------------------------------
+Invoke-Checked "copying the project to $homeDir\$project" {
+    $source = 'C:\mnt\project'
+    if (-not $project) { throw 'no project name given' }
+    if (-not (Test-Path $source)) { throw "mapped project $source not found" }
+    $dest = Join-Path $homeDir $project
+    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+    $xd = @()
+    $xf = @()
+    foreach ($pattern in $skips) {
+        if ($pattern -match '[\\/]') {
+            # A path pattern: anchored at the project root (agent_docker.py
+            # semantics), applied to directories and files alike.
+            $full = Join-Path $source ($pattern -replace '/', '\')
+            $xd += $full
+            $xf += $full
+        } else {
+            # A name pattern: matches directories and files anywhere.
+            $xd += $pattern
+            $xf += $pattern
         }
     }
-    foreach ($pair in @(
-        @('vim_backup', '.vim_backup'),
-        @('sessions', '.pi\agent\sessions')
-    )) {
-        $mapped = Join-Path $desktop $pair[0]
-        if (Test-Path $mapped) {
-            $target = Join-Path $homeDir $pair[1]
-            New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
-            if (-not (Test-Path $target)) {
-                & cmd /c mklink /J $target $mapped | Out-Null
-            }
-        }
-    }
-
-    # --- 4. sshd: the host-initiated export channel --------------------------
-    Write-Host 'Installing sshd ...'
-    $capability = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' |
-        Where-Object { $_.Name -like 'OpenSSH.Server~~~~0.0.1.0*' } |
-        Select-Object -First 1
-    if ($capability -and $capability.State -ne 'Installed') {
-        Add-WindowsCapability -Online -Name $capability.Name | Out-Null
-    }
-    $authKeys = 'C:\ProgramData\ssh\administrators_authorized_keys'
-    $pubkey = Join-Path $payload 'ssh\authorized_keys'
-    if (Test-Path $pubkey) {
-        New-Item -ItemType Directory -Force -Path (Split-Path $authKeys) | Out-Null
-        Copy-Item $pubkey $authKeys -Force
-        # sshd requires a restrictive ACL on this file.
-        & icacls $authKeys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
-    }
-    & netsh advfirewall firewall add rule name='agent-sandbox-sshd' dir=in `
-        action=allow protocol=TCP localport=22 | Out-Null
-    Set-Service sshd -StartupType Automatic
-    Start-Service sshd
-    $ip = (Get-NetIPAddress -AddressFamily IPv4 |
-        Where-Object { $_.IPAddress -notlike '169.254*' -and
-            $_.InterfaceAlias -notmatch 'Loopback' } |
-        Select-Object -Last 1).IPAddress
-    Write-Host "sshd is running; sandbox IP: $ip"
-    if (Test-Path $artifacts) {
-        Set-Content -Path (Join-Path $artifacts 'ip') -Value $ip
-    }
-    $gateway = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' |
-        Sort-Object RouteMetric | Select-Object -First 1).NextHop
-
-    # --- 5. install_pi.sh, unmodified ---------------------------------------
-    Write-Host 'Running install_pi.sh ...'
-    $msysPayload = '/' + $payload.Substring(0, 1).ToLower() +
-        $payload.Substring(2).Replace('\', '/')
-    $bash = Join-Path $payload 'git\bin\bash.exe'
-    & $bash -lc "bash '$msysPayload/install_pi.sh'"
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "install_pi.sh failed with exit code $LASTEXITCODE"
-        Stop-Transcript | Out-Null
-        exit 1
-    }
-
-    # --- 6. ollama: point pi at the sandbox host -----------------------------
-    # Map host.docker.internal to the default-route gateway (the host) in
-    # the guest hosts file. This is the analog of docker's --add-host
-    # host.docker.internal:<gateway> argument in agent_docker.py, and it
-    # makes bare-port --ollama values resolve here exactly like they do in
-    # a docker container.
-    $hostsFile = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
-    if (-not (Select-String -Path $hostsFile -SimpleMatch 'host.docker.internal' -Quiet)) {
-        Add-Content -Path $hostsFile -Value "$gateway`thost.docker.internal"
-    }
-    $msysHome = '/' + $homeDir.Substring(0, 1).ToLower() +
-        $homeDir.Substring(2).Replace('\', '/')
-    if ($Ollama) {
-        # Expand the --ollama value exactly like agent_docker.py: a bare
-        # value (a port or hostname) goes to host.docker.internal; a value
-        # without a scheme gets http:// added.
-        if ($Ollama -notmatch '[/:]') { $Ollama = "host.docker.internal:$Ollama" }
-        if ($Ollama -notmatch '/') { $Ollama = "http://$Ollama" }
-        $Ollama = $Ollama.TrimEnd('/')
-        $ollamaArg = " '$Ollama'"
-    } else {
-        $ollamaArg = ''
-    }
-    & $bash -lc "'$msysHome/.local/bin/set_ollama.sh'$ollamaArg"
-
-    # --- 7. Hand off to an interactive shell in the copied tree --------------
-    Write-Host ''
-    Write-Host "Provisioning complete. Agent tree: $work"
-    if ($NoShell) {
-        Write-Host 'NoShell requested; leaving the sandbox running without a shell.'
-        return
-    }
-    Set-Location $work
-    powershell -NoLogo -NoExit
-} finally {
-    try { Stop-Transcript | Out-Null } catch { }
+    Copy-Tree $source $dest -ExcludeDirs $xd -ExcludeFiles $xf
+    # The copy must be writable regardless of attributes on the source.
+    & attrib -R (Join-Path $dest '*') /S /D 2>$null | Out-Null
 }
+
+# --- 5. --local / --mount ---------------------------------------------------
+Invoke-Checked 'linking mounted folders' {
+    foreach ($mount in $mounts) {
+        $guest = $mount.guest
+        $dst = [string]$mount.dst
+        if (-not (Test-Path $guest)) {
+            Log "WARNING: mapped folder $guest is missing; skipping"
+            continue
+        }
+        if ($dst -match '^[A-Za-z]:') {
+            $target = $dst
+        } else {
+            $dst = $dst -replace '^~[\\/]', '' -replace '/', '\'
+            $target = Join-Path $homeDir $dst
+        }
+        $parent = Split-Path -Parent $target
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        if (Test-Path $target) { Remove-Item -Recurse -Force $target }
+        try {
+            New-Item -ItemType Junction -Path $target -Target $guest -ErrorAction Stop | Out-Null
+        } catch {
+            & cmd.exe /c mklink /D "$target" "$guest" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "could not link $target -> $guest" }
+        }
+        Log "linked $target -> $guest ($(if ($mount.readonly) { 'ro' } else { 'rw' }))"
+    }
+    $vimrc = Join-Path $script:RunDir 'vimrc'
+    if (Test-Path $vimrc) {
+        Copy-Item $vimrc (Join-Path $homeDir '.vimrc') -Force
+    }
+}
+
+# --- 6. project hooks and ollama --------------------------------------------
+Invoke-Checked 'pre-commit hook' {
+    if (Test-Path (Join-Path $homeDir "$project\.git\hooks\pre-commit")) {
+        Invoke-Bash $user "cd ~/'$project' && pre-commit install" | Out-Null
+    }
+}
+
+Invoke-Checked 'ollama url' {
+    $arg = ''
+    if ($ollama) { $arg = " '$ollama'" }
+    $code = Invoke-Bash $user "~/.local/bin/set_ollama.sh$arg"
+    if ($code -ne 0) { Log 'WARNING: set_ollama.sh failed' }
+}
+
+Invoke-Checked 'fixing ownership' { Set-HomeOwner $user $homeDir }
+
+# --- 7. finish --------------------------------------------------------------
+Invoke-Checked 'finishing' {
+    Remove-BootstrapKey $user
+    Remove-AdminRights $user
+    Publish-IP | Out-Null
+    # The run folder is the host's channel; keep the agent out of it (this
+    # may not be honored on a mapped folder, in which case the agent can at
+    # worst write files into ~\.agent_sandbox\<name>\run on the host).
+    & icacls $script:RunDir /deny "$user`:(OI)(CI)F" 2>$null | Out-Null
+}
+
+Log "sandbox ready: $user@$(Get-SandboxIP) with the project at $homeDir\$project"
+Write-Marker 'done'
+try { Stop-Transcript | Out-Null } catch { }
