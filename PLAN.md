@@ -84,7 +84,8 @@ Files in this repo:
   script). Commands: `provision`, `create`, `start`, `list`, `stop`, `ip`,
   `exec`, `update`, `cp`. Config merge from `agent_sandbox.yaml` (same scheme as
   `agent_docker.yaml`: keys are working directories, values are argument
-  arrays, `all` applies everywhere).
+  arrays, `all` applies everywhere); the file is user maintained and not
+  part of the repo.
 - `agent_sandbox_payload.ps1` - run once (`agent_sandbox.py provision`);
   assembles `~\.agent_sandbox\agent_payload\`:
   - `git\` PortableGit (provides bash for install_pi.sh)
@@ -109,7 +110,6 @@ Files in this repo:
      (the analog of docker's `--add-host`), then `set_ollama.sh` with
      `--ollama` expanded exactly like agent_docker.py expands it
   7. interactive shell left in `C:\work\<name>`
-- `agent_sandbox.yaml` - per-project default arguments.
 - `install_pi.sh` - shared with docker/tart (modified as described above).
 
 `create` flow (and `start`, which is identical except that `-NoShell` is
@@ -130,7 +130,8 @@ predictable. ssh runs as `WDAGUtilityAccount` with the host's ed25519 key.
 
 1. One-time: `Enable-WindowsOptionalFeature -Online -FeatureName
    "Containers-DisposableClientVM" -All`, reboot.
-2. `python agent_sandbox.py provision` (network needed once).
+2. `python agent_sandbox.py provision` (rebuilds the payload from scratch
+   every run; needs network).
 3. `python agent_sandbox.py start` in a project. The sandbox window is the
    VM's display: it must stay open (it is minimized automatically), and
    closing it destroys the sandbox. Follow provisioning from the host via

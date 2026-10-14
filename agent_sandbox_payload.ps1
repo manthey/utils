@@ -1,11 +1,12 @@
 # agent_sandbox_payload.ps1 - assemble the portable toolchain payload used by
 # the Windows agent sandbox (agent_sandbox.py + agent_sandbox_provision.ps1).
 #
-# Run this once on the Windows host:
+# Run this on the Windows host:
 #   powershell -ExecutionPolicy Bypass -File agent_sandbox_payload.ps1
 #
-# The payload is a directory of portable, self-contained tools that is mapped
-# read-only into every sandbox:
+# The payload is rebuilt from scratch on every run, so results are
+# reproducible; it is a directory of portable, self-contained tools that is
+# mapped read-only into every sandbox:
 #   agent_payload\git\          PortableGit (provides bash for install_pi.sh)
 #   agent_payload\node\         portable node 22 (pi's runtime)
 #   agent_payload\bin\          uv, jq, rg, fd
@@ -16,12 +17,10 @@
 #   -PayloadDir <dir>  payload location (default ~\.agent_sandbox\agent_payload)
 #   -RepoDir <dir>     directory holding install_pi.sh and the provisioner
 #                      (default: the directory containing this script)
-#   -Force             redownload components that already exist
 
 param(
     [string]$PayloadDir = '',
-    [string]$RepoDir = '',
-    [switch]$Force
+    [string]$RepoDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -86,94 +85,70 @@ $versions = @()
 
 # --- PortableGit: provides bash.exe so install_pi.sh runs unmodified. --------
 $gitDir = Join-Path $PayloadDir 'git'
-if ($Force -or -not (Test-Path (Join-Path $gitDir 'bin\bash.exe'))) {
-    $url = Get-LatestAsset 'git-for-windows/git' 'PortableGit-.*-64-bit\.7z\.exe$'
-    $file = Get-Url $url (Join-Path $tempRoot 'PortableGit.7z.exe')
-    Write-Host "Extracting PortableGit ..."
-    $extract = Start-Process -FilePath $file -ArgumentList @(
-        '-o', "`"$gitDir`"", '-y') -Wait -PassThru -NoNewWindow
-    if ($extract.ExitCode -ne 0) {
-        throw "PortableGit self-extractor failed with exit code $($extract.ExitCode)"
-    }
-    $versions += "git: $((Get-Item $file).LastWriteTime.ToString('yyyy-MM-dd'))"
-} else {
-    Write-Host 'PortableGit already present'
+$url = Get-LatestAsset 'git-for-windows/git' 'PortableGit-.*-64-bit\.7z\.exe$'
+$file = Get-Url $url (Join-Path $tempRoot 'PortableGit.7z.exe')
+Write-Host "Extracting PortableGit ..."
+$extract = Start-Process -FilePath $file -ArgumentList @(
+    '-o', "`"$gitDir`"", '-y') -Wait -PassThru -NoNewWindow
+if ($extract.ExitCode -ne 0) {
+    throw "PortableGit self-extractor failed with exit code $($extract.ExitCode)"
 }
+$versions += "git: $((Get-Item $file).LastWriteTime.ToString('yyyy-MM-dd'))"
 
 # --- Portable node 22: pi's runtime. -----------------------------------------
 $nodeDir = Join-Path $PayloadDir 'node'
-if ($Force -or -not (Test-Path (Join-Path $nodeDir 'node.exe'))) {
-    $index = Invoke-WebRequest -Uri 'https://nodejs.org/dist/latest-v22.x/' `
-        -UseBasicParsing
-    $match = [regex]::Match($index.Content, 'node-v22\.\d+\.\d+-win-x64\.zip')
-    if (-not $match.Success) {
-        throw 'Could not find a node v22 win-x64 zip on nodejs.org'
-    }
-    $name = $match.Value
-    $url = "https://nodejs.org/dist/latest-v22.x/$name"
-    $file = Get-Url $url (Join-Path $tempRoot $name)
-    Write-Host "Extracting $name ..."
-    $zipDir = Join-Path $tempRoot 'nodezip'
-    if (Test-Path $zipDir) { Remove-Item -Recurse -Force $zipDir }
-    Expand-ZipInto $file $zipDir
-    if (Test-Path $nodeDir) { Remove-Item -Recurse -Force $nodeDir }
-    $inner = Get-ChildItem $zipDir -Directory | Select-Object -First 1
-    Move-Item $inner.FullName $nodeDir
-    $nodeVersion = $name -replace '^node-(v[\d.]+)-win-x64\.zip$', '$1'
-    $versions += "node: $nodeVersion"
-} else {
-    Write-Host 'Portable node already present'
+$index = Invoke-WebRequest -Uri 'https://nodejs.org/dist/latest-v22.x/' `
+    -UseBasicParsing
+$match = [regex]::Match($index.Content, 'node-v22\.\d+\.\d+-win-x64\.zip')
+if (-not $match.Success) {
+    throw 'Could not find a node v22 win-x64 zip on nodejs.org'
 }
+$name = $match.Value
+$url = "https://nodejs.org/dist/latest-v22.x/$name"
+$file = Get-Url $url (Join-Path $tempRoot $name)
+Write-Host "Extracting $name ..."
+$zipDir = Join-Path $tempRoot 'nodezip'
+if (Test-Path $zipDir) { Remove-Item -Recurse -Force $zipDir }
+Expand-ZipInto $file $zipDir
+if (Test-Path $nodeDir) { Remove-Item -Recurse -Force $nodeDir }
+$inner = Get-ChildItem $zipDir -Directory | Select-Object -First 1
+Move-Item $inner.FullName $nodeDir
+$nodeVersion = $name -replace '^node-(v[\d.]+)-win-x64\.zip$', '$1'
+$versions += "node: $nodeVersion"
 
 # --- Single-file tools into payload\bin. -------------------------------------
 $binDir = Join-Path $PayloadDir 'bin'
 
 # uv (and uvx)
-if ($Force -or -not (Test-Path (Join-Path $binDir 'uv.exe'))) {
-    $url = Get-LatestAsset 'astral-sh/uv' 'uv-x86_64-pc-windows-msvc\.zip$'
-    $file = Get-Url $url (Join-Path $tempRoot 'uv.zip')
-    $zipDir = Join-Path $tempRoot 'uvzip'
-    Expand-ZipInto $file $zipDir
-    Copy-Item (Join-Path $zipDir 'uv.exe') $binDir -Force
-    Copy-Item (Join-Path $zipDir 'uvx.exe') $binDir -Force
-    $versions += 'uv: latest'
-} else {
-    Write-Host 'uv already present'
-}
+$url = Get-LatestAsset 'astral-sh/uv' 'uv-x86_64-pc-windows-msvc\.zip$'
+$file = Get-Url $url (Join-Path $tempRoot 'uv.zip')
+$zipDir = Join-Path $tempRoot 'uvzip'
+Expand-ZipInto $file $zipDir
+Copy-Item (Join-Path $zipDir 'uv.exe') $binDir -Force
+Copy-Item (Join-Path $zipDir 'uvx.exe') $binDir -Force
+$versions += 'uv: latest'
 
 # jq
-if ($Force -or -not (Test-Path (Join-Path $binDir 'jq.exe'))) {
-    $url = Get-LatestAsset 'jqlang/jq' 'jq-windows-amd64\.exe$'
-    $file = Get-Url $url (Join-Path $tempRoot 'jq.exe')
-    Copy-Item $file (Join-Path $binDir 'jq.exe') -Force
-    $versions += 'jq: latest'
-} else {
-    Write-Host 'jq already present'
-}
+$url = Get-LatestAsset 'jqlang/jq' 'jq-windows-amd64\.exe$'
+$file = Get-Url $url (Join-Path $tempRoot 'jq.exe')
+Copy-Item $file (Join-Path $binDir 'jq.exe') -Force
+$versions += 'jq: latest'
 
 # ripgrep (rg.exe)
-if ($Force -or -not (Test-Path (Join-Path $binDir 'rg.exe'))) {
-    $url = Get-LatestAsset 'BurntSushi/ripgrep' 'ripgrep-.*-x86_64-pc-windows-msvc\.zip$'
-    $file = Get-Url $url (Join-Path $tempRoot 'ripgrep.zip')
-    $zipDir = Join-Path $tempRoot 'rgzip'
-    Expand-ZipInto $file $zipDir
-    Copy-ExeFromZip $zipDir 'rg.exe' $binDir
-    $versions += 'ripgrep: latest'
-} else {
-    Write-Host 'ripgrep already present'
-}
+$url = Get-LatestAsset 'BurntSushi/ripgrep' 'ripgrep-.*-x86_64-pc-windows-msvc\.zip$'
+$file = Get-Url $url (Join-Path $tempRoot 'ripgrep.zip')
+$zipDir = Join-Path $tempRoot 'rgzip'
+Expand-ZipInto $file $zipDir
+Copy-ExeFromZip $zipDir 'rg.exe' $binDir
+$versions += 'ripgrep: latest'
 
 # fd
-if ($Force -or -not (Test-Path (Join-Path $binDir 'fd.exe'))) {
-    $url = Get-LatestAsset 'sharkdp/fd' 'fd-v.*-x86_64-pc-windows-msvc\.zip$'
-    $file = Get-Url $url (Join-Path $tempRoot 'fd.zip')
-    $zipDir = Join-Path $tempRoot 'fdzip'
-    Expand-ZipInto $file $zipDir
-    Copy-ExeFromZip $zipDir 'fd.exe' $binDir
-    $versions += 'fd: latest'
-} else {
-    Write-Host 'fd already present'
-}
+$url = Get-LatestAsset 'sharkdp/fd' 'fd-v.*-x86_64-pc-windows-msvc\.zip$'
+$file = Get-Url $url (Join-Path $tempRoot 'fd.zip')
+$zipDir = Join-Path $tempRoot 'fdzip'
+Expand-ZipInto $file $zipDir
+Copy-ExeFromZip $zipDir 'fd.exe' $binDir
+$versions += 'fd: latest'
 
 # --- ssh keypair: the host's key that the sandbox sshd will accept. ----------
 $sshDir = Join-Path $HOME '.agent_sandbox\ssh'

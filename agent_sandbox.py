@@ -157,6 +157,7 @@ def minimize_sandbox_windows(timeout: float = 120) -> None:
 
 
 def add_config(args, src, parser):
+    """Merge user defaults from the config file (agent_docker.py scheme)."""
     if not os.path.exists(args.config):
         return args
     try:
@@ -327,23 +328,36 @@ def get_ip(base_dir: str, name: str, wait: float = 120) -> str:
     return ip
 
 
-def wait_published_ip(artifacts: str, timeout: float) -> str | None:
-    """Wait for the guest to publish its IP into the artifacts folder."""
+def wait_published_ip(artifacts: str, timeout: float, running=None) -> str | None:
+    """Wait for the guest to publish its IP into the artifacts folder.
+
+    If a running callback is given, stop early once the sandbox process has
+    been seen and then disappears: a dead sandbox will never publish an IP.
+    """
     published = os.path.join(artifacts, 'ip')
     deadline = time.time() + timeout
+    seen_running = False
     while time.time() < deadline:
         if os.path.exists(published):
             ip = open(published).read().strip()
             if ip:
                 return ip
+        if running:
+            if running():
+                seen_running = True
+            elif seen_running:
+                logger.warning(
+                    'The Windows Sandbox process is gone; waiting no longer '
+                    'for an IP it will never publish.')
+                return None
         time.sleep(2)
     return None
 
 
-def wait_sandbox_ip(artifacts: str, timeout: float) -> str | None:
+def wait_sandbox_ip(artifacts: str, timeout: float, running=None) -> str | None:
     """The guest-published IP, or ARP discovery as a fallback."""
-    ip = wait_published_ip(artifacts, timeout)
-    if not ip:
+    ip = wait_published_ip(artifacts, timeout, running)
+    if not ip and (running is None or running()):
         logger.debug('No ip published; falling back to ARP discovery.')
         ip = discover_ip(timeout)
     return ip
@@ -378,7 +392,7 @@ def stage_local(run_dir: str) -> list:
 def build_wsb(mappings: list, logon_command: str, cpus: int, memory: int) -> str:
     folders = ''.join(
         '    <MappedFolder>\n'
-        f'      <HostFolder>{escape(path)}</HostFolder>\n'
+        f'      <HostFolder>{escape(os.path.normpath(path))}</HostFolder>\n'
         f'      <ReadOnly>{"true" if mode == "ro" else "false"}</ReadOnly>\n'
         '    </MappedFolder>\n'
         for path, mode in mappings)
@@ -499,7 +513,7 @@ def create(args, parser):
         (' -NoShell' if args.command == 'start' else ''))
     wsb = build_wsb(
         mappings, logon_command, args.cpus, args.memory)
-    wsb_path = os.path.join(run_dir, 'agent.wsb')
+    wsb_path = os.path.normpath(os.path.join(run_dir, 'agent.wsb'))
     with open(wsb_path, 'w', encoding='utf-8') as handle:
         handle.write(wsb)
     logger.info('Launching %s', wsb_path)
@@ -523,7 +537,7 @@ def create(args, parser):
     # discovery is only the fallback for when that never happens.
     print(f'Waiting up to {args.wait_timeout} seconds for the sandbox IP; '
           'run with -vv to watch discovery.')
-    ip = wait_sandbox_ip(artifacts, args.wait_timeout)
+    ip = wait_sandbox_ip(artifacts, args.wait_timeout, sandbox_running)
     if ip:
         with open(os.path.join(run_dir, 'ip'), 'w') as handle:
             handle.write(ip + '\n')
@@ -576,8 +590,6 @@ def run_provision(args):
     cmd = ['powershell', '-ExecutionPolicy', 'Bypass', '-NoProfile', '-File', script]
     if args.payload_dir:
         cmd += ['-PayloadDir', args.payload_dir]
-    if args.force:
-        cmd += ['-Force']
     subprocess.check_call(cmd)
 
 
@@ -715,7 +727,9 @@ def main():
         'extras', nargs='*',
         help='exec: remote command (interactive shell if omitted). cp: the '
         'two endpoints, one of which is prefixed in:')
-    parser.add_argument('--force', action='store_true', help='provision: redownload tools')
+    parser.add_argument(
+        '--force', action='store_true',
+        help='Deprecated: the payload is always rebuilt from scratch.')
     parser.add_argument('--payload-dir', help='provision: payload directory to assemble')
     parser.add_argument('--verbose', '-v', action='count', default=0, help='Increase verbosity')
     args = parser.parse_intermixed_args()
