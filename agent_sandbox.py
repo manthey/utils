@@ -126,10 +126,15 @@ def minimize_sandbox_windows(timeout: float = 120) -> None:
     while time.time() < deadline:
         pids = sandbox_pids()
         if pids:
+            if not seen_process:
+                logger.info('Windows Sandbox process: %s.', sorted(pids))
             seen_process = True
         elif seen_process:
-            # The sandbox is gone; stop waiting.
-            break
+            logger.warning(
+                'The Windows Sandbox process exited without opening a '
+                'window; the sandbox failed to start. Test launching the '
+                '.wsb by hand and watch for an error.')
+            return
         windows = []
 
         def callback(hwnd, _lparam, pids=pids, windows=windows):
@@ -142,9 +147,13 @@ def minimize_sandbox_windows(timeout: float = 120) -> None:
 
         user32.EnumWindows(enum_proc_type(callback), 0)
         if windows:
-            logger.debug('Minimized %d sandbox window(s).', len(windows))
+            logger.info('Minimized %d sandbox window(s).', len(windows))
             return
         time.sleep(1)
+    if seen_process:
+        logger.warning(
+            'The Windows Sandbox process ran for %d seconds without ever '
+            'opening a window.', timeout)
 
 
 def add_config(args, src, parser):
@@ -258,11 +267,14 @@ def discover_ip(timeout: float) -> str | None:
                 return ip
         time.sleep(2)
     if seen:
+        table = arp_table()
+        described = [f'{ip} ({table.get(ip, "?")})' for ip in sorted(seen)]
         logger.warning(
             'Saw candidate ARP entries %s but none answered on port %s; is '
-            'sshd running in the sandbox? Check '
-            '%%TEMP%%\\agent_sandbox_provision.log in the sandbox window.',
-            sorted(seen), SANDBOX_PORT)
+            'sshd running in the sandbox? Check the provision log '
+            '(artifacts/provision.log, or %%TEMP%%\\agent_sandbox_'
+            'provision.log in the sandbox).',
+            described, SANDBOX_PORT)
     else:
         logger.warning(
             'No candidate ARP entries appeared; the sandbox may not be '
@@ -506,6 +518,7 @@ def create(args, parser):
                'Windows Pro or Enterprise. Test by double-clicking '
                f'{wsb_path} by hand.')
         raise SystemExit(msg)
+    logger.info('Windows Sandbox process: %s.', sorted(sandbox_pids()))
     # The guest publishes its IP once the provisioner brings up sshd; ARP
     # discovery is only the fallback for when that never happens.
     print(f'Waiting up to {args.wait_timeout} seconds for the sandbox IP; '
