@@ -54,6 +54,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 from xml.sax.saxutils import escape
 
@@ -81,6 +82,69 @@ def sandbox_running() -> bool:
         ['tasklist', '/FI', 'IMAGENAME eq WindowsSandbox.exe'],
         text=True, stderr=subprocess.DEVNULL)
     return 'WindowsSandbox.exe' in output
+
+
+def sandbox_pids() -> set:
+    """The PIDs of all running WindowsSandbox.exe processes."""
+    output = subprocess.check_output(
+        ['tasklist', '/FI', 'IMAGENAME eq WindowsSandbox.exe',
+         '/FO', 'CSV', '/NH'],
+        text=True, stderr=subprocess.DEVNULL)
+    pids = set()
+    for line in output.splitlines():
+        parts = line.split('","')
+        if len(parts) > 1 and parts[0].strip('"') == 'WindowsSandbox.exe':
+            try:
+                pids.add(int(parts[1]))
+            except ValueError:
+                continue
+    return pids
+
+
+def minimize_sandbox_windows(timeout: float = 120) -> None:
+    """Minimize the sandbox windows once they appear.
+
+    Windows Sandbox has no headless mode, so the window is the VM's
+    display; minimizing keeps the VM running while the host workflow stays
+    terminal-only. Gives up silently after timeout seconds, or as soon as
+    the sandbox process goes away.
+    """
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        from ctypes import wintypes
+    except (AttributeError, ImportError, OSError):
+        logger.debug('Windows API unavailable; not minimizing the window.')
+        return
+    SW_MINIMIZE = 6
+    enum_proc_type = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = (enum_proc_type, wintypes.LPARAM)
+    user32.ShowWindowAsync.argtypes = (wintypes.HWND, ctypes.c_int)
+    deadline = time.time() + timeout
+    seen_process = False
+    while time.time() < deadline:
+        pids = sandbox_pids()
+        if pids:
+            seen_process = True
+        elif seen_process:
+            # The sandbox is gone; stop waiting.
+            break
+        windows = []
+
+        def callback(hwnd, _lparam, pids=pids, windows=windows):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in pids and user32.IsWindowVisible(hwnd):
+                user32.ShowWindowAsync(hwnd, SW_MINIMIZE)
+                windows.append(hwnd)
+            return True
+
+        user32.EnumWindows(enum_proc_type(callback), 0)
+        if windows:
+            logger.debug('Minimized %d sandbox window(s).', len(windows))
+            return
+        time.sleep(1)
 
 
 def add_config(args, src, parser):
@@ -297,6 +361,16 @@ def build_wsb(mappings: list, logon_command: str, cpus: int, memory: int) -> str
 """
 
 
+def wait_sandbox_started(timeout: float = 15) -> bool:
+    """Wait briefly for the Windows Sandbox process to appear."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if sandbox_running():
+            return True
+        time.sleep(1)
+    return False
+
+
 def launch_sandbox(wsb_path: str) -> None:
     """Launch a .wsb configuration the way a double-click would.
 
@@ -387,14 +461,13 @@ def create(args, parser):
         handle.write(wsb)
     logger.info('Launching %s', wsb_path)
     launch_sandbox(wsb_path)
+    if args.minimize:
+        threading.Thread(
+            target=minimize_sandbox_windows, daemon=True).start()
     # Windows Sandbox takes a moment to appear; if its process never shows
     # up, the feature is likely not enabled and waiting for an IP would be
     # pointless.
-    for _ in range(15):
-        if sandbox_running():
-            break
-        time.sleep(1)
-    else:
+    if not wait_sandbox_started():
         msg = ('Windows Sandbox did not start. Is the Windows Sandbox '
                'feature enabled (in an admin prompt: Enable-'
                'WindowsOptionalFeature -Online -FeatureName '
@@ -566,6 +639,13 @@ def main():
         help='Expose .vimrc, .vim, .vim_backup, and pi sessions to the sandbox. '
         'This removes some isolation.')
     parser.add_argument('--no-local', dest='local', action='store_false')
+    parser.add_argument(
+        '--minimize', action='store_true', default=True,
+        help='Minimize the sandbox window after launch; Windows Sandbox has '
+        'no headless mode, so the window is the VM display. Default on.')
+    parser.add_argument(
+        '--no-minimize', dest='minimize', action='store_false',
+        help='Leave the sandbox window as-is after launch.')
     parser.add_argument(
         '--mount', action='append', default=[],
         help='Map an extra folder into the sandbox. Appears at Desktop/<basename>. '
