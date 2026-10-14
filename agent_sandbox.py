@@ -297,6 +297,29 @@ def build_wsb(mappings: list, logon_command: str, cpus: int, memory: int) -> str
 """
 
 
+def launch_sandbox(wsb_path: str) -> None:
+    """Launch a .wsb configuration the way a double-click would.
+
+    os.startfile is the ShellExecute path Explorer takes, which works where
+    `cmd /c start` may not; fall back to running WindowsSandbox.exe
+    directly if the association cannot be resolved.
+    """
+    try:
+        os.startfile(wsb_path)
+    except OSError as exc:
+        logger.warning(
+            'os.startfile failed (%s); trying WindowsSandbox.exe directly.',
+            exc)
+        sandbox_exe = os.path.join(
+            os.environ.get('SYSTEMROOT', r'C:\Windows'), 'System32',
+            'WindowsSandbox.exe')
+        try:
+            subprocess.Popen([sandbox_exe, wsb_path])
+        except OSError as exc2:
+            msg = f'Could not launch Windows Sandbox: {exc2}'
+            raise SystemExit(msg)
+
+
 def create(args, parser):
     if args.backend != 'wsb':
         msg = ('Only the Windows Sandbox (wsb) backend is implemented; the '
@@ -363,7 +386,7 @@ def create(args, parser):
     with open(wsb_path, 'w', encoding='utf-8') as handle:
         handle.write(wsb)
     logger.info('Launching %s', wsb_path)
-    subprocess.check_call(['cmd', '/c', 'start', '', wsb_path])
+    launch_sandbox(wsb_path)
     # Windows Sandbox takes a moment to appear; if its process never shows
     # up, the feature is likely not enabled and waiting for an IP would be
     # pointless.

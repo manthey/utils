@@ -130,8 +130,11 @@ predictable. ssh runs as `WDAGUtilityAccount` with the host's ed25519 key.
 1. One-time: `Enable-WindowsOptionalFeature -Online -FeatureName
    "Containers-DisposableClientVM" -All`, reboot.
 2. `python agent_sandbox.py provision` (network needed once).
-3. `python agent_sandbox.py create` in a project; watch
-   `%TEMP%\agent_sandbox_provision.log` in the sandbox.
+3. `python agent_sandbox.py start` in a project; watch
+   `%TEMP%\agent_sandbox_provision.log` in the sandbox. The sandbox window
+   is the VM's display: it must stay open (minimize it), and closing it
+   destroys the sandbox. Work from the host terminal: `exec`, `cp`,
+   `update`.
    `python agent_sandbox.py start` is the same but leaves no interactive
    shell; enter with `python agent_sandbox.py exec`.
 4. `python agent_sandbox.py cp in:C:/work/<proj>/somefile.txt .`
