@@ -91,7 +91,7 @@ repos:
         exclude: model_card.yaml
   - repo: local
     hooks:
-      - id: hadolint-docker
+      - id: hadolint
         args:
           - --ignore
           - DL3003
@@ -111,18 +111,23 @@ repos:
           - SC2046
           - --ignore
           - SC2086
-        name: hadolint (docker, conditional)
-        description: Run hadolint via docker, skipping when docker is unavailable
+        name: hadolint (local binary, docker fallback)
+        description: Run hadolint via local binary if present, docker fallback; skip
+          when neither is available
         entry: |-
           python3 -c "import os, shutil, subprocess, sys
+          a = sys.argv[1:]  # pre-commit merges config args + filenames here
+          fl = [f for f in a if not os.path.isfile(f)]
+          fs = [f for f in a if os.path.isfile(f)]
+          if not fs:
+            sys.exit(0)
+          h = shutil.which('hadolint')
+          if h:
+            cmd = [h] + fl + ['--'] + fs
+            sys.exit(subprocess.run(cmd).returncode)
           d = shutil.which('docker')
           if not d:
-            print('hadolint-docker: docker not found on PATH, skiping.', file=sys.stderr)
-            sys.exit(0)
-          a = sys.argv[1:]  # pre-commit merges config args + filenames here
-          fs = ['/work/' + f for f in a if os.path.isfile(f)]
-          fl = [f for f in a if not os.path.isfile(f)]
-          if not fs:
+            print('hadolint: neither hadolint nor docker found on PATH, skipping.', file=sys.stderr)
             sys.exit(0)
           cmd = [d, 'run', '--rm', '-v', f'{os.getcwd()}:/work', '-i', '--entrypoint', 'hadolint', 'ghcr.io/hadolint/hadolint'] + fl + ['--'] + fs
           sys.exit(subprocess.run(cmd).returncode)"
