@@ -25,10 +25,10 @@
 #   exec       shell into a running sandbox
 #   update     apply --ollama to a running sandbox
 #   list       list known sandboxes
-#   cp         copy files to/from the sandbox; one endpoint prefixed vm:
+#   cp         copy files to/from the sandbox; one endpoint prefixed in:
 #
-# cp usage: agent_termux.sh cp [--name NAME] vm:<guest path> <local path>
-#           agent_termux.sh cp [--name NAME] <local path> vm:<guest path>
+# cp usage: agent_termux.sh cp [--name NAME] in:<guest path> <local path>
+#           agent_termux.sh cp [--name NAME] <local path> in:<guest path>
 #           (like docker cp; directories are copied recursively)
 #
 # A running sandbox is a proot-wrapped sshd on a localhost-only port, so
@@ -350,36 +350,36 @@ run_ssh() {
         127.0.0.1 "$@"
 }
 
-# docker-cp-style copy: exactly one endpoint is prefixed vm: and refers to a
+# docker-cp-style copy: exactly one endpoint is prefixed in: and refers to a
 # path in the sandbox (relative paths are relative to the guest home). scp -r
 # copies directories recursively and is harmless for plain files.
 do_cp() {
     local src="$1"
     local dst="$2"
-    if [ "${src#vm:}" != "$src" ] && [ "${dst#vm:}" != "$dst" ]; then
-        die "cp: only one endpoint may be a vm: path"
+    if [ "${src#in:}" != "$src" ] && [ "${dst#in:}" != "$dst" ]; then
+        die "cp: only one endpoint may be a in: path"
     fi
-    if [ "${src#vm:}" = "$src" ] && [ "${dst#vm:}" = "$dst" ]; then
-        die "cp: one endpoint must be a vm: path"
+    if [ "${src#in:}" = "$src" ] && [ "${dst#in:}" = "$dst" ]; then
+        die "cp: one endpoint must be a in: path"
     fi
     local port
     port="$(vm_port "$VM_NAME")" || die "sandbox $VM_NAME is not running"
-    if [ "${src#vm:}" != "$src" ]; then
-        info "copying $VM_NAME:${src#vm:} to $dst"
+    if [ "${src#in:}" != "$src" ]; then
+        info "copying $VM_NAME:${src#in:} to $dst"
         scp -r -P "$port" \
             -o UserKnownHostsFile="$KNOWN_HOSTS" \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             -o BatchMode=yes \
-            "127.0.0.1:${src#vm:}" "$dst"
+            "127.0.0.1:${src#in:}" "$dst"
     else
-        info "copying $src to $VM_NAME:${dst#vm:}"
+        info "copying $src to $VM_NAME:${dst#in:}"
         scp -r -P "$port" \
             -o UserKnownHostsFile="$KNOWN_HOSTS" \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             -o BatchMode=yes \
-            "$src" "127.0.0.1:${dst#vm:}"
+            "$src" "127.0.0.1:${dst#in:}"
     fi
 }
 
