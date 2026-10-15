@@ -397,13 +397,76 @@ cat > "$BINDIR/set_hf.sh" <<'EOF'
 #!/usr/bin/env bash
 # set_hf.sh - Configure HuggingFace token and models for pi agent
 # Usage: set_hf.sh [hf_token] [model1] [context1] [model2] [context2] ...
+#
+# Model ids may carry a routing suffix:
+#   :<provider>   explicit provider (e.g. :novita)
+#   :cheapest     HF routes to the cheapest live provider
+#   :fastest      HF routes to the fastest live provider
+#   (no suffix)   HF defaults to :fastest
+#   :ourpick      resolved locally by this script: among providers that
+#                 publish a price (input + output), keep the lowest total
+#                 price, then the largest context_length, then the highest
+#                 throughput; the id is rewritten to :<provider> in
+#                 models.json.
+#
+# When no context size is given on the command line, the script fetches
+# context_length for the resolved provider from the HF router's /v1/models.
 MODELS_JSON="$HOME/.pi/agent/models.json"
 SETTINGS_JSON="$HOME/.pi/agent/settings.json"
 DEFAULT_CONTEXT=262144
+HF_ROUTER="https://router.huggingface.co/v1"
 HF_TOKEN=""
 declare -a MODELS=()
 declare -A CONTEXTS=()
+declare -A FINAL_IDS=()
 LAST_MODEL=""
+
+# Resolve a model id (with optional suffix) against the HF router.
+# Prints "<provider>\t<context_length>" on success, nothing on failure.
+fetch_context() {
+  local model="$1" token="$2" base sfx response
+  base="$model"
+  sfx=""
+  if [[ "$model" == *:* ]]; then
+    base="${model%%:*}"
+    sfx="${model#*:}"
+  fi
+  token="${token:-$(jq -r '.providers["local-llm"].apiKey // empty' "$MODELS_JSON")}"
+  [[ -n "$token" ]] || return 1
+  response="$(curl -sf --max-time 15 "$HF_ROUTER/models" -H "Authorization: Bearer $token")" || return 1
+  jq -r --arg id "$base" --arg sfx "$sfx" '
+    def live: [.providers[]? | select(.status == "live" and .context_length != null)];
+    def priced: map(select(.pricing.input != null and .pricing.output != null));
+    def resolve:
+      if $sfx == "ourpick" then
+        priced
+        | (map(.pricing.input + .pricing.output) | min) as $p
+        | map(select(.pricing.input + .pricing.output == $p))
+        | (map(.context_length) | max) as $c
+        | map(select(.context_length == $c))
+        | max_by(.throughput // 0)
+      elif $sfx == "cheapest" then
+        priced
+        | (map(.pricing.input) | min) as $p
+        | map(select(.pricing.input == $p))
+        | (map(.context_length) | max) as $c
+        | map(select(.context_length == $c))
+        | max_by(.throughput // 0)
+      elif $sfx == "" or $sfx == "fastest" then
+        (map(.throughput // 0) | max) as $t
+        | map(select((.throughput // 0) == $t))
+        | max_by(.context_length // 0)
+      else
+        map(select(.provider == $sfx))
+        | if length == 0 then empty else .[0] end
+      end;
+    (.data[] | select(.id == $id or (.id | endswith("/" + $id))))
+    | live
+    | if length == 0 then empty else resolve end
+    | if . == null then empty else "\(.provider)\t\(.context_length)" end
+  ' <<<"$response"
+}
+
 for arg in "$@"; do
   if [[ "$arg" == hf_* ]]; then
     HF_TOKEN="$arg"
@@ -429,15 +492,60 @@ if [[ -n "$HF_TOKEN" ]]; then
   echo "Token updated"
 fi
 for model in "${MODELS[@]}"; do
-  ctx="${CONTEXTS[$model]:-$DEFAULT_CONTEXT}"
-  jq --arg id "$model" --argjson ctx "$ctx" '.providers["local-llm"].models = [.providers["local-llm"].models[] | select(.id != $id)] + [{id: $id, contextWindow: $ctx}]' "$MODELS_JSON" > "${MODELS_JSON}.tmp" && mv "${MODELS_JSON}.tmp" "$MODELS_JSON"
-  enabled_model="local-llm/$model"
+  base="$model"
+  sfx=""
+  if [[ "$model" == *:* ]]; then
+    base="${model%%:*}"
+    sfx="${model#*:}"
+  fi
+  final_id="$model"
+  ctx_spec="${CONTEXTS[$model]:-}"
+  ctx=""
+  resolved_ok=0
+  if resolved="$(fetch_context "$model" "$HF_TOKEN")" && [[ -n "$resolved" ]]; then
+    IFS=$'\t' read -r provider ctx <<<"$resolved"
+    resolved_ok=1
+    if [[ "$sfx" == "ourpick" ]]; then
+      final_id="$base:$provider"
+      echo "Resolved :ourpick for $base -> :$provider (context: $ctx)"
+    fi
+  fi
+  if [[ "$sfx" == "ourpick" && "$resolved_ok" -eq 0 ]]; then
+    # :ourpick is not an HF routing suffix; without the router listing it
+    # cannot be resolved, so degrade to :cheapest which HF understands.
+    final_id="$base:cheapest"
+  fi
+  if [[ -n "$ctx_spec" ]]; then
+    if [[ "$resolved_ok" -eq 1 && "$ctx" -lt "$ctx_spec" ]]; then
+      echo "Note: fetched context $ctx for $final_id is below the specified $ctx_spec; using $ctx"
+    else
+      ctx="$ctx_spec"
+    fi
+  elif [[ "$resolved_ok" -eq 0 ]]; then
+    # Offline or unresolvable: do not clobber an existing contextWindow; only
+    # a brand-new entry needs a fallback value.
+    existing="$(jq -r --arg id "$final_id" '.providers["local-llm"].models[]? | select(.id == $id) | .contextWindow // empty' "$MODELS_JSON")"
+    if [[ -n "$existing" ]]; then
+      ctx="$existing"
+      echo "Warning: could not resolve $model against the HF router; keeping existing context $ctx for $final_id" >&2
+    else
+      ctx="$DEFAULT_CONTEXT"
+      echo "Warning: could not resolve $model against the HF router; using default context $ctx" >&2
+    fi
+  fi
+  jq --arg id "$final_id" --argjson ctx "$ctx" '.providers["local-llm"].models = [.providers["local-llm"].models[] | select(.id != $id)] + [{id: $id, contextWindow: $ctx}]' "$MODELS_JSON" > "${MODELS_JSON}.tmp" && mv "${MODELS_JSON}.tmp" "$MODELS_JSON"
+  enabled_model="local-llm/$final_id"
   jq --arg m "$enabled_model" 'if (.enabledModels // []) | index($m) then . else .enabledModels = ((.enabledModels // []) + [$m]) end' "$SETTINGS_JSON" > "${SETTINGS_JSON}.tmp" && mv "${SETTINGS_JSON}.tmp" "$SETTINGS_JSON"
-  echo "Added model: $model (context: $ctx)"
+  if [[ "$final_id" != "$model" ]]; then
+    # The un-resolved placeholder (e.g. :ourpick) should not linger in settings.
+    jq --arg m "local-llm/$model" '.enabledModels = [(.enabledModels // [])[] | select(. != $m)]' "$SETTINGS_JSON" > "${SETTINGS_JSON}.tmp" && mv "${SETTINGS_JSON}.tmp" "$SETTINGS_JSON"
+  fi
+  FINAL_IDS["$model"]="$final_id"
+  echo "Added model: $final_id (context: $ctx)"
 done
 if [[ -n "$LAST_MODEL" ]]; then
-  jq --arg m "local-llm/$LAST_MODEL" '.defaultModel = $m' "$SETTINGS_JSON" > "${SETTINGS_JSON}.tmp" && mv "${SETTINGS_JSON}.tmp" "$SETTINGS_JSON"
-  echo "Default model set to: local-llm/$LAST_MODEL"
+  jq --arg m "local-llm/${FINAL_IDS[$LAST_MODEL]:-$LAST_MODEL}" '.defaultModel = $m' "$SETTINGS_JSON" > "${SETTINGS_JSON}.tmp" && mv "${SETTINGS_JSON}.tmp" "$SETTINGS_JSON"
+  echo "Default model set to: local-llm/${FINAL_IDS[$LAST_MODEL]:-$LAST_MODEL}"
 fi
 EOF
 chmod +x "$BINDIR/set_hf.sh"
