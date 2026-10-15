@@ -188,6 +188,18 @@ echo "services started"
 EOF
 chmod +x "$HOME/.local/bin/start_services.sh"
 
+# --- dotfiles and helper scripts
+
+step "dotfiles"
+PROVISION_DIR="$HOME/.agent_tart_provision"
+mkdir -p "$HOME/.local/bin"
+if [ -f "$PROVISION_DIR/.vimrc" ]; then
+    install -m 644 "$PROVISION_DIR/.vimrc" "$HOME/.vimrc"
+fi
+if [ -f "$PROVISION_DIR/cover.py" ]; then
+    install -m 755 "$PROVISION_DIR/cover.py" "$HOME/.local/bin/cover.py"
+fi
+
 # --- shell environment
 
 step "shell profiles"

@@ -509,6 +509,13 @@ build_mount_args() {
         add_mount "$HOME/.vim" ro "$GUEST_HOME/.vim"
         add_mount "$HOME/.vim_backup" rw "$GUEST_HOME/.vim_backup"
         add_mount "$HOME/.pi/agent/sessions" rw "$GUEST_HOME/.pi/agent/sessions"
+        if [ -f "$HOME/.vimrc" ]; then
+            # A single file, which add_mount rejects; proot can bind it
+            # directly, but the bind target must exist inside the rootfs.
+            touch "$(guest_root "$VM_NAME")$GUEST_HOME/.vimrc" 2>/dev/null || true
+            MOUNT_ARGS+=("-b" "$HOME/.vimrc:$GUEST_HOME/.vimrc")
+            info "sharing $HOME/.vimrc as $GUEST_HOME/.vimrc"
+        fi
     fi
     local entry rest mode src dst
     for entry in ${MOUNTS[@]+"${MOUNTS[@]}"}; do
@@ -636,6 +643,14 @@ provision)
         cp "$SELF_DIR/install_pi.sh" "$root$GUEST_HOME/"
     else
         die "install_pi.sh not found next to agent_termux.sh"
+    fi
+    if [ -f "$SELF_DIR/.vimrc" ]; then
+        cp "$SELF_DIR/.vimrc" "$root$GUEST_HOME/.vimrc"
+    fi
+    if [ -f "$SELF_DIR/cover.py" ]; then
+        mkdir -p "$root$GUEST_HOME/.local/bin"
+        cp "$SELF_DIR/cover.py" "$root$GUEST_HOME/.local/bin/cover.py"
+        chmod 755 "$root$GUEST_HOME/.local/bin/cover.py"
     fi
     info "provisioning the base (installs node and pi; takes a while; log $LOG_DIR/$BASE_NAME.log)"
     launch_proot "$BASE_NAME" -c '
