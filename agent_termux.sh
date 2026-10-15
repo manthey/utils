@@ -640,6 +640,8 @@ provision)
     info "provisioning the base (installs node and pi; takes a while; log $LOG_DIR/$BASE_NAME.log)"
     launch_proot "$BASE_NAME" -c '
         pkg install -y git openssh &&
+        curl -fsSL "https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-$(uname -m | sed "s/aarch64/arm64/")" -o "$PREFIX/bin/hadolint" &&
+        chmod +x "$PREFIX/bin/hadolint" &&
         bash ~/install_pi.sh &&
         ssh-keygen -A >/dev/null &&
         rm -f ~/install_pi.sh

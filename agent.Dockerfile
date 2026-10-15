@@ -96,6 +96,9 @@ RUN apt-get update && \
     BUILDX_LATEST=$(curl -s https://api.github.com/repos/docker/buildx/releases/latest | grep '"tag_name"' | cut -d '"' -f 4) && \
     curl -fsSL "https://github.com/docker/buildx/releases/download/${BUILDX_LATEST}/buildx-${BUILDX_LATEST}.linux-$(dpkg --print-architecture)" -o /usr/libexec/docker/cli-plugins/docker-buildx && \
     chmod +x /usr/libexec/docker/cli-plugins/docker-buildx && \
+    curl -fsSL "https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-$(uname -m | sed 's/aarch64/arm64/')" -o /usr/local/bin/hadolint && \
+    chmod +x /usr/local/bin/hadolint && \
+    hadolint --version && \
     apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/cache/* && \
     rdfind -minsize 8192 -makehardlinks true -makeresultsfile false /usr && \
     rdfind -minsize 8192 -makehardlinks true -makeresultsfile false /var

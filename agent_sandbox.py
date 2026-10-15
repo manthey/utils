@@ -93,7 +93,8 @@ def safe_filename(name: str) -> str:
 
 
 def die(msg: str):
-    raise SystemExit(f'agent_sandbox: {msg}')
+    msg = f'agent_sandbox: {msg}'
+    raise SystemExit(msg)
 
 
 def info(msg: str):
@@ -126,8 +127,6 @@ def add_config(args, src, parser):
         return args
 
 
-# --- backends ---------------------------------------------------------------
-
 def pick_backend(requested: str) -> str:
     if requested != 'auto':
         return requested
@@ -148,7 +147,7 @@ def wsb(*args, check=True) -> str:
 
 def cli_running_ids() -> set:
     output = wsb('list', '--raw', check=False)
-    return set(match.lower() for match in GUID_RE.findall(output))
+    return {match.lower() for match in GUID_RE.findall(output)}
 
 
 def cli_ip(sandbox_id: str) -> str | None:
@@ -254,15 +253,16 @@ class Sandbox:
                 'Containers-DisposableClientVM, then reboot)')
 
     def exec_system(self, command: str) -> subprocess.Popen | None:
-        """cli backend: start a command in the sandbox as SYSTEM (no output
-        capture is possible; the provisioners report through the run folder)."""
+        """Cli backend: start a command in the sandbox as SYSTEM (no output
+        capture is possible; the provisioners report through the run folder).
+        """
         if self.backend != 'cli':
             return None
         cmd = ['wsb', 'exec', '--id', self.sandbox_id, '-r', 'System', '-c', command]
         logger.info(subprocess.list2cmdline(cmd))
         return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def run_provisioner(self, command: str, timeout: float) -> bool:
+    def run_provisioner(self, command: str, timeout: float) -> bool:  # noqa
         """Run a provisioner script and wait for its done/failed marker.
 
         With the cli backend the script is started with `wsb exec`, which
@@ -327,8 +327,6 @@ class Sandbox:
         return False
 
 
-# --- configuration ----------------------------------------------------------
-
 def mapped_folder(host: str, guest: str, readonly: bool) -> str:
     return (
         '    <MappedFolder>\n'
@@ -362,7 +360,8 @@ def provisioner_command(script: str) -> str:
 
 def refresh_scripts():
     """Copy the in-sandbox scripts into the payload so edits take effect on
-    the next run (the payload itself is otherwise only built by provision)."""
+    the next run (the payload itself is otherwise only built by provision).
+    """
     scripts = os.path.join(PAYLOAD_DIR, 'scripts')
     os.makedirs(scripts, exist_ok=True)
     for name in SCRIPTS:
@@ -381,8 +380,6 @@ def prepare_run_dir(sandbox: Sandbox, args_dict: dict, pubkey: str):
     with open(os.path.join(sandbox.run_dir, 'authorized_keys'), 'w') as fp:
         fp.write(pubkey.strip() + '\n')
 
-
-# --- ssh --------------------------------------------------------------------
 
 def ensure_ssh_key(sshkey: str | None) -> str:
     """Return the private key path; same policy as agent_tart.sh."""
@@ -458,7 +455,8 @@ def ssh_interactive(key: str, user: str, ip: str, command: list):
 
 def guest_path(path: str) -> str:
     """Normalize an in: path for scp: forward slashes; relative paths stay
-    relative to the sandbox user's home."""
+    relative to the sandbox user's home.
+    """
     path = path.replace('\\', '/')
     if path.startswith('~/'):
         path = path[2:]
@@ -502,7 +500,8 @@ def ollama_url(value: str | None) -> str:
 
 def tunnel_port(url: str) -> int | None:
     """The port to forward when the ollama url points at the sandbox's own
-    loopback, else None."""
+    loopback, else None.
+    """
     parsed = urllib.parse.urlparse(url)
     if parsed.hostname not in {'127.0.0.1', 'localhost'}:
         return None
@@ -511,7 +510,8 @@ def tunnel_port(url: str) -> int | None:
 
 def tunnel_note(args, key: str, ip: str, url: str):
     """Print the host-side ssh command that forwards ollama into the
-    sandbox (agent_sandbox.md, "Reaching ollama on the host")."""
+    sandbox (agent_sandbox.md, "Reaching ollama on the host").
+    """
     port = tunnel_port(url)
     if port is None:
         return
@@ -524,7 +524,7 @@ def tunnel_note(args, key: str, ip: str, url: str):
             '-o', 'StrictHostKeyChecking=no',
             '-o', 'ServerAliveInterval=30',
             f'{args.user}@{ip}']
-    info(f'pi uses ollama at {url}; to reach the host\'s ollama, keep this '
+    info(f"pi uses ollama at {url}; to reach the host's ollama, keep this "
          'running in a host terminal:')
     print(f'  {subprocess.list2cmdline(cmd)}', file=sys.stderr)
 
@@ -538,10 +538,8 @@ def set_ollama(key: str, user: str, ip: str, value: str):
         die('set_ollama.sh failed')
 
 
-# --- mounts -----------------------------------------------------------------
-
 def collect_mounts(args, sandbox: Sandbox) -> tuple[list, list]:
-    """Return (mappings, mount specs) for --local and --mount.
+    r"""Return (mappings, mount specs) for --local and --mount.
 
     Mappings are (host, guest, readonly) for the configuration.  Mount specs
     tell the provisioner where to link each mapped folder inside the sandbox
@@ -596,8 +594,6 @@ def collect_mounts(args, sandbox: Sandbox) -> tuple[list, list]:
         add(src, dst, mode == 'ro')
     return mappings, specs
 
-
-# --- commands ---------------------------------------------------------------
 
 def cmd_provision(args, backend: str, key: str):
     if os.path.isdir(PAYLOAD_DIR):
@@ -715,7 +711,7 @@ def main():  # noqa
         '--ollama', '--url',
         help='Replacement url for ollama.  This can be just a port, a host '
         'and port, or a full base url.  A bare port (default 11434) means '
-        'the host\'s ollama forwarded into the sandbox over an ssh tunnel '
+        "the host's ollama forwarded into the sandbox over an ssh tunnel "
         '(the command is printed by create and start).')
     parser.add_argument(
         '--gpu', '--gpus', action='store_true',
@@ -799,7 +795,6 @@ def main():  # noqa
     key = None
     if args.command not in {'list', 'stop', 'ip'}:
         key = ensure_ssh_key(args.sshkey)
-
     if args.command == 'provision':
         cmd_provision(args, backend, key)
     elif args.command in {'create', 'start'}:

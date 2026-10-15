@@ -26,7 +26,7 @@ step() {
     echo "=== $*"
 }
 
-# --- sudo -------------------------------------------------------------------
+# --- sudo
 
 step "sudo access"
 if ! sudo -n true 2>/dev/null; then
@@ -56,7 +56,7 @@ EOW
     sleep 60
 fi
 
-# --- Xcode Command Line Tools (compilers; required for pyenv and brew) ------
+# --- Xcode Command Line Tools (compilers; required for pyenv and brew)
 
 if ! xcode-select -p >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
     step "installing Xcode Command Line Tools (several minutes)"
@@ -74,7 +74,7 @@ if ! xcode-select -p >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
     sudo xcode-select --switch /Library/Developer/CommandLineTools 2>/dev/null || true
 fi
 
-# --- Homebrew ---------------------------------------------------------------
+# --- Homebrew
 
 step "Homebrew"
 if ! command -v brew >/dev/null 2>&1 &&
@@ -89,7 +89,7 @@ command -v brew >/dev/null 2>&1 || {
     exit 1
 }
 
-# --- brew packages (parallel to the agent.Dockerfile apt packages) ----------
+# --- brew packages (parallel to the agent.Dockerfile apt packages)
 
 step "brew packages"
 brew tap mongodb/brew 2>/dev/null || true
@@ -106,10 +106,10 @@ brew install \
     libtiff openjpeg little-cms2 libffi \
     autoconf automake libtool \
     ripgrep fd vim tmux less pandoc imagemagick libmagic optipng xmlstarlet \
-    shellcheck universal-ctags \
+    shellcheck hadolint universal-ctags \
     redis memcached rabbitmq mongodb-community
 
-# --- pyenv pythons ----------------------------------------------------------
+# --- pyenv pythons
 
 step "pyenv pythons: $PYTHONS"
 export PYENV_ROOT="${PYENV_ROOT:-$HOME/.pyenv}"
@@ -139,7 +139,7 @@ done
 pyenv global $(pyenv versions --bare) || true
 pyenv rehash
 
-# --- uv, the shared venv, and pi --------------------------------------------
+# --- uv, the shared venv, and pi
 
 step "uv"
 if ! command -v uv >/dev/null 2>&1; then
@@ -153,7 +153,7 @@ step "pi (via install_pi.sh)"
 bash "$HOME/.agent_tart_provision/install_pi.sh"
 export PATH="$HOME/.local/bin:$PATH"
 
-# --- node 22 + playwright browsers ------------------------------------------
+# --- node 22 + playwright browsers
 
 if [ -s "$HOME/.nvm-pi/nvm.sh" ]; then
     # shellcheck disable=SC1091
@@ -163,7 +163,7 @@ if [ -s "$HOME/.nvm-pi/nvm.sh" ]; then
     npx playwright install || true
 fi
 
-# --- services (macOS equivalent of the image's start_services.sh) -----------
+# --- services (macOS equivalent of the image's start_services.sh)
 
 step "start_services.sh"
 BREW_PREFIX="$(brew --prefix)"
@@ -188,7 +188,7 @@ echo "services started"
 EOF
 chmod +x "$HOME/.local/bin/start_services.sh"
 
-# --- shell environment -------------------------------------------------------
+# --- shell environment
 
 step "shell profiles"
 for profile in "$HOME/.zshrc" "$HOME/.bashrc"; do
@@ -204,12 +204,12 @@ eval "\$(pyenv init -)" 2>/dev/null || true
 EOF
 done
 
-# --- git identity ------------------------------------------------------------
+# --- git identity
 
 git config --global user.name "VM"
 git config --global user.email "container@example.com"
 
-# --- cleanup ------------------------------------------------------------------
+# --- cleanup
 
 step "cleanup"
 brew cleanup --prune=all >/dev/null 2>&1 || true

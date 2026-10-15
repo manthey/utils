@@ -70,7 +70,7 @@ function Find-File([string]$Root, [string]$Name) {
     return $found.FullName
 }
 
-# --- PortableGit ------------------------------------------------------------
+# --- PortableGit
 Invoke-Checked 'PortableGit' {
     $asset = Get-GitHubAsset 'git-for-windows/git' '^PortableGit-.*-64-bit\.7z\.exe$'
     $file = Get-File $asset.Url 'PortableGit.7z.exe'
@@ -81,7 +81,7 @@ Invoke-Checked 'PortableGit' {
     $script:versions += "git: $($asset.Tag)"
 }
 
-# --- node 22 ----------------------------------------------------------------
+# --- node 22
 Invoke-Checked 'node' {
     $index = Get-Json 'https://nodejs.org/dist/index.json'
     $entry = $index | Where-Object { $_.version -like 'v22.*' } | Select-Object -First 1
@@ -95,8 +95,8 @@ Invoke-Checked 'node' {
     $script:versions += "node: $($entry.version)"
 }
 
-# --- single-file tools ------------------------------------------------------
-Invoke-Checked 'uv, jq, ripgrep, fd' {
+# --- single-file tools
+Invoke-Checked 'uv, jq, ripgrep, fd, hadolint' {
     $bin = Join-Path $script:Tools 'bin'
     $asset = Get-GitHubAsset 'astral-sh/uv' '^uv-x86_64-pc-windows-msvc\.zip$'
     Expand-Zip (Get-File $asset.Url 'uv.zip') (Join-Path $dl 'uv')
@@ -117,9 +117,13 @@ Invoke-Checked 'uv, jq, ripgrep, fd' {
     Expand-Zip (Get-File $asset.Url 'fd.zip') (Join-Path $dl 'fd')
     Copy-Item (Find-File (Join-Path $dl 'fd') 'fd.exe') $bin -Force
     $script:versions += "fd: $($asset.Tag)"
+
+    $asset = Get-GitHubAsset 'hadolint/hadolint' '^hadolint-Windows-x86_64\.exe$'
+    Copy-Item (Get-File $asset.Url 'hadolint.exe') (Join-Path $bin 'hadolint.exe') -Force
+    $script:versions += "hadolint: $($asset.Tag)"
 }
 
-# --- Win32-OpenSSH ----------------------------------------------------------
+# --- Win32-OpenSSH
 Invoke-Checked 'OpenSSH' {
     $asset = Get-GitHubAsset 'PowerShell/Win32-OpenSSH' '^OpenSSH-Win64\.zip$'
     Expand-Zip (Get-File $asset.Url 'openssh.zip') (Join-Path $dl 'openssh')
@@ -130,7 +134,7 @@ Invoke-Checked 'OpenSSH' {
     $script:versions += "openssh: $($asset.Tag)"
 }
 
-# --- pythons (python.org NuGet packages) ------------------------------------
+# --- pythons (python.org NuGet packages)
 Invoke-Checked "pythons $($pythons -join ', ')" {
     $index = Get-Json 'https://api.nuget.org/v3-flatcontainer/python/index.json'
     $root = Join-Path $script:Tools 'python'
@@ -162,11 +166,11 @@ Invoke-Checked "pythons $($pythons -join ', ')" {
     }
 }
 
-# --- user, sshd and profile (same path as every sandbox) ---------------------
+# --- user, sshd and profile (same path as every sandbox)
 $state = Initialize-Sandbox $runArgs $true -SkipTools
 $homeDir = $state.Home
 
-# --- pi, via the shared install_pi.sh ---------------------------------------
+# --- pi, via the shared install_pi.sh
 Invoke-Checked 'install_pi.sh' {
     $script = ConvertTo-MsysPath (Join-Path $script:Payload 'scripts\install_pi.sh')
     $code = Invoke-Bash $user "bash '$script'"
@@ -199,7 +203,7 @@ Invoke-Checked 'home directory extras' {
     Remove-BootstrapKey $user
 }
 
-# --- copy the results into the payload --------------------------------------
+# --- copy the results into the payload
 Invoke-Checked 'copying tools and home into the payload' {
     Copy-Tree $script:Tools (Join-Path $script:Payload 'tools')
     $dest = Join-Path $script:Payload 'home'
