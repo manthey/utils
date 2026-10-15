@@ -29,7 +29,6 @@ SYSTEM_PROMPT = """You are an academic research assistant. When given the text
 of a scholarly document, you produce a structured markdown summary. You follow
 instructions precisely regarding output length and format. You never use
 emojis, slang, or metaphors."""
-
 USER_PROMPT_TEMPLATE = """Summarize the following document and return a JSON
 document. Include exactly these fields:
 - "Title": title of the paper

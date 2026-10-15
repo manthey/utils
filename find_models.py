@@ -113,7 +113,6 @@ QUANT_PRIORITY_BITS = {
     'IQ1_S': (71, 1.5625),
     'Q1_0': (72, 1.0),
 }
-
 MODEL_PATTERNS = {
     'code': {
         'tags': {'code', 'conversational'},
@@ -791,7 +790,6 @@ OLLAMA_HTMX_HEADERS = {
     'HX-Request': 'true',
     'Accept': 'text/html',
 }
-
 OLLAMA_PLAIN_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0',
     'Accept': 'text/html',

@@ -239,7 +239,6 @@ REPORTED_LANGUAGES = sorted(REPORTED_LANGUAGES | (set(SUPPORTED_LANGUAGES) & {
     'typescript', 'cmake', 'c', 'cpp', 'csv', 'dockerfile', 'json',
     'rst', 'markdown', 'yaml', 'html'}))
 
-
 VALIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
     'type': 'object',
     'properties': {
@@ -441,13 +440,11 @@ def main():
         handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
         logger.addHandler(handler)
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
-
     server = Server(
         'syntax-validator',
         on_list_tools=list_tools_handler,
         on_call_tool=call_tool_handler,
     )
-
     if args.languages:
         for key in SUPPORTED_LANGUAGES:
             print(key)

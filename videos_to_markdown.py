@@ -144,11 +144,9 @@ def extract_frames_at(
                 '-frames:v', '1', '-q:v', '2',
             ]
             if max_size:
-                cmd += [
-                    '-vf',
-                    f"scale='min(iw,{max_size})':'min(ih,{max_size})':"
-                    'force_original_aspect_ratio=decrease',
-                ]
+                cmd += ['-vf',
+                        (f"scale='min(iw,{max_size})':'min(ih,{max_size})':"
+                         'force_original_aspect_ratio=decrease')]
             cmd.append(str(out))
             # logger.debug('Command %s', ' '.join(cmd))
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)

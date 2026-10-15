@@ -40,8 +40,6 @@ DEFAULT_USER = (
     'color terms without adjectives (black, red, orange, yellow, green, teal, '
     'blue, purple, maroon, pink, gold, peach, beige, brown, olive, gray, '
     'lavender, magenta, lime, white) unless describing people.')
-
-
 YAML_DESCRIPTION = """A yaml file can specify the LLM prompt(s).  As an example:
 
 ---
