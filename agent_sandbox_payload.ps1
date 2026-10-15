@@ -1,0 +1,221 @@
+# agent_sandbox_payload.ps1 - assemble the agent sandbox payload. Runs INSIDE
+# a Windows Sandbox started by `agent_sandbox.py provision`, with the host's
+# payload folder mapped read-write at C:\payload. This is the equivalent of
+# building agent.Dockerfile or tart's base VM: nothing is installed on the
+# host; the sandbox downloads and arranges everything, then the result is a
+# plain folder the host maps read-only into every later sandbox.
+#
+# Result (C:\payload):
+#   tools\git\        PortableGit (bash, vim, ssh client)
+#   tools\node\       portable node 22 (pi's runtime)
+#   tools\python\3.x\ python.org builds (NuGet packages) with pip; the
+#                     newest also has tox, pre-commit and virtualenv
+#   tools\bin\        uv.exe, uvx.exe, jq.exe, rg.exe, fd.exe
+#   tools\openssh\    Win32-OpenSSH (sshd for the sandbox)
+#   home\             the sandbox user's home after install_pi.sh ran in it
+#                     (pi, its extensions and config, helper scripts, .bashrc)
+#   VERSIONS.txt
+#
+# See agent_sandbox_common.ps1 for the shared machinery.
+
+. (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'agent_sandbox_common.ps1')
+
+Start-ProvisionLog
+$runArgs = $null
+Invoke-Checked 'reading arguments' { $script:runArgs = Read-RunArgs }
+$runArgs = $script:runArgs
+$pythons = @(Get-ArgOr $runArgs 'pythons' @('3.12'))
+$pipTools = @(Get-ArgOr $runArgs 'pip_tools' @())
+$user = Get-ArgOr $runArgs 'user' 'agent'
+
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$dl = 'C:\dl'
+New-Item -ItemType Directory -Force -Path $dl, $script:Tools, (Join-Path $script:Tools 'bin') | Out-Null
+$versions = @()
+
+function Get-Json([string]$Url) {
+    return Invoke-RestMethod -Uri $Url -Headers @{ 'User-Agent' = 'agent_sandbox' }
+}
+
+function Get-File([string]$Url, [string]$Name) {
+    $dest = Join-Path $dl $Name
+    Log "downloading $Url"
+    Invoke-WebRequest -Uri $Url -OutFile $dest -UseBasicParsing -Headers @{ 'User-Agent' = 'agent_sandbox' }
+    return $dest
+}
+
+function Get-GitHubAsset([string]$Repo, [string]$Pattern) {
+    # Browser download url of the newest release asset matching the regex;
+    # pre-releases are considered when no stable release has the asset.
+    foreach ($release in (Get-Json "https://api.github.com/repos/$Repo/releases?per_page=15")) {
+        $asset = $release.assets | Where-Object { $_.name -match $Pattern } | Select-Object -First 1
+        if ($asset) { return @{ Url = $asset.browser_download_url; Tag = $release.tag_name } }
+    }
+    throw "no asset matching $Pattern in $Repo releases"
+}
+
+function Expand-Zip([string]$Zip, [string]$Dest) {
+    if (Test-Path $Dest) { Remove-Item -Recurse -Force $Dest }
+    # Expand-Archive insists on a .zip extension.
+    if (-not $Zip.EndsWith('.zip')) {
+        Copy-Item $Zip "$Zip.zip" -Force
+        $Zip = "$Zip.zip"
+    }
+    Expand-Archive -Path $Zip -DestinationPath $Dest -Force
+}
+
+function Find-File([string]$Root, [string]$Name) {
+    $found = Get-ChildItem $Root -Recurse -Filter $Name | Select-Object -First 1
+    if (-not $found) { throw "$Name not found under $Root" }
+    return $found.FullName
+}
+
+# --- PortableGit ------------------------------------------------------------
+Invoke-Checked 'PortableGit' {
+    $asset = Get-GitHubAsset 'git-for-windows/git' '^PortableGit-.*-64-bit\.7z\.exe$'
+    $file = Get-File $asset.Url 'PortableGit.7z.exe'
+    $dest = Join-Path $script:Tools 'git'
+    $proc = Start-Process -FilePath $file -ArgumentList @("-o`"$dest`"", '-y') -Wait -PassThru -NoNewWindow
+    if ($proc.ExitCode -ne 0) { throw "PortableGit extraction failed with $($proc.ExitCode)" }
+    if (-not (Test-Path (Join-Path $dest 'bin\bash.exe'))) { throw 'bash.exe missing after extraction' }
+    $script:versions += "git: $($asset.Tag)"
+}
+
+# --- node 22 ----------------------------------------------------------------
+Invoke-Checked 'node' {
+    $index = Get-Json 'https://nodejs.org/dist/index.json'
+    $entry = $index | Where-Object { $_.version -like 'v22.*' } | Select-Object -First 1
+    if (-not $entry) { throw 'no node v22 release found' }
+    $name = "node-$($entry.version)-win-x64"
+    $file = Get-File "https://nodejs.org/dist/$($entry.version)/$name.zip" "$name.zip"
+    Expand-Zip $file (Join-Path $dl 'node')
+    $dest = Join-Path $script:Tools 'node'
+    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+    Move-Item (Join-Path $dl "node\$name") $dest
+    $script:versions += "node: $($entry.version)"
+}
+
+# --- single-file tools ------------------------------------------------------
+Invoke-Checked 'uv, jq, ripgrep, fd' {
+    $bin = Join-Path $script:Tools 'bin'
+    $asset = Get-GitHubAsset 'astral-sh/uv' '^uv-x86_64-pc-windows-msvc\.zip$'
+    Expand-Zip (Get-File $asset.Url 'uv.zip') (Join-Path $dl 'uv')
+    Copy-Item (Find-File (Join-Path $dl 'uv') 'uv.exe') $bin -Force
+    Copy-Item (Find-File (Join-Path $dl 'uv') 'uvx.exe') $bin -Force
+    $script:versions += "uv: $($asset.Tag)"
+
+    $asset = Get-GitHubAsset 'jqlang/jq' '^jq-windows-amd64\.exe$'
+    Copy-Item (Get-File $asset.Url 'jq.exe') (Join-Path $bin 'jq.exe') -Force
+    $script:versions += "jq: $($asset.Tag)"
+
+    $asset = Get-GitHubAsset 'BurntSushi/ripgrep' '^ripgrep-.*-x86_64-pc-windows-msvc\.zip$'
+    Expand-Zip (Get-File $asset.Url 'ripgrep.zip') (Join-Path $dl 'rg')
+    Copy-Item (Find-File (Join-Path $dl 'rg') 'rg.exe') $bin -Force
+    $script:versions += "ripgrep: $($asset.Tag)"
+
+    $asset = Get-GitHubAsset 'sharkdp/fd' '^fd-v.*-x86_64-pc-windows-msvc\.zip$'
+    Expand-Zip (Get-File $asset.Url 'fd.zip') (Join-Path $dl 'fd')
+    Copy-Item (Find-File (Join-Path $dl 'fd') 'fd.exe') $bin -Force
+    $script:versions += "fd: $($asset.Tag)"
+}
+
+# --- Win32-OpenSSH ----------------------------------------------------------
+Invoke-Checked 'OpenSSH' {
+    $asset = Get-GitHubAsset 'PowerShell/Win32-OpenSSH' '^OpenSSH-Win64\.zip$'
+    Expand-Zip (Get-File $asset.Url 'openssh.zip') (Join-Path $dl 'openssh')
+    $sshd = Find-File (Join-Path $dl 'openssh') 'sshd.exe'
+    $dest = Join-Path $script:Tools 'openssh'
+    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+    Move-Item (Split-Path -Parent $sshd) $dest
+    $script:versions += "openssh: $($asset.Tag)"
+}
+
+# --- pythons (python.org NuGet packages) ------------------------------------
+Invoke-Checked "pythons $($pythons -join ', ')" {
+    $index = Get-Json 'https://api.nuget.org/v3-flatcontainer/python/index.json'
+    $root = Join-Path $script:Tools 'python'
+    New-Item -ItemType Directory -Force -Path $root | Out-Null
+    foreach ($minor in $pythons) {
+        $candidates = @($index.versions | Where-Object { $_ -like "$minor.*" -and $_ -notmatch '-' })
+        if ($candidates.Count -eq 0) {
+            Log "WARNING: no stable python $minor on nuget.org; skipping"
+            continue
+        }
+        $full = ($candidates | Sort-Object { [version]$_ } | Select-Object -Last 1)
+        $file = Get-File "https://api.nuget.org/v3-flatcontainer/python/$full/python.$full.nupkg" "python-$full.nupkg"
+        Expand-Zip $file (Join-Path $dl "python-$full")
+        $dest = Join-Path $root $minor
+        if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+        Move-Item (Join-Path $dl "python-$full\tools") $dest
+        $exe = Join-Path $dest 'python.exe'
+        & $exe -m ensurepip --upgrade 2>&1 | Out-Null
+        & $exe -m pip install --quiet --no-warn-script-location --upgrade pip setuptools wheel 2>&1 | ForEach-Object { Write-Host $_ }
+        & $exe -m compileall -q (Join-Path $dest 'Lib') 2>&1 | Out-Null
+        $script:versions += "python: $full"
+    }
+    $newest = Get-NewestPython
+    if (-not $newest) { throw 'no python was installed' }
+    if ($pipTools.Count -gt 0) {
+        Log "installing $($pipTools -join ', ') into $newest"
+        & (Join-Path $newest 'python.exe') -m pip install --quiet --no-warn-script-location @pipTools 2>&1 | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { throw 'pip install of the tools failed' }
+    }
+}
+
+# --- user, sshd and profile (same path as every sandbox) ---------------------
+$state = Initialize-Sandbox $runArgs $true -SkipTools
+$homeDir = $state.Home
+
+# --- pi, via the shared install_pi.sh ---------------------------------------
+Invoke-Checked 'install_pi.sh' {
+    $script = ConvertTo-MsysPath (Join-Path $script:Payload 'scripts\install_pi.sh')
+    $code = Invoke-Bash $user "bash '$script'"
+    if ($code -ne 0) { throw "install_pi.sh exited with $code" }
+}
+
+Invoke-Checked 'home directory extras' {
+    $scripts = Join-Path $script:Payload 'scripts'
+    if (Test-Path (Join-Path $scripts '.vimrc')) {
+        Copy-Item (Join-Path $scripts '.vimrc') (Join-Path $homeDir '.vimrc') -Force
+    }
+    if (Test-Path (Join-Path $scripts 'cover.py')) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $homeDir '.local\bin') | Out-Null
+        Copy-Item (Join-Path $scripts 'cover.py') (Join-Path $homeDir '.local\bin\cover.py') -Force
+    }
+    $bashrc = Join-Path $homeDir '.bashrc'
+    if (-not (Test-Path $bashrc) -or -not (Select-String -Path $bashrc -SimpleMatch 'NPM_CONFIG_PREFIX' -Quiet)) {
+        Add-Content -Path $bashrc -Value @(
+            '',
+            '# agent sandbox: npm global installs go to the home directory',
+            'export NPM_CONFIG_PREFIX="$HOME/.npm-global"',
+            'export PATH="$NPM_CONFIG_PREFIX:$PATH"',
+            '# Bracketed paste does not survive the sshd ConPTY layer: a right-click',
+            '# paste leaves readline waiting for an end marker that never arrives.',
+            "bind 'set enable-bracketed-paste off' 2>/dev/null"
+        )
+    }
+    Invoke-Bash $user 'git config --global user.name Sandbox && git config --global user.email sandbox@example.com' | Out-Null
+    Set-HomeOwner $user $homeDir
+    Remove-BootstrapKey $user
+}
+
+# --- copy the results into the payload --------------------------------------
+Invoke-Checked 'copying tools and home into the payload' {
+    Copy-Tree $script:Tools (Join-Path $script:Payload 'tools')
+    $dest = Join-Path $script:Payload 'home'
+    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+    # Registry hives and caches must not travel: Windows creates fresh hives
+    # with each profile, and the caches are large and disposable.
+    Copy-Tree $homeDir $dest -ExcludeDirs @(
+        (Join-Path $homeDir 'AppData\Local\Temp'),
+        (Join-Path $homeDir 'AppData\Local\npm-cache'),
+        (Join-Path $homeDir 'AppData\Local\pip'),
+        (Join-Path $homeDir 'AppData\Local\Microsoft'),
+        (Join-Path $homeDir 'AppData\Roaming\Microsoft')
+    ) -ExcludeFiles @('ntuser*', 'NTUSER*', 'UsrClass*')
+    $script:versions | Set-Content -Path (Join-Path $script:Payload 'VERSIONS.txt')
+}
+
+Log 'payload complete'
+Write-Marker 'done'
+try { Stop-Transcript | Out-Null } catch { }
