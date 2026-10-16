@@ -6,45 +6,6 @@
 # ]
 # ///
 r"""agent_sandbox.py - Windows Sandbox equivalent of agent_docker.py.
-
-agent_docker.py builds agentic-programming sandboxes (running pi) in docker
-containers; agent_tart.sh does the same on macOS with tart VMs. This script
-does the same on Windows using Windows Sandbox (no WSL, no docker), with the
-same command set and semantics (sandboxes are ephemeral: stop destroys the
-sandbox, and start always builds a fresh one from the payload):
-
-  provision  assemble the tool payload and pre-install pi (like building the
-             docker image or tart's base VM); run once, needs the network
-  create     start a sandbox, copy the project in, shell in
-  start      like create, but does not shell in
-  stop       destroy the sandbox
-  exec       interactive shell in a running sandbox (or run a command)
-  update     apply --ollama to a running sandbox
-  list       list known sandboxes
-  ip         print the sandbox IP
-  cp         copy files to/from the sandbox; one endpoint prefixed in:
-
-cp usage: agent_sandbox.py cp [--name NAME] in:<sandbox path> <local path>
-          agent_sandbox.py cp [--name NAME] <local path> in:<sandbox path>
-          (like docker cp; directories are copied recursively; relative
-          sandbox paths are relative to the sandbox user's home)
-
-Backends (chosen automatically, or with --backend):
-  cli   the wsb.exe command line (Windows 11 24H2 and later): sandboxes run
-        headless and are managed by id.
-  file  a .wsb configuration file launched like a double-click (Windows 10):
-        the sandbox window is the VM display and must stay open; the
-        provisioner runs from the LogonCommand and reports back through a
-        mapped folder.
-
-Either way the host talks to the sandbox over ssh (Windows' built-in OpenSSH
-client) as a non-administrator user, with the same key handling as
-agent_tart.sh (~/.ssh/id_ed25519.pub or similar; generated if missing).
-
-The in-sandbox work lives in agent_sandbox_payload.ps1 (provision) and
-agent_sandbox_provision.ps1 (every sandbox), sharing agent_sandbox_common.ps1;
-pi is installed by install_pi.sh (shared with docker/tart). See
-agent_sandbox.md.
 """
 
 import argparse
@@ -488,7 +449,7 @@ def ollama_url(value: str | None) -> str:
     an ssh tunnel, so the default and a bare port point at the sandbox's own
     loopback.  host:port and full urls are used as given (the provisioner
     maps host.docker.internal to the sandbox's default gateway, which needs
-    a host firewall rule; see agent_sandbox.md).
+    a host firewall rule; see agent_containers.md).
     """
     host = value or DEFAULT_OLLAMA_PORT
     if '/' not in host and ':' not in host:
@@ -510,7 +471,7 @@ def tunnel_port(url: str) -> int | None:
 
 def tunnel_note(args, key: str, ip: str, url: str):
     """Print the host-side ssh command that forwards ollama into the
-    sandbox (agent_sandbox.md, "Reaching ollama on the host").
+    sandbox (agent_containers.md, "Windows Sandbox: reaching ollama").
     """
     port = tunnel_port(url)
     if port is None:
@@ -696,10 +657,16 @@ def main():  # noqa
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         'command',
-        choices=['provision', 'create', 'start', 'stop', 'exec', 'update',
-                 'list', 'ip', 'cp'],
-        help='Command.  create is the same as start followed by exec.  stop '
-        'destroys the sandbox.')
+        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp', 'provision', 'ip'],
+        help='Command. create is the same as start followed by exec. start '
+        'destroys an existing container, if any, and creates a new one. stop '
+        'destroys the container. exec opens a shell into an existing '
+        'container and optionally runs a command. update sets the ollama url '
+        'in a container. list shows running containers. cp copies into or out '
+        'of a container via cp <src> <dest>, where the path inside the '
+        'container is prefixed with in: and exactly one of src and dest must '
+        'include in:. provision creates the container image. ip shows the '
+        'container ip.')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
         help='For cp: two paths, exactly one prefixed in:.  For exec: an '
