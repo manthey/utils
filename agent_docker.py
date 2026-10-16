@@ -156,9 +156,15 @@ def main():  # noqa
     parser = argparse.ArgumentParser()
     parser.add_argument(
         'command',
-        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp'],
-        help='Command.  create is the same as start followed by exec.  stop '
-        'destroys the container.')
+        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp', 'provision'],
+        help='Command. create is the same as start followed by exec. start '
+        'destroys an existing container, if any, and creates a new one. stop '
+        'destroys the container. exec opens a shell into an existing '
+        'container and optionally runs a command. update sets the ollama url '
+        'in a container. list shows running containers. cp copies into or out '
+        'of a container via cp <src> <dest>, where the path inside the '
+        'container is prefixed with in: and exactly one of src and dest must '
+        'include in:. provision creates the container image.')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
         help='For cp: two paths, exactly one prefixed in:.  Relative '
@@ -233,6 +239,11 @@ def main():  # noqa
     if is_windows and shutil.which('docker') and not str(shutil.which(
             'docker')).lower().endswith(('.bat', '.cmd')):
         docker_cmd = ['docker']
+    if args.command == 'provision':
+        cmd = docker_cmd + ['build', '--force-rm', '-t', 'manthey/agent',
+                            '-f', 'agent.Dockerfile', '.']
+        logger.info(cmd)
+        subprocess.check_call(cmd, cwd=os.path.dirname(os.path.abspath(__file__)))
     if args.command in {'list'}:
         list_known(docker_cmd, container_name)
     if args.command in {'cp'}:
