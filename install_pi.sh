@@ -254,6 +254,7 @@ cat > "$HOME/.pi/agent/settings.json" <<'EOF'
   "httpIdleTimeoutMs": 0,
   "outputPad": 0,
   "quietStartup": true,
+  "retry": {                                                                        "maxRetries": 6                                                               },
   "steeringMode": "all",
   "tuiMode": "regular"
 }
