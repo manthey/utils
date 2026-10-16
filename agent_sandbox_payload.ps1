@@ -195,7 +195,8 @@ Invoke-Checked 'home directory extras' {
             'export PATH="$NPM_CONFIG_PREFIX:$PATH"',
             '# Bracketed paste does not survive the sshd ConPTY layer: a right-click',
             '# paste leaves readline waiting for an end marker that never arrives.',
-            "bind 'set enable-bracketed-paste off' 2>/dev/null"
+            "bind 'set enable-bracketed-paste off' 2>/dev/null",
+            "bind 'set bell-style none' 2>/dev/null"
         )
     }
     Invoke-Bash $user 'git config --global user.name Sandbox && git config --global user.email sandbox@example.com' | Out-Null
