@@ -147,7 +147,7 @@ def main():
     if not os.path.isdir(sessions_dir):
         print(f'Sessions directory not found: {sessions_dir}')
         return
-    prefixes = {'home-ubuntu', 'Users-admin'}
+    prefixes = {'home-ubuntu', 'Users-admin', 'C--Users-agent'}
     for session_dir in sorted(os.listdir(sessions_dir)):
         if args.src and session_dir not in {f'--{prefix}-{args.src}--' for prefix in prefixes}:
             continue
