@@ -2665,9 +2665,12 @@ def load_yaml_tests(files=None):
                     return chat_test(client, model_name, test['test'])
                 return bash_test(
                     client, model_name, ollama_base_url, ollama_docker_url, test['test'])
-            register_test(test['name'], test['description'],
-                          test.get('skip', False), test.get('version', 0),
-                          test.get('category', None), test.get('requires', None))(test_func)
+            try:
+                register_test(test['name'], test['description'],
+                              test.get('skip', False), test.get('version', 0),
+                              test.get('category', None), test.get('requires', None))(test_func)
+            except Exception:
+                print(f'Failed to register {test["name"]}')
         for test in tests:
             make_test(test)
 

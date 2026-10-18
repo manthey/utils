@@ -63,6 +63,7 @@ class ModelInfo:
     has_reasoning: bool = False
     has_vision: bool = False
     has_embedding: bool = False
+    has_decision: bool = False
 
 
 QUANT_PRIORITY_BITS = {
@@ -132,6 +133,11 @@ MODEL_PATTERNS = {
             r'vision', r'llava', r'bakllava', r'moondream', r'cogvlm', r'minicpm-v',
             r'internvl', r'paligemma', r'qwen.*vl', r'yi-vl', r'bunny',
             r'nanollava', r'obsidian', r'pixtral', r'llama.*vision', '-vl',
+        }},
+    'decision': {
+        'tags': {'decision-making', 'decision-model', 'typed-decisions', 'jev'},
+        'patterns': {
+            r'decision', r'decider',
         }},
     'medical': {
         'tags': {'medical', 'image-feature-extraction'},
@@ -348,7 +354,9 @@ def arch_params_from_ollama_model_info(model_info: dict) -> ModelArchParams:
 
 
 def extract_capabilities_from_gguf(metadata: dict, filenames: list[str]) -> dict:
-    caps = {'has_tools': False, 'has_reasoning': False, 'has_vision': False, 'has_embedding': False}
+    caps = {
+        'has_tools': False, 'has_reasoning': False, 'has_vision': False,
+        'has_embedding': False, 'has_decision': False}
     arch = str(metadata.get('general.architecture', '')).lower()
     chat_template = str(metadata.get('tokenizer.chat_template', '')).lower()
     vision_archs = ['llava', 'clip', 'mllama', 'minicpmv', 'qwen2vl',
@@ -364,6 +372,8 @@ def extract_capabilities_from_gguf(metadata: dict, filenames: list[str]) -> dict
         caps['has_embedding'] = True
     if 'bert' in arch or 'nomic' in arch or 'embedding' in arch:
         caps['has_embedding'] = True
+    if any('.decision.' in k or k.endswith('.decision') for k in metadata):
+        caps['has_decision'] = True
     if 'tools' in chat_template or 'function' in chat_template or 'tool_call' in chat_template:
         caps['has_tools'] = True
     if metadata.get('general.reasoning'):
@@ -374,7 +384,9 @@ def extract_capabilities_from_gguf(metadata: dict, filenames: list[str]) -> dict
 
 
 def extract_capabilities_from_ollama(show_response: dict) -> dict:
-    caps = {'has_tools': False, 'has_reasoning': False, 'has_vision': False, 'has_embedding': False}
+    caps = {
+        'has_tools': False, 'has_reasoning': False, 'has_vision': False,
+        'has_embedding': False, 'has_decision': False}
     capabilities = show_response.get('capabilities', []) or show_response.get(
         'details', {}).get('capabilities', [])
     for cap in capabilities:
@@ -387,6 +399,8 @@ def extract_capabilities_from_ollama(show_response: dict) -> dict:
             caps['has_vision'] = True
         elif cap_lower == 'embedding':
             caps['has_embedding'] = True
+        elif cap_lower == 'decision':
+            caps['has_decision'] = True
     return caps
 
 
@@ -644,6 +658,7 @@ def discover_models(  # noqa
                 has_reasoning=caps['has_reasoning'],
                 has_vision=caps['has_vision'],
                 has_embedding=caps['has_embedding'],
+                has_decision=caps['has_decision'],
             ))
         best = select_best_quantization(candidates, gpu_memory_gb, min_memory, context_limit_gb)
         if best:
@@ -781,6 +796,7 @@ def discover_ollama_models(  # noqa
             has_reasoning=caps['has_reasoning'],
             has_vision=caps['has_vision'],
             has_embedding=caps['has_embedding'],
+            has_decision=caps['has_decision'],
         ))
     return models
 
@@ -1157,6 +1173,7 @@ def discover_ollama_registry_models(  # noqa
             'has_reasoning': 'thinking' in search_model['capabilities'],
             'has_vision': 'vision' in search_model['capabilities'],
             'has_embedding': 'embedding' in search_model['capabilities'],
+            'has_decision': 'decision' in search_model['capabilities'],
         }
         model_type = infer_model_type_from_details(
             {'capabilities': search_model['capabilities']}, search_model['name'])
@@ -1164,6 +1181,8 @@ def discover_ollama_registry_models(  # noqa
             model_type = model_type or 'vision'
         if caps['has_embedding']:
             model_type = model_type or 'embed'
+        if caps['has_decision']:
+            model_type = model_type or 'decision'
         if model_filter != 'all' and model_type != model_filter:
             if not matches_type(search_model['name'], model_filter):
                 skipped_type_mismatch += 1
@@ -1225,6 +1244,7 @@ def discover_ollama_registry_models(  # noqa
                 has_reasoning=caps['has_reasoning'],
                 has_vision=caps['has_vision'],
                 has_embedding=caps['has_embedding'],
+                has_decision=caps['has_decision'],
             ))
         if not candidates:
             skipped_no_fit += 1
@@ -1352,6 +1372,9 @@ def main():  # noqa
         'embedding': {
             'name': 'E', 'format': '1',
             'func': lambda m: 'Y' if m.has_embedding else ' '},
+        'decision': {
+            'name': 'D', 'format': '1',
+            'func': lambda m: 'Y' if m.has_decision else ' '},
         'chunked': {
             'name': 'C', 'format': '1',
             'func': lambda m: 'Y' if m.is_chunked else 'n', 'show': False},
