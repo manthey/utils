@@ -40,6 +40,94 @@ ClientKwargs = {}
 HF_BASE_URL = 'https://router.huggingface.co/v1'
 Config = {'hfmode': False}
 
+DECISION_CRITERION = (
+    "Connect Award 1.A: The team's goals for the development of team member skills")
+DECISION_PORTFOLIOS = {
+    'gu92726 (Copper Wrens)': (
+        '## Individual Goals\n\n## Team Goals\n\nWe build Sustainability into our team '
+        'structure through pair mentoring. Each Veteran is paired with a rookie, '
+        'guaranteeing a seamless transfer of skills. Recruit, train, and integrate all '
+        'new members. Nurture relationships for mentorship and financial aid.\n\n'
+        '## Rookie Training\n\n## Our Engineering Acceleration Program\n\n'
+        '## Phase 2: Skill Acquisition Workshops\n\n## Growing the Next Generation'),
+    'roost99129': '## Engineering Design Process',
+    '96071-1': (
+        '## Areas we improved since last year:\n\n- More structured meetings: we start '
+        'every meeting together with a brief check-in, update on what has been done '
+        'since the last meeting, progress on overall goals, discuss goals for that '
+        'particular meeting, divide up the work\n- Taking better notes, keeping track '
+        "of homework, and recording what we've done\n- More Outreach with a focus on "
+        'increased mentorship of younger teams\n- Cross-training of team members, '
+        'using multiple team members in each work area instead of relying on one person'),
+    '91532-1 (Portland Posers)': (
+        'Our team is entirely student-led, meaning we create our own meeting agendas, '
+        'coordinate all project management, and season planning ourselves. This builds '
+        'our leadership skills.\n\n## New Members\n\nAny person who wishes to join our '
+        'team receives a standardized and fair interview. New members are provided '
+        'with the resources and opportunities to learn by their subteam leads, who '
+        'oversee their training, while still being immersed in team activities.\n\n'
+        '## Learning Process\n\nTo facilitate our growth, we learn from others in our '
+        'community.\n\n## Coaches/Mentors\n\n... many mentors are knowledgeable in '
+        'FIRST and help us learn more technical skills.'),
+}
+DECISION_PAYLOADS = [
+    {
+        'name': 'obvious',
+        'state': {
+            'criterion': DECISION_CRITERION,
+            'portfolio_a': {'id': 'gu92726 (Copper Wrens)',
+                            'excerpt': DECISION_PORTFOLIOS['gu92726 (Copper Wrens)']},
+            'portfolio_b': {'id': 'roost99129',
+                            'excerpt': DECISION_PORTFOLIOS['roost99129']},
+        },
+        'expected': {
+            'verdict': {'mode': 'A', 'min_p': 0.9},
+            'a_shows_skill_goals': {'true': True},
+            'b_shows_skill_goals': {'true': False},
+            'margin': {'range': [5.5, 6.0]},
+        },
+    },
+    {
+        'name': 'middle',
+        'state': {
+            'criterion': DECISION_CRITERION,
+            'portfolio_a': {'id': 'gu92726 (Copper Wrens)',
+                            'excerpt': DECISION_PORTFOLIOS['gu92726 (Copper Wrens)']},
+            'portfolio_b': {'id': '96071-1',
+                            'excerpt': DECISION_PORTFOLIOS['96071-1']},
+        },
+        'expected': {
+            'verdict': {'mode': 'A', 'min_p': 0.6},
+            'a_shows_skill_goals': {'true': True},
+            'b_shows_skill_goals': {'true': True, 'threshold': 0.8},
+            'margin': {'range': [4.0, 5.0]},
+        },
+    },
+    {
+        'name': 'close',
+        'state': {
+            'criterion': DECISION_CRITERION,
+            'portfolio_a': {'id': '96071-1',
+                            'excerpt': DECISION_PORTFOLIOS['96071-1']},
+            'portfolio_b': {'id': '91532-1 (Portland Posers)',
+                            'excerpt': DECISION_PORTFOLIOS['91532-1 (Portland Posers)']},
+        },
+        # The honest answer is that both portfolios address the criterion
+        # comparably, so anything above max_p is overconfidence, which is the
+        # failure this payload exists to detect.
+        'expected': {
+            'verdict': {'mode': 'equivalent', 'max_p': 0.8},
+            'a_shows_skill_goals': {'true': True},
+            'b_shows_skill_goals': {'true': True},
+            'margin': {'range': [2.0, 4.0]},
+        },
+    },
+]
+DECISION_PROBE_STATE = {'text': 'The quick brown fox jumps over the lazy dog.'}
+DECISION_PROBE_QUESTIONS = {
+    'has_fox': {'type': 'noul', 'instructions': 'Does the text mention a fox?'},
+}
+
 
 @dataclass
 class TestResult:
@@ -219,6 +307,7 @@ def get_model_metadata(ollama_base_url: str, model_name: str) -> dict[str, Any]:
         'has_tool': has_tool,
         'has_reasoning': has_reasoning,
         'has_embedding': 'embedding' in capabilities,
+        'has_decision': 'decision' in capabilities,
         'modified_at': modified_at,
         **(vision or {}),
     }
@@ -334,6 +423,7 @@ def get_model_metadata_hf(base_url: str, model_name: str) -> dict[str, Any]:
         'has_reasoning': any('reasoning' in t or 'thinking' in t for t in tags),
         'has_embedding': info.get('pipeline_tag') == 'feature-extraction' or
         any('embedding' in t for t in tags),
+        'has_decision': any('decision' in t for t in tags),
         'modified_at': last_modified or 'unknown',
     }
 
@@ -576,6 +666,29 @@ def extract_answer_from_reasoning(content: str) -> str:
     return content.strip()
 
 
+def find_loaded_model(ollama_base_url: str, model_name: str,
+                      retries: int = 5) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Find a model in /api/ps, retrying since a just-loaded model can take a
+    moment to appear.  Returns the entry (or None) and the last response.
+    """
+    ps: dict[str, Any] = {}
+    for attempt in range(retries):
+        try:
+            response = requests.get(f'{ollama_base_url}/api/ps', timeout=10)
+            response.raise_for_status()
+            ps = response.json()
+        except requests.exceptions.RequestException:
+            ps = {}
+        for match in (lambda entry: entry['name'] == model_name,
+                      lambda entry: entry['name'].startswith(model_name)):
+            for entry in ps.get('models', []):
+                if match(entry):
+                    return entry, ps
+        if attempt + 1 < retries:
+            time.sleep(1)
+    return None, ps
+
+
 @register_test('first_load', 'First load and memory use', category='base')
 def test_first_load(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
@@ -590,34 +703,51 @@ def test_first_load(
             use_stream=True,
             reasoning_effort='none',
         )
+        result['modality'] = 'chat'
     except Exception:
         try:
             start = time.time()
             sys.stdout.write('.')
             sys.stdout.flush()
             client.embeddings.create(model=model_name, input='Echo "this is a test"')
-            result = {'duration': time.time() - start}
+            result = {'duration': time.time() - start, 'modality': 'embedding'}
         except Exception:
-            pass
+            try:
+                start = time.time()
+                sys.stdout.write('.')
+                sys.stdout.flush()
+                headers = {}
+                if os.environ.get('OPENAI_API_KEY'):
+                    headers['Authorization'] = f'Bearer {os.environ["OPENAI_API_KEY"]}'
+                data = decision_post(
+                    ollama_base_url, model_name, DECISION_PROBE_STATE,
+                    DECISION_PROBE_QUESTIONS, max(ClientKwargs.get('timeout', 300), 60),
+                    headers)
+                decision_parse('has_fox', 'noul', data)
+                result = {'duration': time.time() - start, 'modality': 'decision'}
+            except Exception:
+                pass
     if Config['hfmode']:
         return TestResult(
             passed=True,
             output='Non-Ollama server: not applicable (no local memory use)',
-            details={'duration': result.get('duration')},
+            details={'duration': result.get('duration'),
+                     'modality': result.get('modality')},
             timestamp=get_timestamp(),
             usage=result.get('usage'),
         )
-    ps = requests.get(f'{ollama_base_url}/api/ps', timeout=10)
-    ps.raise_for_status()
-    ps = ps.json()
-    found = None
-    for model in ps['models']:
-        if model['name'] == model_name:
-            found = model
+    found, ps = find_loaded_model(ollama_base_url, model_name)
     if not found:
-        for model in ps['models']:
-            if model['name'].startswith(model_name):
-                found = model
+        return TestResult(
+            passed=True,
+            output=f'Model {model_name} not listed in /api/ps',
+            details={
+                'duration': result.get('duration'),
+                'modality': result.get('modality'),
+            },
+            timestamp=get_timestamp(),
+            usage=result.get('usage'),
+        )
     return TestResult(
         passed=True, output=ps,
         metadata={
@@ -628,6 +758,7 @@ def test_first_load(
         },
         details={
             'duration': result.get('duration'),
+            'modality': result.get('modality'),
         },
         timestamp=get_timestamp(),
         usage=result.get('usage'),
@@ -1040,26 +1171,22 @@ def test_embedding(
             details={'has_nonzero_values': has_nonzero},
             timestamp=get_timestamp(),
         )
-    ps = requests.get(f'{ollama_base_url}/api/ps', timeout=10)
-    ps.raise_for_status()
-    ps = ps.json()
-    found = None
-    for model in ps['models']:
-        if model['name'] == model_name:
-            found = model
+    found, _ = find_loaded_model(ollama_base_url, model_name)
+    details: dict[str, Any] = {'has_nonzero_values': has_nonzero}
+    if found:
+        details.update({
+            'size': found['size'],
+            'size_vram': found['size_vram'],
+            'vram_percentage': round(100 * found['size_vram'] / found['size'], 2),
+            'context_length': found['context_length'],
+        })
     return TestResult(
         passed=passed,
         output=f'Generated embedding with {dimensions} dimensions',
         metadata={
             'embedding_dimensions': dimensions,
         },
-        details={
-            'has_nonzero_values': has_nonzero,
-            'size': found['size'],
-            'size_vram': found['size_vram'],
-            'vram_percentage': round(100 * found['size_vram'] / found['size'], 2),
-            'context_length': found['context_length'],
-        },
+        details=details,
         timestamp=get_timestamp(),
     )
 
@@ -1507,6 +1634,256 @@ def test_storytelling(
     )
 
 
+def decision_questions():
+    """The jev-format questions asked about each portfolio pair."""
+    return {
+        'verdict': {
+            'type': 'choice',
+            'instructions': 'Which portfolio better addresses the criterion?',
+            'criteria': {
+                'A': 'Portfolio A addresses the criterion better',
+                'B': 'Portfolio B addresses the criterion better',
+                'equivalent': 'Neither portfolio shows a clear advantage',
+            },
+        },
+        'a_shows_skill_goals': {
+            'type': 'noul',
+            'instructions': 'Portfolio A states goals or mechanisms for developing '
+                            'team member skills.',
+        },
+        'b_shows_skill_goals': {
+            'type': 'noul',
+            'instructions': 'Portfolio B states goals or mechanisms for developing '
+                            'team member skills.',
+        },
+        'margin': {
+            'type': 'score',
+            'instructions': 'How much better is A than B on this criterion?',
+            'criteria': [
+                'B much better', 'B better', 'B slightly better', 'equivalent',
+                'A slightly better', 'A better', 'A much better'],
+        },
+    }
+
+
+def decision_probabilities(raw):
+    """Normalize a jev probability distribution to a {str(level): float} dict."""
+    if isinstance(raw, dict):
+        return {str(key): float(value) for key, value in raw.items()}
+    if isinstance(raw, list):
+        return {str(item.get('value')): float(item['probability'])
+                for item in raw if isinstance(item, dict) and 'probability' in item}
+    return {}
+
+
+def decision_post(base_url, model_name, state, questions, timeout, headers):
+    """Ask one decision query and return the jev-format response.
+
+    Tries the Ollama System One endpoint (/v1/systemone) first; if the server
+    has no such endpoint, translates the questions to the OpenAI Decisions
+    schema (/v1/decisions).
+    """
+    response = requests.post(
+        f'{base_url}/v1/systemone', timeout=timeout, headers=headers,
+        json={'model': model_name, 'state': state, 'questions': questions})
+    if response.status_code != 404:
+        if response.status_code >= 400:
+            msg = (f'/v1/systemone returned {response.status_code}: '
+                   f'{response.text[:500]}')
+            raise RuntimeError(msg)
+        return response.json()
+    if 'not found' in response.text and 'model' in response.text.lower():
+        msg = f'/v1/systemone returned 404: {response.text[:500]}'
+        raise RuntimeError(msg)
+    converted = []
+    for name, question in questions.items():
+        entry = {'name': name, 'instructions': question['instructions']}
+        if question['type'] == 'noul':
+            entry['type'] = 'predicate'
+        elif question['type'] == 'choice':
+            entry['type'] = 'choice'
+            entry['choices'] = [{'value': key, 'description': value}
+                                for key, value in question['criteria'].items()]
+        else:
+            entry['type'] = 'score'
+            entry['levels'] = [{'label': str(idx), 'description': text}
+                               for idx, text in enumerate(question['criteria'])]
+        converted.append(entry)
+    response = requests.post(
+        f'{base_url}/v1/decisions', timeout=timeout, headers=headers,
+        json={'model': model_name, 'input': json.dumps(state, indent=2),
+              'questions': converted})
+    if response.status_code >= 400:
+        msg = (f'/v1/decisions returned {response.status_code}: '
+               f'{response.text[:500]}')
+        raise RuntimeError(msg)
+    data = response.json()
+    # OpenAI returns answers as an array; reshape them into the keyed jev form.
+    data['answers'] = {answer['name']: answer
+                       for answer in data.get('answers', []) if 'name' in answer}
+    return data
+
+
+def decision_parse(name, qtype, data):
+    """Extract one answer in the expected jev format, or raise ValueError."""
+    answers = data.get('answers')
+    if not isinstance(answers, dict) or name not in answers:
+        msg = f'no jev answer for {name}'
+        raise ValueError(msg)
+    answer = answers[name]
+    if not isinstance(answer, dict):
+        msg = f'answer for {name} is not a jev object'
+        raise ValueError(msg)
+    atype = answer.get('type')
+    if atype == 'refusal':
+        msg = f'refusal for {name}'
+        raise ValueError(msg)
+    if qtype == 'noul':
+        if atype not in ('noul', 'predicate'):
+            msg = f'answer for {name} has type {atype}, expected noul'
+            raise ValueError(msg)
+        value = answer.get('noul', answer.get('probability'))
+        if not isinstance(value, (int, float)) or not 0 <= value <= 1:
+            msg = f'answer for {name} has no valid noul probability'
+            raise ValueError(msg)
+        return {'noul': float(value), 'confidence': answer.get('confidence')}
+    if qtype == 'choice':
+        if atype != 'choice':
+            msg = f'answer for {name} has type {atype}, expected choice'
+            raise ValueError(msg)
+        probabilities = decision_probabilities(answer.get('probabilities'))
+        if answer.get('choice') not in probabilities:
+            msg = f'answer for {name} has no valid choice distribution'
+            raise ValueError(msg)
+        return {'choice': answer['choice'],
+                'probabilities': probabilities,
+                'confidence': answer.get('confidence')}
+    if atype != 'score':
+        msg = f'answer for {name} has type {atype}, expected score'
+        raise ValueError(msg)
+    score = answer.get('score')
+    if not isinstance(score, (int, float)):
+        msg = f'answer for {name} has no valid score'
+        raise ValueError(msg)
+    return {'score': float(score),
+            'probabilities': decision_probabilities(answer.get('probabilities')),
+            'confidence': answer.get('confidence')}
+
+
+def decision_score(qtype, expected, parsed):
+    """Score one parsed jev answer from 0 to 1 against its expected outcome."""
+    def linear(value, low, high):
+        if high <= low:
+            return 1.0 if value >= high else 0.0
+        return min(1.0, max(0.0, (value - low) / (high - low)))
+
+    if qtype == 'noul':
+        threshold = expected.get('threshold', 0.9)
+        value = parsed['noul'] if expected['true'] else 1 - parsed['noul']
+        return linear(value, 0.5, threshold)
+    if qtype == 'choice':
+        if parsed['choice'] != expected['mode']:
+            return 0.0
+        p = parsed['probabilities'][parsed['choice']]
+        if 'min_p' in expected:
+            return linear(p, 0.5, expected['min_p'])
+        return linear(1 - p, 0, 1 - expected['max_p'])
+    low, high = expected['range']
+    score = parsed['score']
+    if score < low:
+        return linear(score, 0, low)
+    if score > high:
+        return linear(6 - score, 0, 6 - high)
+    return 1.0
+
+
+@register_test('decision', 'Decision endpoint support', category='decision',
+               version=0)
+def test_decision(
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
+) -> TestResult:
+    headers = {}
+    if os.environ.get('OPENAI_API_KEY'):
+        headers['Authorization'] = f'Bearer {os.environ["OPENAI_API_KEY"]}'
+    try:
+        start = time.time()
+        data = decision_post(
+            ollama_base_url, model_name, DECISION_PROBE_STATE,
+            DECISION_PROBE_QUESTIONS, max(ClientKwargs.get('timeout', 300), 60),
+            headers)
+        parsed = decision_parse('has_fox', 'noul', data)
+        usage = data.get('usage') or {}
+        return TestResult(
+            passed=True,
+            output=f"Decision answer: noul={parsed['noul']:.4f}",
+            details={'noul': parsed['noul'], 'duration': time.time() - start},
+            timestamp=get_timestamp(),
+            usage={'prompt_tokens': usage.get('input_tokens') or 0,
+                   'completion_tokens': usage.get('output_tokens') or 0,
+                   'total_tokens': (usage.get('input_tokens') or 0) +
+                                   (usage.get('output_tokens') or 0)},
+        )
+    except Exception as exc:
+        return TestResult(
+            passed=False, output=f'Error: {exc}', timestamp=get_timestamp())
+
+
+@register_test('decision_quality', 'Decision quality', category='decision',
+               version=0, requires='decision')
+def test_decision_quality(
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
+) -> TestResult:
+    headers = {}
+    if os.environ.get('OPENAI_API_KEY'):
+        headers['Authorization'] = f'Bearer {os.environ["OPENAI_API_KEY"]}'
+    timeout = max(ClientKwargs.get('timeout', 300), 60)
+    usage = {'input_tokens': 0, 'output_tokens': 0}
+    details: dict[str, Any] = {}
+    lines = []
+    scores = []
+    for spec in DECISION_PAYLOADS:
+        questions = decision_questions()
+        # Each question is an independent query against the shared state.
+        for name, question in questions.items():
+            label = f'{spec["name"]}/{name}'
+            entry: dict[str, Any] = {'expected': spec['expected'][name]}
+            try:
+                start = time.time()
+                data = decision_post(
+                    ollama_base_url, model_name, spec['state'], {name: question},
+                    timeout, headers)
+                parsed = decision_parse(name, question['type'], data)
+                for key in ('input_tokens', 'output_tokens'):
+                    usage[key] += (data.get('usage') or {}).get(key) or 0
+                entry.update(parsed)
+                entry['subscore'] = decision_score(question['type'],
+                                                   entry['expected'], parsed)
+                entry['duration'] = time.time() - start
+            except Exception as exc:
+                entry['error'] = str(exc)
+                entry['subscore'] = 0.0
+            details[label] = entry
+            scores.append(entry['subscore'])
+            lines.append(f'{label}: {entry["subscore"]:.2f}')
+    score = sum(scores) / len(scores) if scores else 0.0
+    # Passing measures the capability to answer in jev format, not quality;
+    # the score carries the quality.  A model that answers every question is
+    # recorded as passed even if its score is low.
+    answered = len(details) - sum('error' in entry for entry in details.values())
+    return TestResult(
+        passed=[1 if answered == len(scores) else 0, 1],
+        output='\n'.join(lines + [f'answered: {answered}/{len(scores)}']),
+        score=score,
+        details={**details, 'answered_questions': f'{answered}/{len(scores)}'},
+        timestamp=get_timestamp(),
+        usage={
+            'prompt_tokens': usage['input_tokens'],
+            'completion_tokens': usage['output_tokens'],
+            'total_tokens': usage['input_tokens'] + usage['output_tokens'],
+        },
+    )
+
+
 def get_metadata_table(metadata: dict[str, Any]) -> list[tuple[str, Any]]:
     parameter_count_display = (
         f"{metadata['parameter_count']:,}"
@@ -1546,6 +1923,7 @@ def get_metadata_table(metadata: dict[str, Any]) -> list[tuple[str, Any]]:
         ('Tool Use (metadata)', 'yes' if metadata['has_tool'] else 'no'),
         ('Reasoning (metadata)', 'yes' if metadata['has_reasoning'] else 'no'),
         ('Embedding (metadata)', 'yes' if metadata['has_embedding'] else 'no'),
+        ('Decision (metadata)', 'yes' if metadata['has_decision'] else 'no'),
         ('Modified', mod_str),
     ]
     return rows
@@ -2288,7 +2666,8 @@ def load_yaml_tests(files=None):
                 return bash_test(
                     client, model_name, ollama_base_url, ollama_docker_url, test['test'])
             register_test(test['name'], test['description'],
-                          test.get('skip', False), test.get('version', 0))(test_func)
+                          test.get('skip', False), test.get('version', 0),
+                          test.get('category', None), test.get('requires', None))(test_func)
         for test in tests:
             make_test(test)
 
