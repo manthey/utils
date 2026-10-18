@@ -155,6 +155,14 @@ class TestDefinition:
 TEST_REGISTRY: list[TestDefinition] = []
 
 
+def hidden_test_names() -> set[str]:
+    """Names of tests marked skip: 'hide'.  These cannot be selected and
+    their previous results are excluded from summaries, reports, and
+    ranking calculations.
+    """
+    return {t.name for t in TEST_REGISTRY if t.skip == 'hide'}
+
+
 def register_test(
     name: str, description: str, skip: bool | str = False, version: int = 0,
     category: str | None = None, requires: str | None = None,
@@ -2152,6 +2160,11 @@ def run_tests(
     require_first_load: bool = False,
     prior_results: dict[str, TestResult] | None = None,
 ) -> list[tuple[TestDefinition, TestResult]]:
+    if prior_results:
+        hidden = hidden_test_names()
+        prior_results = {
+            name: result for name, result in prior_results.items()
+            if name not in hidden}
     results = []
     for test_def in order_tests([
             td for td in TEST_REGISTRY
@@ -2262,12 +2275,15 @@ def add_to_summary(summary, model, metadata, test_results):
         summary['tests'] = []
     if model in summary['models']:
         return
+    hidden = hidden_test_names()
     meta_col = dict(get_metadata_table(metadata))
     for col in meta_col:
         if col not in summary['columns']:
             summary['columns'].append(col)
     summary['models'][model] = {'metadata': meta_col, 'tests': {}}
     for test_name, result in test_results.items():
+        if test_name in hidden:
+            continue
         if test_name not in summary['tests']:
             summary['tests'].append(test_name)
         if result.metadata:
@@ -2381,6 +2397,8 @@ def model_rank(model, summary, category=None):
 def rank_all_models(summary) -> list[str]:
     category_set = set()
     for td in TEST_REGISTRY:
+        if td.skip == 'hide':
+            continue
         cat = td.category or 'unspecified'
         if cat != 'base':
             category_set.add(cat)
@@ -2707,7 +2725,10 @@ def main():  # noqa
         'this source file and ends with .yml or .yaml, they can contain a '
         'list of additional tests.\n'
         'All tests have "name", "description", "version" as an optional '
-        'integer, "skip" as optional boolean, and "test".  "test" must either '
+        'integer, "skip" as optional boolean or the string "hide", and '
+        '"test".  A "skip" value of "hide" prevents the test from being '
+        'selected and excludes its previous results from summaries, reports, '
+        'and ranking calculations.  "test" must either '
         'have "chat" or "bash".\n"chat" contains "messages" and any other '
         'values to pass to the chat test.\n'
         '"bash" contains a list of bash commands or shell commands to execute '
@@ -2749,7 +2770,8 @@ def main():  # noqa
         '-t', '--tests',
         help='Comma-separated list of test names to run.  Defaults to all '
         'tests not marked "skip".  Add "all" to include all tests, "default" '
-        'to include the non-skip tests.')
+        'to include the non-skip tests.  Tests marked skip: hide cannot be '
+        'selected.')
     parser.add_argument(
         '-x', '--skip-tests',
         help='Comma-separated list of test names to skip')
@@ -2822,7 +2844,8 @@ def main():  # noqa
         for t in TEST_REGISTRY:
             if t.skip == 'always':
                 continue
-            sys.stdout.write(f'{t.name:25s} {t.description}{" (skip)" if t.skip else ""}\n')
+            tag = ' (hide)' if t.skip == 'hide' else ' (skip)' if t.skip else ''
+            sys.stdout.write(f'{t.name:25s} {t.description}{tag}\n')
         sys.exit(0)
     if not args.dry_run:
         restart_command(args.restart)
@@ -2892,11 +2915,15 @@ def main():  # noqa
             client = OpenAI(**ClientKwargs)
             sel_tests = set(args.tests.split(',')) if args.tests else set()
             if 'all' in sel_tests:
-                sel_tests = {t.name for t in TEST_REGISTRY if t.skip != 'always'}
+                sel_tests = {
+                    t.name for t in TEST_REGISTRY
+                    if t.skip not in ('always', 'hide')}
             if 'default' in sel_tests or not args.tests:
                 sel_tests |= {t.name for t in TEST_REGISTRY if not t.skip}
             if args.skip_tests:
                 sel_tests -= set(args.skip_tests.split(','))
+            # Tests marked skip: 'hide' can never be selected.
+            sel_tests -= hidden_test_names()
             _, existing_results = load_existing_results(out_path)
             removed = False
             if args.remove_tests:
