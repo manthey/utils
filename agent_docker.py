@@ -266,6 +266,11 @@ def main():  # noqa
         cmd = docker_cmd + ['cp', src, dst]
         logger.info(cmd)
         subprocess.check_call(cmd)
+        if dst_in:
+            cmd = docker_cmd + ['exec', '--user', 'root', container_name,
+                                'chown', '-R', '1000:1000', dst.split(':', 1)[1]]
+            logger.info(cmd)
+            subprocess.check_call(cmd)
     if args.command in {'create', 'start', 'stop'}:
         renamed_id = rename_if_exists(docker_cmd, container_name)
         if renamed_id:

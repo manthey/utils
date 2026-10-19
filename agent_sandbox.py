@@ -16,6 +16,7 @@ import platform
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -51,6 +52,18 @@ def safe_filename(name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
     name = name.rstrip(' .')
     return name or 'docker'
+
+
+def clear_readonly(func, path, _exc):
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+
+def remove_tree(path: str) -> None:
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=clear_readonly)
+    else:
+        shutil.rmtree(path, onerror=clear_readonly)
 
 
 def die(msg: str):
@@ -561,13 +574,17 @@ def cmd_provision(args, backend: str, key: str):
         info(f'rebuilding the payload at {PAYLOAD_DIR} from scratch')
         for entry in os.listdir(PAYLOAD_DIR):
             path = os.path.join(PAYLOAD_DIR, entry)
-            shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+            if os.path.isdir(path):
+                remove_tree(path)
+            else:
+                os.chmod(path, stat.S_IWRITE)
+                os.remove(path)
     os.makedirs(PAYLOAD_DIR, exist_ok=True)
     refresh_scripts()
     sandbox = Sandbox('agent_provision', backend)
     sandbox.stop()
     if os.path.isdir(sandbox.run_dir):
-        shutil.rmtree(sandbox.run_dir)
+        remove_tree(sandbox.run_dir)
     prepare_run_dir(sandbox, {
         'mode': 'provision',
         'user': args.user,
@@ -600,7 +617,7 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
     sandbox.stop()
     os.makedirs(sandbox.dir, exist_ok=True)
     if os.path.isdir(sandbox.run_dir):
-        shutil.rmtree(sandbox.run_dir)
+        remove_tree(sandbox.run_dir)
     os.makedirs(sandbox.run_dir)
     mappings = [(PAYLOAD_DIR, GUEST_PAYLOAD, True),
                 (os.getcwd(), GUEST_PROJECT, True),
