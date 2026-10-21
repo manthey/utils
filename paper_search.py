@@ -15,10 +15,13 @@ import argparse
 import hashlib
 import json
 import logging
+import re
 import shutil
 import sqlite3
 import sys
+import time
 import warnings
+import xml.etree.ElementTree as ElementTree
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timezone
@@ -44,11 +47,11 @@ logging.getLogger('urllib3').setLevel(logging.ERROR)
 
 
 def normalize_doi(value: str) -> str | None:
-    """Normalize a DOI to its bare form.
+    """Normalize a DOI to its bare, lowercase form.
 
     Accepts plain DOIs (``10.1234/abc``), ``doi:`` prefixed identifiers, and
     ``https://doi.org/`` URLs. Returns ``None`` if the value does not look like
-    a DOI.
+    a DOI.  DOIs are case-insensitive, so they are lowercased.
     """
     if not value:
         return None
@@ -58,8 +61,8 @@ def normalize_doi(value: str) -> str | None:
         if doi.lower().startswith(prefix):
             doi = doi[len(prefix):]
             break
-    doi = doi.strip()
-    if doi.lower().startswith('10.'):
+    doi = doi.strip().lower()
+    if doi.startswith('10.'):
         return doi
     return None
 
@@ -83,7 +86,7 @@ class Paper:
     @property
     def identity(self) -> str:
         if self.doi:
-            return f'doi:{self.doi}'
+            return f'doi:{self.doi.lower()}'
         normalized = self.title.strip().lower()
         return f'title:{hashlib.sha256(normalized.encode()).hexdigest()}'
 
@@ -141,6 +144,28 @@ class PaperDatabase:
                 last_attempt TEXT,
                 last_error TEXT
             );
+        """)
+        # DOIs are case-insensitive; lowercase any stored before that was
+        # enforced.  If both cases are present, merge the status flags into
+        # the lowercase row and drop the mixed-case one.
+        self.conn.executescript("""
+            UPDATE OR IGNORE seen_papers SET identity = lower(identity)
+                WHERE identity LIKE 'doi:%' AND identity != lower(identity);
+            UPDATE seen_papers SET
+                reported = max(seen_papers.reported, dup.reported),
+                acknowledged = max(seen_papers.acknowledged, dup.acknowledged),
+                downloaded = max(seen_papers.downloaded, dup.downloaded),
+                pdf_path = coalesce(seen_papers.pdf_path, dup.pdf_path)
+                FROM seen_papers AS dup
+                WHERE dup.identity LIKE 'doi:%' AND dup.identity != lower(dup.identity)
+                    AND seen_papers.identity = lower(dup.identity);
+            DELETE FROM seen_papers
+                WHERE identity LIKE 'doi:%' AND identity != lower(identity)
+                    AND lower(identity) IN (SELECT identity FROM seen_papers);
+            UPDATE download_log SET identity = lower(identity)
+                WHERE identity LIKE 'doi:%' AND identity != lower(identity);
+            UPDATE OR IGNORE wanted_dois SET doi = lower(doi)
+                WHERE doi != lower(doi);
         """)
         self.conn.commit()
 
@@ -333,7 +358,7 @@ def compute_score(paper: Paper, config: dict) -> float:
         try:
             pub = datetime.fromisoformat(paper.published_date[:10]).replace(tzinfo=timezone.utc)
             days_old = (datetime.now(UTC) - pub).days
-            recency_component = max(0.0, 1.0 - days_old / 365.0)
+            recency_component = min(1.0, max(0.0, 1.0 - days_old / 365.0))
         except ValueError:
             pass
     score = (
@@ -344,6 +369,31 @@ def compute_score(paper: Paper, config: dict) -> float:
         w_recency * recency_component
     )
     return round(score, 6)
+
+
+def match_text(text: str | None) -> str:
+    """Lowercase text and collapse punctuation so 'thin-plate' matches 'thin plate'."""
+    return ' '.join(re.findall(r'[a-z0-9]+', (text or '').lower()))
+
+
+def term_relevance(paper: Paper, query_terms: list[list[str]]) -> float:
+    """Score how well a paper's title and abstract match the search terms.
+
+    Each term group scores 1 if any of its terms is in the title, 0.6 if one is
+    only in the abstract, and 0 otherwise; the result is the mean over groups.
+    """
+    if not query_terms:
+        return paper.relevance_score
+    title = match_text(paper.title)
+    abstract = match_text(paper.abstract)
+    total = 0.0
+    for group in query_terms:
+        terms = [match_text(t) for t in group]
+        if any(t in title for t in terms):
+            total += 1.0
+        elif any(t in abstract for t in terms):
+            total += 0.6
+    return total / len(query_terms)
 
 
 class ArchiveBackend(ABC):
@@ -365,15 +415,22 @@ class ArxivBackend(ArchiveBackend):
     def search(self, query_terms: list[list[str]], max_results: int) -> list[Paper]:
         import tempfile
 
+        import arxiv
         from paperscraper.arxiv import get_and_dump_arxiv_papers
         papers = []
         with tempfile.NamedTemporaryFile(suffix='.jsonl', delete=False, mode='w') as tmp:
             tmp_path = tmp.name
         try:
+            # arXiv defaults to relevance order; newest first lets periodic
+            # runs see new submissions.
             get_and_dump_arxiv_papers(
                 query_terms,
                 output_filepath=tmp_path,
                 max_results=max_results,
+                search_options={
+                    'sort_by': arxiv.SortCriterion.SubmittedDate,
+                    'sort_order': arxiv.SortOrder.Descending,
+                },
             )
             with open(tmp_path) as f:
                 for line in f:
@@ -381,19 +438,24 @@ class ArxivBackend(ArchiveBackend):
                     if not line:
                         continue
                     rec = json.loads(line)
+                    # paperscraper gives the arXiv DOI (10.48550/arXiv.<id>)
+                    # but no URL, so build the links from the DOI.
+                    doi = rec.get('doi')
+                    arxiv_id = None
+                    if doi and doi.lower().startswith('10.48550/arxiv.'):
+                        arxiv_id = doi[len('10.48550/arxiv.'):]
                     paper = Paper(
                         title=rec.get('title', ''),
                         authors=rec.get('authors', []),
-                        doi=rec.get('doi'),
-                        url=rec.get('url'),
+                        doi=doi,
+                        url=f'https://arxiv.org/abs/{arxiv_id}' if arxiv_id else rec.get('url'),
                         abstract=rec.get('abstract'),
                         source='arxiv',
                         published_date=rec.get('date'),
                         citation_count=0,
                         is_open_access=True,
                         is_peer_reviewed=False,
-                        pdf_url=rec.get('url', '').replace(
-                            '/abs/', '/pdf/') if rec.get('url') else None,
+                        pdf_url=f'https://arxiv.org/pdf/{arxiv_id}' if arxiv_id else None,
                         relevance_score=1.0,
                     )
                     papers.append(paper)
@@ -404,149 +466,95 @@ class ArxivBackend(ArchiveBackend):
         return papers
 
 
+MONTHS = ('jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec')
+
+
+def pubmed_date(article) -> str | None:
+    """Return an ISO date from a PubMed article, preferring the electronic date."""
+    node = article.find('ArticleDate')
+    if node is None:
+        node = article.find('Journal/JournalIssue/PubDate')
+    if node is None:
+        return None
+    year = node.findtext('Year') or (node.findtext('MedlineDate') or '')[:4]
+    if not year.isdigit():
+        return None
+    month = (node.findtext('Month') or '1').strip()
+    if not month.isdigit():
+        month = MONTHS.index(month[:3].lower()) + 1 if month[:3].lower() in MONTHS else 1
+    day = node.findtext('Day') or '1'
+    return f'{year}-{int(month):02d}-{int(day) if day.isdigit() else 1:02d}'
+
+
 class PubmedBackend(ArchiveBackend):
     name = 'pubmed'
+    eutils_url = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils'
 
     @sleep_and_retry
-    @limits(calls=3, period=1)
+    @limits(calls=1, period=1)
     def search(self, query_terms: list[list[str]], max_results: int) -> list[Paper]:
-        import tempfile
-
-        from paperscraper.pubmed import get_and_dump_pubmed_papers
+        params = {'db': 'pubmed', 'tool': 'paper_search'}
+        if self.config.get('email'):
+            params['email'] = self.config['email']
+        if self.config.get('api_key'):
+            params['api_key'] = self.config['api_key']
+        query = ' AND '.join(
+            '(' + ' OR '.join(f'({t})' for t in group) + ')' for group in query_terms)
         papers = []
-        with tempfile.NamedTemporaryFile(suffix='.jsonl', delete=False, mode='w') as tmp:
-            tmp_path = tmp.name
         try:
-            get_and_dump_pubmed_papers(
-                query_terms,
-                output_filepath=tmp_path,
-            )
-            with open(tmp_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    rec = json.loads(line)
-                    paper = Paper(
-                        title=rec.get('title', ''),
-                        authors=rec.get('authors', []),
-                        doi=rec.get('doi'),
-                        url=f'https://pubmed.ncbi.nlm.nih.gov/{rec["pubmed_id"]}/' if rec.get(
-                            'pubmed_id') else None,
-                        abstract=rec.get('abstract'),
-                        source='pubmed',
-                        published_date=rec.get('date'),
-                        citation_count=0,
-                        is_open_access=False,
-                        is_peer_reviewed=True,
-                        relevance_score=0.9,
-                        extra={'pubmed_id': rec.get('pubmed_id')},
-                    )
-                    papers.append(paper)
+            resp = requests.get(f'{self.eutils_url}/esearch.fcgi', params={
+                **params, 'term': query, 'retmax': max_results, 'sort': 'pub_date',
+                'retmode': 'json'}, timeout=30)
+            resp.raise_for_status()
+            ids = resp.json().get('esearchresult', {}).get('idlist', [])
+            if not ids:
+                return papers
+            # NCBI allows 3 requests per second without an API key
+            time.sleep(0.34)
+            resp = requests.post(f'{self.eutils_url}/efetch.fcgi', data={
+                **params, 'id': ','.join(ids), 'retmode': 'xml'}, timeout=60)
+            resp.raise_for_status()
+            root = ElementTree.fromstring(resp.content)
+            papers = [self.make_paper(rec) for rec in root.iter('PubmedArticle')]
         except Exception as exc:
             logger.error('pubmed search failed: %s', exc)
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
         return papers[:max_results]
 
-
-def search_biorxiv_family(
-    server: str,
-    source: str,
-    query_terms: list[list[str]],
-    max_results: int,
-    earliest: str = '2000-01-01',
-    max_pages: int = 50,
-) -> list[Paper]:
-    """Search a biorxiv-family server, paginating via cursor.
-
-    The biorxiv/medrxiv API offers no server-side keyword search, so this scans
-    the date range page by page and filters locally. ``max_results <= 0`` means
-    no result cap; ``max_pages`` bounds how much of the range is scanned.
-    """
-    papers: list[Paper] = []
-    lower_groups = [[t.lower() for t in g] for g in query_terms]
-    page_size = 100
-    cursor = 0
-    start_date = earliest
-    end_date = datetime.now(UTC).strftime('%Y-%m-%d')
-    base_url = f'https://api.biorxiv.org/details/{server}'
-    for _page in range(max_pages):
-        url = f'{base_url}/{start_date}/{end_date}/{cursor}/{page_size}'
-        try:
-            resp = requests.get(url, timeout=60)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as exc:
-            logger.error('%s search failed at cursor %s: %s', source, cursor, exc)
-            break
-        collection = data.get('collection', [])
-        if not collection:
-            break
-        for rec in collection:
-            title_lower = (rec.get('title', '') + ' ' + rec.get('abstract', '')).lower()
-            if not all(
-                any(t in title_lower for t in group) for group in lower_groups
-            ):
-                continue
-            doi = rec.get('doi')
-            pdf_url = None
-            if doi:
-                host = 'biorxiv' if source == 'biorxiv' else 'medrxiv'
-                pdf_url = f'https://www.{host}.org/content/{doi}v1.full.pdf'
-            papers.append(Paper(
-                title=rec.get('title', ''),
-                authors=rec.get('authors', '').split('; ') if rec.get('authors') else [],
-                doi=doi,
-                url=f'https://doi.org/{doi}' if doi else None,
-                abstract=rec.get('abstract'),
-                source=source,
-                published_date=rec.get('date'),
-                citation_count=0,
-                is_open_access=True,
-                is_peer_reviewed=False,
-                pdf_url=pdf_url,
-                relevance_score=0.85,
-            ))
-            if 0 < max_results <= len(papers):
-                return papers[:max_results]
-        cursor += len(collection)
-        total = None
-        messages = data.get('messages') or []
-        if messages:
-            total = messages[0].get('total')
-        if total is not None and cursor >= int(total):
-            break
-        if len(collection) < page_size:
-            break
-    return papers
-
-
-class BiorxivBackend(ArchiveBackend):
-    name = 'biorxiv'
-    _server = 'biorxiv'
-
-    @sleep_and_retry
-    @limits(calls=1, period=5)
-    def search(self, query_terms: list[list[str]], max_results: int) -> list[Paper]:
-        return search_biorxiv_family(
-            self._server, 'biorxiv', query_terms, max_results,
-            earliest=self.config.get('earliest_date', '2000-01-01'),
-            max_pages=self.config.get('max_pages', 50),
-        )
-
-
-class MedrxivBackend(ArchiveBackend):
-    name = 'medrxiv'
-    _server = 'medrxiv'
-
-    @sleep_and_retry
-    @limits(calls=1, period=5)
-    def search(self, query_terms: list[list[str]], max_results: int) -> list[Paper]:
-        return search_biorxiv_family(
-            self._server, 'medrxiv', query_terms, max_results,
-            earliest=self.config.get('earliest_date', '2000-01-01'),
-            max_pages=self.config.get('max_pages', 50),
+    @staticmethod
+    def make_paper(rec) -> Paper:
+        article = rec.find('MedlineCitation/Article')
+        pmid = rec.findtext('MedlineCitation/PMID')
+        title_node = article.find('ArticleTitle')
+        abstract = ' '.join(
+            ''.join(node.itertext()) for node in article.findall('Abstract/AbstractText'))
+        authors = []
+        for author in article.findall('AuthorList/Author'):
+            name = ' '.join(filter(None, [author.findtext('ForeName'),
+                                          author.findtext('LastName')]))
+            name = name or author.findtext('CollectiveName')
+            if name:
+                authors.append(name)
+        ids = {node.get('IdType'): node.text
+               for node in rec.findall('PubmedData/ArticleIdList/ArticleId')}
+        pmcid = ids.get('pmc')
+        pdf_url = None
+        if pmcid:
+            pdf_url = ('https://europepmc.org/backend/ptpmcrender.fcgi'
+                       f'?accid={pmcid}&blobtype=pdf')
+        return Paper(
+            title=''.join(title_node.itertext()) if title_node is not None else '',
+            authors=authors,
+            doi=ids.get('doi'),
+            url=f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/' if pmid else None,
+            abstract=abstract or None,
+            source='pubmed',
+            published_date=pubmed_date(article),
+            citation_count=0,
+            is_open_access=bool(pmcid),
+            is_peer_reviewed=True,
+            pdf_url=pdf_url,
+            relevance_score=0.9,
+            extra={'pubmed_id': pmid, 'pmcid': pmcid},
         )
 
 
@@ -601,6 +609,11 @@ class ChemrxivBackend(ArchiveBackend):
         return papers[:max_results]
 
 
+# OpenAlex now uses 'article' for journal and conference papers; the others
+# are its older Crossref-style names.
+OPENALEX_REVIEWED_TYPES = ('article', 'review', 'journal-article', 'proceedings-article')
+
+
 class OpenAlexBackend(ArchiveBackend):
     name = 'openalex'
 
@@ -625,11 +638,15 @@ class OpenAlexBackend(ArchiveBackend):
             flat_terms.append('(' + ' OR '.join(f'"{t}"' for t in group) + ')')
         search_string = ' AND '.join(flat_terms)
         papers = []
+        # Newest first, so periodic runs see new work; the date filter skips
+        # records with publication dates in the future.
+        today = datetime.now(UTC).strftime('%Y-%m-%d')
         try:
             results = (
                 Works()
                 .search(search_string)
-                .sort(cited_by_count='desc')
+                .filter(to_publication_date=today)
+                .sort(publication_date='desc')
                 .get(per_page=min(max_results, 200))
             )
             for rec in results:
@@ -650,7 +667,7 @@ class OpenAlexBackend(ArchiveBackend):
                 cite_count = rec.get('cited_by_count', 0)
                 is_oa = oa.get('is_oa', False)
                 paper_type = rec.get('type', '')
-                is_reviewed = paper_type in ('journal-article', 'proceedings-article')
+                is_reviewed = paper_type in OPENALEX_REVIEWED_TYPES
                 abstract_index = rec.get('abstract_inverted_index')
                 abstract_text = None
                 if abstract_index and isinstance(abstract_index, dict):
@@ -691,18 +708,20 @@ class SemanticScholarBackend(ArchiveBackend):
     @limits(calls=1, period=1)
     def search(self, query_terms: list[list[str]], max_results: int) -> list[Paper]:
         papers = []
-        flat_terms = []
-        for group in query_terms:
-            flat_terms.extend(group)
-        query_string = ' '.join(flat_terms)
+        # The bulk endpoint supports boolean queries (+ is AND, | is OR) and
+        # sorting by date; the relevance endpoint does neither.
+        query_string = ' + '.join(
+            '(' + ' | '.join(f'"{t}"' for t in group) + ')' for group in query_terms)
+        today = datetime.now(UTC).strftime('%Y-%m-%d')
         try:
-            url = 'https://api.semanticscholar.org/graph/v1/paper/search'
+            url = 'https://api.semanticscholar.org/graph/v1/paper/search/bulk'
             params = {
                 'query': query_string,
-                'limit': min(max_results, 100),
+                'sort': 'publicationDate:desc',
+                'publicationDateOrYear': f':{today}',
                 'fields': (
-                    'title,authors,abstract,doi,url,'
-                    'year,citationCount,isOpenAccess,'
+                    'title,authors,abstract,externalIds,url,'
+                    'year,publicationDate,citationCount,isOpenAccess,'
                     'openAccessPdf,publicationTypes'
                 ),
             }
@@ -713,8 +732,8 @@ class SemanticScholarBackend(ArchiveBackend):
             resp = requests.get(url, params=params, headers=headers, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-            for rec in data.get('data', []):
-                doi = rec.get('doi')
+            for rec in data.get('data', [])[:max_results]:
+                doi = (rec.get('externalIds') or {}).get('DOI')
                 oa_pdf = rec.get('openAccessPdf')
                 pdf_url = oa_pdf.get('url') if oa_pdf else None
                 pub_types = rec.get('publicationTypes') or []
@@ -726,7 +745,8 @@ class SemanticScholarBackend(ArchiveBackend):
                     url=rec.get('url'),
                     abstract=rec.get('abstract'),
                     source='semantic_scholar',
-                    published_date=str(rec.get('year')) if rec.get('year') else None,
+                    published_date=rec.get('publicationDate') or (
+                        str(rec.get('year')) if rec.get('year') else None),
                     citation_count=rec.get('citationCount', 0),
                     is_open_access=rec.get('isOpenAccess', False),
                     is_peer_reviewed=is_reviewed,
@@ -892,6 +912,8 @@ class IEEEBackend(ArchiveBackend):
 
 class EuropePMCBackend(ArchiveBackend):
     name = 'europe_pmc'
+    # Extra Europe PMC query clause restricting the results, used by subclasses
+    query_filter = None
 
     @sleep_and_retry
     @limits(calls=3, period=1)
@@ -901,6 +923,8 @@ class EuropePMCBackend(ArchiveBackend):
         for group in query_terms:
             parts.append('(' + ' OR '.join(f'"{t}"' for t in group) + ')')
         query_string = ' AND '.join(parts)
+        if self.query_filter:
+            query_string = f'({query_string}) AND {self.query_filter}'
         try:
             url = 'https://www.ebi.ac.uk/europepmc/webservices/rest/search'
             params = {
@@ -908,41 +932,70 @@ class EuropePMCBackend(ArchiveBackend):
                 'format': 'json',
                 'pageSize': min(max_results, 100),
                 'resultType': 'core',
+                'sort': 'P_PDATE_D desc',
             }
             resp = requests.get(url, params=params, timeout=30)
             resp.raise_for_status()
             data = resp.json()
             result_list = data.get('resultList', {}).get('result', [])
-            for rec in result_list:
-                doi = rec.get('doi')
-                is_oa = rec.get('isOpenAccess', 'N') == 'Y'
-                pmcid = rec.get('pmcid')
-                pdf_url = None
-                if pmcid:
-                    base_url = 'https://europepmc.org/backend/ptpmcrender.fcgi'
-                    pdf_url = f'{base_url}?accid={pmcid}&blobtype=pdf'
-                paper = Paper(
-                    title=rec.get('title', ''),
-                    authors=[
-                        f"{a.get('firstName', '')} {a.get('lastName', '')}".strip()
-                        for a in rec.get('authorList', {}).get('author', [])
-                    ],
-                    doi=doi,
-                    url=f'https://doi.org/{doi}' if doi else None,
-                    abstract=rec.get('abstractText'),
-                    source='europe_pmc',
-                    published_date=rec.get('firstPublicationDate'),
-                    citation_count=rec.get('citedByCount', 0),
-                    is_open_access=is_oa,
-                    is_peer_reviewed=rec.get('source') in ('MED', 'AGR', 'CBA'),
-                    pdf_url=pdf_url,
-                    relevance_score=0.85,
-                    extra={'pmcid': pmcid, 'pmid': rec.get('pmid')},
-                )
-                papers.append(paper)
+            papers = [self.make_paper(rec) for rec in result_list]
         except Exception as exc:
-            logger.error('europe_pmc search failed: %s', exc)
+            logger.error('%s search failed: %s', self.name, exc)
         return papers
+
+    def make_paper(self, rec: dict) -> Paper:
+        doi = rec.get('doi')
+        is_oa = rec.get('isOpenAccess', 'N') == 'Y'
+        pmcid = rec.get('pmcid')
+        pdf_url = None
+        if pmcid:
+            base_url = 'https://europepmc.org/backend/ptpmcrender.fcgi'
+            pdf_url = f'{base_url}?accid={pmcid}&blobtype=pdf'
+        return Paper(
+            title=rec.get('title', ''),
+            authors=[
+                f"{a.get('firstName', '')} {a.get('lastName', '')}".strip()
+                for a in rec.get('authorList', {}).get('author', [])
+            ],
+            doi=doi,
+            url=f'https://doi.org/{doi}' if doi else None,
+            abstract=rec.get('abstractText'),
+            source='europe_pmc',
+            published_date=rec.get('firstPublicationDate'),
+            citation_count=rec.get('citedByCount', 0),
+            is_open_access=is_oa,
+            is_peer_reviewed=rec.get('source') in ('MED', 'AGR', 'CBA'),
+            pdf_url=pdf_url,
+            relevance_score=0.85,
+            extra={'pmcid': pmcid, 'pmid': rec.get('pmid')},
+        )
+
+
+class BiorxivBackend(EuropePMCBackend):
+    """Search bioRxiv preprints through Europe PMC.
+
+    The bioRxiv API has no keyword search; it only lists preprints by date, so
+    Europe PMC's preprint index is searched instead.
+    """
+
+    name = 'biorxiv'
+    query_filter = 'SRC:PPR AND PUBLISHER:"bioRxiv"'
+    host = 'biorxiv'
+
+    def make_paper(self, rec: dict) -> Paper:
+        paper = super().make_paper(rec)
+        paper.source = self.name
+        paper.is_open_access = True
+        paper.is_peer_reviewed = False
+        if paper.doi and not paper.pdf_url:
+            paper.pdf_url = f'https://www.{self.host}.org/content/{paper.doi}v1.full.pdf'
+        return paper
+
+
+class MedrxivBackend(BiorxivBackend):
+    name = 'medrxiv'
+    query_filter = 'SRC:PPR AND PUBLISHER:"medRxiv"'
+    host = 'medrxiv'
 
 
 BACKEND_REGISTRY: dict[str, type[ArchiveBackend]] = {
@@ -1215,6 +1268,7 @@ def run_search(
         if db.is_excluded(paper):
             excluded_count += 1
             continue
+        paper.relevance_score = term_relevance(paper, query_terms)
         score = compute_score(paper, config)
         if db.add_paper(paper, search_name, score):
             new_count += 1
@@ -1486,6 +1540,57 @@ def cmd_list(args, config):
         db.close()
 
 
+def cmd_rescore(args, config):
+    """Recompute the score of every known paper with the current config.
+
+    Relevance is recomputed from each paper's search terms, so this is needed
+    after changing scoring weights or search terms.
+    """
+    db = PaperDatabase(Path(config['database']))
+    terms_by_search = {s['name']: s['terms'] for s in parse_search_queries(config)}
+    try:
+        rows = db.conn.execute(
+            'SELECT identity, title, doi, source, search_name, score, metadata '
+            "FROM seen_papers WHERE source != 'manual'",
+        ).fetchall()
+        changed = 0
+        for row in rows:
+            meta = json.loads(row['metadata'] or '{}')
+            paper = Paper(
+                title=row['title'],
+                authors=meta.get('authors') or [],
+                doi=row['doi'],
+                url=meta.get('url'),
+                abstract=meta.get('abstract'),
+                source=row['source'],
+                published_date=meta.get('published_date'),
+                citation_count=meta.get('citation_count') or 0,
+                is_open_access=bool(meta.get('is_open_access')),
+                is_peer_reviewed=bool(meta.get('is_peer_reviewed')),
+                pdf_url=meta.get('pdf_url'),
+                relevance_score=meta.get('relevance_score') or 0.0,
+                extra=meta.get('extra') or {},
+            )
+            if paper.source == 'openalex' and paper.extra.get('type'):
+                paper.is_peer_reviewed = paper.extra['type'] in OPENALEX_REVIEWED_TYPES
+            if row['search_name'] in terms_by_search:
+                paper.relevance_score = term_relevance(
+                    paper, terms_by_search[row['search_name']])
+            score = compute_score(paper, config)
+            meta['relevance_score'] = paper.relevance_score
+            meta['is_peer_reviewed'] = paper.is_peer_reviewed
+            db.conn.execute(
+                'UPDATE seen_papers SET score = ?, metadata = ? WHERE identity = ?',
+                (score, json.dumps(meta), row['identity']),
+            )
+            if score != row['score']:
+                changed += 1
+        db.conn.commit()
+        print(f'rescored {len(rows)} papers; {changed} changed')
+    finally:
+        db.close()
+
+
 def cmd_init_config(args, config):
     sample = {
         'database': 'paper_search.db',
@@ -1505,17 +1610,13 @@ def cmd_init_config(args, config):
         },
         'archives': {
             'arxiv': {'enabled': True},
-            'pubmed': {'enabled': True},
-            'biorxiv': {
+            'pubmed': {
                 'enabled': True,
-                'earliest_date': '2000-01-01',
-                'max_pages': 50,
+                'api_key': '',
+                'email': 'your.email@example.com',
             },
-            'medrxiv': {
-                'enabled': False,
-                'earliest_date': '2000-01-01',
-                'max_pages': 50,
-            },
+            'biorxiv': {'enabled': True},
+            'medrxiv': {'enabled': False},
             'chemrxiv': {'enabled': False},
             'openalex': {
                 'enabled': True,
@@ -1535,7 +1636,7 @@ def cmd_init_config(args, config):
                 'enabled': False,
                 'api_key': '',
             },
-            'europe_pmc': {'enabled': False},
+            'europe_pmc': {'enabled': True},
         },
         'searches': [
             {
@@ -1666,6 +1767,14 @@ def main():
         default='all',
     )
     list_parser.add_argument('-n', '--limit', type=int, default=50)
+    subparsers.add_parser(
+        'rescore',
+        help='recompute all stored scores',
+        description=(
+            'Recompute the score of every known paper using the current '
+            'scoring weights and search terms.'
+        ),
+    )
     init_parser = subparsers.add_parser('init', help='generate a sample config file')
     init_parser.add_argument('-o', '--output', default='paper_search.yaml')
     init_parser.add_argument('-f', '--force', action='store_true')
@@ -1690,6 +1799,7 @@ def main():
         'unwant': cmd_unwant,
         'searches': cmd_searches,
         'list': cmd_list,
+        'rescore': cmd_rescore,
     }
     commands[args.command](args, config)
 
