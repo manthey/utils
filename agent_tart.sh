@@ -16,6 +16,13 @@
 #   list       list known sandboxes
 #   ip         print the VM IP
 #   cp         copy files to/from the VM; one endpoint prefixed in:
+#   claudeout  run install_claude.sh update in the VM and copy its
+#              ~/.claude-persist back to the --claude directory
+#
+# --claude=DIR names a local .claude-persist directory (containing
+# install_claude.sh; --claude= means the claude directory next to this
+# script); create and start copy it to ~/.claude-persist in the VM and
+# run install_claude.sh there. Without --claude, Claude is not installed.
 #
 # cp usage: agent_tart.sh cp [--name NAME] in:<guest path> <local path>
 #           agent_tart.sh cp [--name NAME] <local path> in:<guest path>
@@ -54,6 +61,7 @@ SSH_PUB=""
 COMMAND=""
 LOCAL=0
 OLLAMA=""
+CLAUDE_DIR=""
 CONFIG_FILE="$SELF_DIR/agent_tart.yaml"
 MOUNTS=()
 SKIPS=()
@@ -71,7 +79,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -95,7 +103,7 @@ parse_args() {
             ;;
         esac
         case "$1" in
-        provision | create | start | stop | exec | update | list | ip | cp)
+        provision | create | start | stop | exec | update | list | ip | cp | claudeout)
             COMMAND="$1"
             ;;
         --name)
@@ -151,6 +159,15 @@ parse_args() {
         --sshkey)
             SSH_PUB="$2"
             shift
+            ;;
+        --claude)
+            # --claude= (an empty value) means the claude directory next to
+            # this script.
+            CLAUDE_DIR="${2:-$SELF_DIR/claude}"
+            shift
+            ;;
+        --no-claude)
+            CLAUDE_DIR=""
             ;;
         --config)
             CONFIG_FILE="$2"
@@ -215,6 +232,10 @@ apply_config
 
 if [ -n "$SRC" ]; then
     cd "$SRC" || die "cannot cd to $SRC"
+fi
+if [ -n "$CLAUDE_DIR" ]; then
+    CLAUDE_DIR="${CLAUDE_DIR/#\~/$HOME}"
+    [ "${CLAUDE_DIR#/}" != "$CLAUDE_DIR" ] || CLAUDE_DIR="$PWD/$CLAUDE_DIR"
 fi
 
 for tool in tart jq ssh; do
@@ -587,6 +608,32 @@ set_ollama_url() {
     run_ssh "$vm" "set_ollama.sh '$url'"
 }
 
+# Copy the --claude directory to ~/.claude-persist in the VM and run its
+# install_claude.sh. COPYFILE_DISABLE keeps macOS tar from adding ._ files.
+claude_in() {
+    local vm="$1"
+    [ -f "$CLAUDE_DIR/install_claude.sh" ] || die "$CLAUDE_DIR does not contain install_claude.sh"
+    info "copying $CLAUDE_DIR to $vm:~/.claude-persist"
+    COPYFILE_DISABLE=1 tar -C "$CLAUDE_DIR" -cf - . |
+        run_ssh "$vm" "mkdir -p ~/.claude-persist && tar -xf - -C ~/.claude-persist" ||
+        die "copying $CLAUDE_DIR failed"
+    run_ssh "$vm" "bash ~/.claude-persist/install_claude.sh" ||
+        info "install_claude.sh failed"
+}
+
+# Run install_claude.sh update in the VM and copy ~/.claude-persist back to
+# the --claude directory.
+claude_out() {
+    local vm="$1"
+    run_ssh "$vm" "bash ~/.claude-persist/install_claude.sh update" ||
+        die "install_claude.sh update failed"
+    mkdir -p "$CLAUDE_DIR"
+    info "copying $vm:~/.claude-persist to $CLAUDE_DIR"
+    run_ssh "$vm" "COPYFILE_DISABLE=1 tar -C ~/.claude-persist -cf - ." |
+        tar -xf - -C "$CLAUDE_DIR" ||
+        die "copying ~/.claude-persist failed"
+}
+
 # Every command that talks to a VM over ssh needs the key resolved first;
 # ensure_ssh_key is a no-op when it is already set.
 case "$COMMAND" in
@@ -662,6 +709,7 @@ create | start)
     transfer_project "$VM_NAME"
     restore_git_modes "$VM_NAME"
     [ -z "$OLLAMA" ] || set_ollama_url "$VM_NAME" "$OLLAMA"
+    [ -z "$CLAUDE_DIR" ] || claude_in "$VM_NAME"
     if [ "$COMMAND" = create ]; then
         ssh_interactive "$VM_NAME"
     else
@@ -700,5 +748,11 @@ cp)
         usage
     fi
     do_cp "${POSITIONALS[${#POSITIONALS[@]} - 2]}" "${POSITIONALS[${#POSITIONALS[@]} - 1]}"
+    ;;
+
+claudeout)
+    [ -n "$CLAUDE_DIR" ] || die "claudeout requires --claude"
+    vm_running "$VM_NAME" || die "$VM_NAME is not running"
+    claude_out "$VM_NAME"
     ;;
 esac

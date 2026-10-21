@@ -132,6 +132,47 @@ def free_port(docker_cmd, start):
     return port
 
 
+def host_path(docker_cmd, path):
+    path = os.path.abspath(os.path.expanduser(path))
+    if docker_cmd[0] == 'wsl' and path[1:2] == ':':
+        path = '/mnt/' + path[0].lower() + '/' + path[2:].replace('\\', '/').lstrip('/')
+    return path
+
+
+def claude_in(docker_cmd, container_name, claude_dir):
+    """Copy a .claude-persist directory into the container and run its
+    install_claude.sh.
+    """
+    if not os.path.isfile(os.path.join(os.path.expanduser(claude_dir), 'install_claude.sh')):
+        msg = f'{claude_dir} does not contain install_claude.sh'
+        raise SystemExit(msg)
+    dst = '/home/ubuntu/.claude-persist'
+    cmd = docker_cmd + ['cp', host_path(docker_cmd, claude_dir) + '/.', f'{container_name}:{dst}']
+    logger.info(cmd)
+    subprocess.check_call(cmd)
+    cmd = docker_cmd + ['exec', '--user', 'root', container_name, 'chown', '-R', '1000:1000', dst]
+    logger.info(cmd)
+    subprocess.check_call(cmd)
+    cmd = docker_cmd + ['exec', '-i', container_name, 'bash', f'{dst}/install_claude.sh']
+    logger.info(cmd)
+    if subprocess.run(cmd).returncode:
+        logger.warning('install_claude.sh failed')
+
+
+def claude_out(docker_cmd, container_name, claude_dir):
+    """Run install_claude.sh update in the container and copy its
+    .claude-persist directory back out.
+    """
+    src = '/home/ubuntu/.claude-persist'
+    cmd = docker_cmd + ['exec', '-i', container_name, 'bash', f'{src}/install_claude.sh', 'update']
+    logger.info(cmd)
+    subprocess.check_call(cmd)
+    os.makedirs(os.path.expanduser(claude_dir), exist_ok=True)
+    cmd = docker_cmd + ['cp', f'{container_name}:{src}/.', host_path(docker_cmd, claude_dir)]
+    logger.info(cmd)
+    subprocess.check_call(cmd)
+
+
 def add_config(args, src, parser):
     if not os.path.exists(args.config):
         return args
@@ -153,10 +194,12 @@ def add_config(args, src, parser):
 
 
 def main():  # noqa
+    claude_default = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'claude')
     parser = argparse.ArgumentParser()
     parser.add_argument(
         'command',
-        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp', 'provision'],
+        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp', 'provision',
+                 'claudeout'],
         help='Command. create is the same as start followed by exec. start '
         'destroys an existing container, if any, and creates a new one. stop '
         'destroys the container. exec opens a shell into an existing '
@@ -164,7 +207,9 @@ def main():  # noqa
         'in a container. list shows running containers. cp copies into or out '
         'of a container via cp <src> <dest>, where the path inside the '
         'container is prefixed with in: and exactly one of src and dest must '
-        'include in:. provision creates the container image.')
+        'include in:. provision creates the container image. claudeout runs '
+        'install_claude.sh update in the container and copies its '
+        '~/.claude-persist back to the --claude directory.')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
         help='For cp: two paths, exactly one prefixed in:.  Relative '
@@ -208,6 +253,15 @@ def main():  # noqa
     parser.add_argument(
         '--mount', action='append', default=[],
         help='Mount a folder into the docker.  Recommended format is local:inside:ro')
+    parser.add_argument(
+        '--claude', nargs='?', const=claude_default,
+        type=lambda value: value or claude_default,
+        help='Local .claude-persist directory (containing install_claude.sh).  '
+        'On create and start, its contents are copied to ~/.claude-persist in '
+        'the container and install_claude.sh is run.  claudeout copies back to '
+        'it.  Without a value (--claude=), this is %(const)s.  Without '
+        '--claude, Claude is not installed.')
+    parser.add_argument('--no-claude', dest='claude', action='store_const', const=None)
     parser.add_argument(
         '--skip', action='append', dest='skips',
         help='Files or folders to exclude from the copy. Use commas for '
@@ -373,6 +427,12 @@ def main():  # noqa
         cmd = docker_cmd + ['exec', '-i', container_name, 'bash', '-c', git_restore_cmd]
         logger.info(cmd)
         subprocess.check_call(cmd, stderr=subprocess.DEVNULL)
+        if args.claude:
+            claude_in(docker_cmd, container_name, args.claude)
+    if args.command == 'claudeout':
+        if not args.claude:
+            parser.error('claudeout requires --claude')
+        claude_out(docker_cmd, container_name, args.claude)
     if args.command in {'create', 'start', 'exec', 'update'} and args.ollama:
         host = args.ollama
         if '/' not in args.ollama and ':' not in args.ollama:

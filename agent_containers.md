@@ -30,6 +30,7 @@ All four scripts use the same command set and semantics:
 <agent> update --ollama .. apply --ollama to a running sandbox
 <agent> list               list known sandboxes
 <agent> cp in:<path> <local>   /  cp <local> in:<path>
+<agent> claudeout --claude ..  save Claude Code state back to the host
 ```
 
 agent_tart.sh and agent_sandbox.py also have:
@@ -62,6 +63,14 @@ Common options (support varies slightly per platform):
   some isolation.
 - `--skip`: patterns of files or folders to exclude from the copy (comma
   separated, or repeat `--skip`).
+- `--claude=DIR`: a local `.claude-persist` directory that contains
+  `install_claude.sh`; `--claude=` with no value means the `claude`
+  directory next to the script. Without `--claude`, Claude is not
+  installed (`--no-claude` cancels one from the config file).
+  `create`/`start` copy its contents to `~/.claude-persist` in the sandbox and run `install_claude.sh` there
+  before shelling in; `claudeout` runs `install_claude.sh update` in the
+  sandbox and copies `~/.claude-persist` back into `DIR`. This keeps
+  Claude Code out of the provisioned images.
 - `--sshkey`: which public key authorizes the host (default
   `~/.ssh/id_ed25519.pub`, then `id_ecdsa`, `id_rsa`; generated if none
   exists).

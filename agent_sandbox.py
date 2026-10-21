@@ -19,6 +19,8 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import urllib.parse
 from xml.sax.saxutils import escape
@@ -453,6 +455,52 @@ def do_cp(key: str, user: str, ip: str, src: str, dst: str):
         die(f'scp failed ({result.returncode})')
 
 
+def claude_in(key: str, user: str, ip: str, claude_dir: str):
+    """Copy a .claude-persist directory into the sandbox and run its
+    install_claude.sh.
+    """
+    claude_dir = os.path.expanduser(claude_dir)
+    if not os.path.isfile(os.path.join(claude_dir, 'install_claude.sh')):
+        die(f'{claude_dir} does not contain install_claude.sh')
+    info(f'copying {claude_dir} to ~/.claude-persist')
+    with tempfile.TemporaryFile() as fp:
+        with tarfile.open(fileobj=fp, mode='w') as tf:
+            tf.add(claude_dir, arcname='.')
+        fp.seek(0)
+        result = run(['ssh'] + ssh_base(key) + [
+            f'{user}@{ip}',
+            'mkdir -p ~/.claude-persist && tar -xf - -C ~/.claude-persist'], stdin=fp)
+    if result.returncode:
+        die('copying the claude directory failed')
+    result = run(['ssh'] + ssh_base(key) + [
+        f'{user}@{ip}', 'bash ~/.claude-persist/install_claude.sh'])
+    if result.returncode:
+        info('install_claude.sh failed')
+
+
+def claude_out(key: str, user: str, ip: str, claude_dir: str):
+    """Run install_claude.sh update in the sandbox and copy its
+    .claude-persist directory back out.
+    """
+    claude_dir = os.path.expanduser(claude_dir)
+    result = run(['ssh'] + ssh_base(key) + [
+        f'{user}@{ip}', 'bash ~/.claude-persist/install_claude.sh update'])
+    if result.returncode:
+        die('install_claude.sh update failed')
+    os.makedirs(claude_dir, exist_ok=True)
+    info(f'copying ~/.claude-persist to {claude_dir}')
+    cmd = ['ssh'] + ssh_base(key) + [f'{user}@{ip}', 'tar -C ~/.claude-persist -cf - .']
+    logger.info(subprocess.list2cmdline(cmd))
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
+    with tarfile.open(fileobj=proc.stdout, mode='r|') as tf:
+        if hasattr(tarfile, 'data_filter'):
+            tf.extractall(claude_dir, filter='data')
+        else:
+            tf.extractall(claude_dir)
+    if proc.wait():
+        die(f'copying ~/.claude-persist failed ({proc.returncode})')
+
+
 DEFAULT_OLLAMA_PORT = '11434'
 
 
@@ -647,6 +695,8 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
     ip = wait_ssh(sandbox, key, args.user, 120)
     info(f'{sandbox.name} is ready at {ip}')
     tunnel_note(args, key, ip, ollama_url(args.ollama))
+    if args.claude:
+        claude_in(key, args.user, ip, args.claude)
     if args.command == 'create':
         ssh_interactive(key, args.user, ip, [])
     info(f'connect with: {sys.argv[0]} exec --name {sandbox.name}')
@@ -674,7 +724,8 @@ def main():  # noqa
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         'command',
-        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp', 'provision', 'ip'],
+        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp', 'provision', 'ip',
+                 'claudeout'],
         help='Command. create is the same as start followed by exec. start '
         'destroys an existing container, if any, and creates a new one. stop '
         'destroys the container. exec opens a shell into an existing '
@@ -683,7 +734,9 @@ def main():  # noqa
         'of a container via cp <src> <dest>, where the path inside the '
         'container is prefixed with in: and exactly one of src and dest must '
         'include in:. provision creates the container image. ip shows the '
-        'container ip.')
+        'container ip. claudeout runs install_claude.sh update in the '
+        'container and copies its ~/.claude-persist back to the --claude '
+        'directory.')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
         help='For cp: two paths, exactly one prefixed in:.  For exec: an '
@@ -711,6 +764,15 @@ def main():  # noqa
         help='Mount a folder into the sandbox.  Recommended format is '
         'local:inside:ro, where inside is relative to the sandbox home '
         '(or ~ or a C:\\ path).')
+    parser.add_argument(
+        '--claude', nargs='?', const=os.path.join(SELF_DIR, 'claude'),
+        type=lambda value: value or os.path.join(SELF_DIR, 'claude'),
+        help='Local .claude-persist directory (containing install_claude.sh).  '
+        'On create and start, its contents are copied to ~/.claude-persist in '
+        'the sandbox and install_claude.sh is run.  claudeout copies back to '
+        'it.  Without a value (--claude=), this is %(const)s.  Without '
+        '--claude, Claude is not installed.')
+    parser.add_argument('--no-claude', dest='claude', action='store_const', const=None)
     parser.add_argument(
         '--skip', action='append', dest='skips',
         help='Files or folders to exclude from the copy. Use commas for '
@@ -806,6 +868,11 @@ def main():  # noqa
             parser.error('cp requires exactly two operands')
         ip = require_running(sandbox, key, args.user)
         do_cp(key, args.user, ip, *args.operands)
+    elif args.command == 'claudeout':
+        if not args.claude:
+            parser.error('claudeout requires --claude')
+        ip = require_running(sandbox, key, args.user)
+        claude_out(key, args.user, ip, args.claude)
 
 
 if __name__ == '__main__':

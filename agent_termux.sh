@@ -26,6 +26,13 @@
 #   update     apply --ollama to a running sandbox
 #   list       list known sandboxes
 #   cp         copy files to/from the sandbox; one endpoint prefixed in:
+#   claudeout  run install_claude.sh update in the sandbox and copy its
+#              ~/.claude-persist back to the --claude directory
+#
+# --claude=DIR names a local .claude-persist directory (containing
+# install_claude.sh; --claude= means the claude directory next to this
+# script); create and start copy it to ~/.claude-persist in the sandbox and
+# run install_claude.sh there. Without --claude, Claude is not installed.
 #
 # cp usage: agent_termux.sh cp [--name NAME] in:<guest path> <local path>
 #           agent_termux.sh cp [--name NAME] <local path> in:<guest path>
@@ -78,6 +85,7 @@ SSH_KEY=""
 COMMAND=""
 LOCAL=0
 OLLAMA=""
+CLAUDE_DIR=""
 CONFIG_FILE="$SELF_DIR/agent_termux.yaml"
 MOUNTS=()
 SKIPS=()
@@ -95,7 +103,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -108,7 +116,18 @@ parse_args() {
     SKIPS=()
     while [ $# -gt 0 ]; do
         case "$1" in
-        provision | create | start | stop | exec | update | list | cp)
+        --*=*)
+            # Accept the --option=value spelling, like argparse does in
+            # agent_docker.py, by splitting the argument into two words.
+            if [ $# -gt 1 ]; then
+                set -- "${1%%=*}" "${1#*=}" "${@:2}"
+            else
+                set -- "${1%%=*}" "${1#*=}"
+            fi
+            ;;
+        esac
+        case "$1" in
+        provision | create | start | stop | exec | update | list | cp | claudeout)
             COMMAND="$1"
             ;;
         --name)
@@ -152,6 +171,15 @@ parse_args() {
         --sshkey)
             SSH_PUB="$2"
             shift
+            ;;
+        --claude)
+            # --claude= (an empty value) means the claude directory next to
+            # this script.
+            CLAUDE_DIR="${2:-$SELF_DIR/claude}"
+            shift
+            ;;
+        --no-claude)
+            CLAUDE_DIR=""
             ;;
         --config)
             CONFIG_FILE="$2"
@@ -216,6 +244,10 @@ apply_config
 
 if [ -n "$SRC" ]; then
     cd "$SRC" || die "cannot cd to $SRC"
+fi
+if [ -n "$CLAUDE_DIR" ]; then
+    CLAUDE_DIR="${CLAUDE_DIR/#\~/$HOME}"
+    [ "${CLAUDE_DIR#/}" != "$CLAUDE_DIR" ] || CLAUDE_DIR="$PWD/$CLAUDE_DIR"
 fi
 
 for tool in proot unzip jq ssh scp ssh-keygen; do
@@ -435,6 +467,32 @@ restore_git_modes() {
     if [ -f "$(guest_root "$vm")$GUEST_HOME/$CURRENT_DIR/.git/hooks/pre-commit" ]; then
         launch_proot "$vm" -c "cd ~/$CURRENT_DIR && pre-commit install" >/dev/null 2>&1 || true
     fi
+}
+
+# Copy the --claude directory to ~/.claude-persist in the sandbox and run its
+# install_claude.sh. The rootfs is a plain directory, so the copy happens on
+# the host side.
+claude_in() {
+    local vm="$1"
+    local dst
+    dst="$(guest_root "$vm")$GUEST_HOME/.claude-persist"
+    [ -f "$CLAUDE_DIR/install_claude.sh" ] || die "$CLAUDE_DIR does not contain install_claude.sh"
+    info "copying $CLAUDE_DIR to $vm:~/.claude-persist"
+    mkdir -p "$dst" && cp -a "$CLAUDE_DIR/." "$dst/" || die "copying $CLAUDE_DIR failed"
+    launch_proot "$vm" -c "bash ~/.claude-persist/install_claude.sh" ||
+        info "install_claude.sh failed"
+}
+
+# Run install_claude.sh update in the sandbox and copy ~/.claude-persist back
+# to the --claude directory.
+claude_out() {
+    local vm="$1"
+    launch_proot "$vm" -c "bash ~/.claude-persist/install_claude.sh update" ||
+        die "install_claude.sh update failed"
+    mkdir -p "$CLAUDE_DIR"
+    info "copying $vm:~/.claude-persist to $CLAUDE_DIR"
+    cp -a "$(guest_root "$vm")$GUEST_HOME/.claude-persist/." "$CLAUDE_DIR/" ||
+        die "copying ~/.claude-persist failed"
 }
 
 set_ollama_url() {
@@ -705,6 +763,7 @@ create | start)
     build_mount_args
     transfer_project "$VM_NAME"
     restore_git_modes "$VM_NAME"
+    [ -z "$CLAUDE_DIR" ] || claude_in "$VM_NAME"
     [ -e "$(guest_root "$VM_NAME")$GUEST_PREFIX/etc/ssh/ssh_host_ed25519_key" ] ||
         launch_proot "$VM_NAME" -c "ssh-keygen -A" >/dev/null 2>&1
     PORT="$(free_port "$SSH_PORT_BASE")"
@@ -783,5 +842,11 @@ cp)
         usage
     fi
     do_cp "${POSITIONALS[${#POSITIONALS[@]} - 2]}" "${POSITIONALS[${#POSITIONALS[@]} - 1]}"
+    ;;
+
+claudeout)
+    [ -n "$CLAUDE_DIR" ] || die "claudeout requires --claude"
+    vm_exists "$VM_NAME" || die "$VM_NAME does not exist"
+    claude_out "$VM_NAME"
     ;;
 esac
