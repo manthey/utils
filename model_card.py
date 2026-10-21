@@ -1931,7 +1931,7 @@ def get_metadata_table(metadata: dict[str, Any]) -> list[tuple[str, Any]]:
         ('Tool Use (metadata)', 'yes' if metadata['has_tool'] else 'no'),
         ('Reasoning (metadata)', 'yes' if metadata['has_reasoning'] else 'no'),
         ('Embedding (metadata)', 'yes' if metadata['has_embedding'] else 'no'),
-        ('Decision (metadata)', 'yes' if metadata['has_decision'] else 'no'),
+        ('Decision (metadata)', 'yes' if metadata.get('has_decision') else 'no'),
         ('Modified', mod_str),
     ]
     return rows
