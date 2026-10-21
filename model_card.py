@@ -2468,6 +2468,23 @@ def summary_table(summary, models):
     return cols, rows
 
 
+def inline_asset(path):
+    url = 'https://cdn.jsdelivr.net/npm/tablesort@5.7.1/' + path
+    is_css = path.endswith('.css')
+    try:
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        if is_css:
+            return f'<style>\n{response.text}\n</style>'
+        if '</' not in response.text:
+            return f'<script>\n{response.text}\n</script>'
+    except requests.exceptions.RequestException:
+        pass
+    if is_css:
+        return f'<link rel="stylesheet" href="{url}">'
+    return f'<script src="{url}"></script>'
+
+
 def create_summary_html(timestamp, cols, rows):
     name_filter = '</br><input id="name_filter"/>'
     th_cells = ''.join(
@@ -2483,7 +2500,7 @@ def create_summary_html(timestamp, cols, rows):
 <head>
   <meta charset="utf-8">
   <title>Model Card Summary</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tablesort@5.7.1/tablesort.css">
+""" + inline_asset('tablesort.css') + """
   <style>
     html, body {
       height: 100%;
@@ -2547,9 +2564,8 @@ def create_summary_html(timestamp, cols, rows):
       display: none;
     }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/tablesort@5.7.1/dist/tablesort.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/tablesort@5.7.1/dist/sorts/tablesort.number.min.js">
-  </script>
+""" + inline_asset('dist/tablesort.min.js') + """
+""" + inline_asset('dist/sorts/tablesort.number.min.js') + """
 </head>
 """ + f"""
 <body>
