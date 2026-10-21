@@ -228,7 +228,9 @@ print(" ".join(shlex.quote(str(a)) for a in args))
 ORIG_ARGS=("$@")
 parse_args ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
 [ -n "$COMMAND" ] || usage
-apply_config
+if [ "$COMMAND" != "cp" ]; then
+    apply_config
+fi
 
 if [ -n "$SRC" ]; then
     cd "$SRC" || die "cannot cd to $SRC"
