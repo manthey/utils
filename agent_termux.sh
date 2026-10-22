@@ -710,9 +710,9 @@ provision)
         cp "$SELF_DIR/cover.py" "$root$GUEST_HOME/.local/bin/cover.py"
         chmod 755 "$root$GUEST_HOME/.local/bin/cover.py"
     fi
-    info "provisioning the base (installs node and pi; takes a while; log $LOG_DIR/$BASE_NAME.log)"
+    info "provisioning the base (installs node and pi; log $LOG_DIR/$BASE_NAME.log)"
     launch_proot "$BASE_NAME" -c '
-        pkg install -y git openssh &&
+        pkg install -y git openssh fd ripgrep &&
         curl -fsSL "https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-$(uname -m | sed "s/aarch64/arm64/")" -o "$PREFIX/bin/hadolint" &&
         chmod +x "$PREFIX/bin/hadolint" &&
         bash ~/install_pi.sh &&
