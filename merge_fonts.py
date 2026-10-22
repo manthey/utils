@@ -20,19 +20,24 @@ squeezed to fit.  CFF (.otf) and composite glyphs are converted to simple
 TrueType outlines, so the result is a plain .ttf that works on Windows and
 Linux.
 
+Windows (GDI and DirectWrite) renders a font whose family name is exactly
+"Courier New" with extra weight under ClearType; the same file under any
+other name looks lighter.  --embolden thickens the base font's strokes to
+approximate that.
+
 Fonts are given as FILE[,FACE][,X[,Y]], the same layout as a Windows
 FontLink SystemLink entry.  FACE is ignored.  X and Y are percentages
 applied after scaling to the base font's units per em (Y defaults to X);
 without them the scale is chosen to match the cells.
 
 Usage:
-    merge_fonts.py --out 'Courier DWM' cour.ttf JuliaMono-Regular.ttf,100,98 \
-        NotoEmoji-Regular.ttf UnifontExMono.ttf,120,114 unifont-16.0.01.otf,120,114
+    uv run ../merge_fonts.py --embolden 20 --out "Courier DWM20b" cour.ttf JuliaMono-Regular.ttf,100,98 NotoEmoji-Regular.ttf UnifontExMono.ttf,120,114 unifont-16.0.01.otf,120,114 --exclude "CJK Unified Ideographs Extension" --embolden-chars "$,2TY=16" --embolden-chars "H=18" --embolden-chars "/X\=22" --embolden-chars "F=25" --embolden-chars "&N^=26" --embolden-chars "4MQV=28" --embolden-chars "Av=30" --embolden-chars "y=32"  # noqa
 """
 
 import argparse
 import collections
 import datetime
+import math
 import os
 import re
 import unicodedata
@@ -134,6 +139,21 @@ def unicode_blocks():
     return set(fontunicodedata.Blocks.VALUES)
 
 
+def block_range(name):
+    """
+    Find the code point range of a Unicode block.
+
+    :param name: a block name.
+    :returns: (low, high) inclusive, or None if unknown.
+    """
+    starts, names = fontunicodedata.Blocks.RANGES, fontunicodedata.Blocks.VALUES
+    for i, block in enumerate(names):
+        if block == name:
+            high = starts[i + 1] - 1 if i + 1 < len(starts) else 0x10FFFF
+            return starts[i], high
+    return None
+
+
 def summarize_ranges(codepoints, limit=8):
     """
     Describe a set of code points as a short list of ranges.
@@ -209,6 +229,68 @@ def cell_box(font, cmap, glyphset, ascent, descent):
         if pen.bounds and pen.bounds[3] > pen.bounds[1]:
             return pen.bounds[1], pen.bounds[3]
     return -abs(descent), ascent
+
+
+def embolden_contour(points, units):
+    """
+    Move each point of a closed contour outward along the bisector of its
+    two edges, so every stroke becomes thicker by the given amount on each
+    side.  On-curve and off-curve points are treated alike, which is a good
+    approximation for small offsets.
+
+    :param points: a list of (x, y) tuples, in TrueType order (outer
+        contours clockwise with y up).
+    :param units: the offset in font units; negative values make strokes
+        thinner.
+    :returns: a list of (x, y) tuples.
+    """
+    count = len(points)
+    if count < 3:
+        return list(points)
+    limit = 3 * abs(units)
+    result = []
+    for i, (x, y) in enumerate(points):
+        prev = (i - 1) % count
+        while points[prev] == (x, y) and prev != i:
+            prev = (prev - 1) % count
+        after = (i + 1) % count
+        while points[after] == (x, y) and after != i:
+            after = (after + 1) % count
+        if prev == i or after == i:
+            result.append((x, y))
+            continue
+        ix, iy = x - points[prev][0], y - points[prev][1]
+        ox, oy = points[after][0] - x, points[after][1] - y
+        li, lo = math.hypot(ix, iy), math.hypot(ox, oy)
+        ix, iy, ox, oy = ix / li, iy / li, ox / lo, oy / lo
+        # The outward normal of a clockwise contour is to the left of the
+        # direction of travel; the sum of the two edge normals divided by
+        # 1 + cos(angle) is the miter offset.
+        denom = 1 + ix * ox + iy * oy
+        if denom < 1e-6:
+            dx, dy = -iy * units, ix * units
+        else:
+            dx, dy = (-iy - oy) * units / denom, (ix + ox) * units / denom
+            length = math.hypot(dx, dy)
+            if length > limit:
+                dx, dy = dx * limit / length, dy * limit / length
+        result.append((x + dx, y + dy))
+    return result
+
+
+def signed_area(contours):
+    """
+    Compute the total signed area of a set of contours (positive when
+    counterclockwise with y up).
+
+    :param contours: a list of lists of (x, y) tuples.
+    :returns: the area.
+    """
+    area = 0
+    for points in contours:
+        for (x0, y0), (x1, y1) in zip(points, points[1:] + points[:1], strict=True):
+            area += x0 * y1 - x1 * y0
+    return area / 2
 
 
 def fit_span(lo, hi, target_lo, target_hi):
@@ -326,7 +408,8 @@ class Merger:
 
     def list_blocks(self, paths, exclude):
         """
-        Print how many characters each Unicode block would add.
+        Print how many characters each Unicode block would add, with the
+        values that --exclude accepts for it.
 
         :param paths: the fallback font files.
         :param exclude: a list of values from parse_exclusion to skip.
@@ -337,11 +420,23 @@ class Merger:
                 for cp in self.wanted_codepoints(src.getBestCmap(), exclude):
                     self.cmap[cp] = None
                     blocks[fontunicodedata.block(cp)] += 1
+        names = unicode_blocks()
+        print(f'{"added":>7s}  {"--exclude range":16s} --exclude block name')
         for block, count in blocks.most_common():
-            print(f'{count:7d}  {block}')
+            span = block_range(block)
+            span = f'{span[0]:04X}-{span[1]:04X}' if span else ''
+            # A block name is matched as a prefix, so one that starts
+            # another block's name would exclude that block too.
+            others = sorted(
+                n for n in names if n != block and n.lower().startswith(block.lower()))
+            note = f'  (as a prefix this also excludes {", ".join(others)})' if others else ''
+            print(f'{count:7d}  {span:16s} "{block}"{note}')
         total = len(self.order) + sum(blocks.values())
         print(f'{total:7d}  glyphs in total, including {len(self.order)} from the base font '
               f'(limit {MaxGlyphs})')
+        if total > MaxGlyphs:
+            print(f'{total - MaxGlyphs:7d}  glyphs over the limit; exclude at least that many, '
+                  'e.g. --exclude 4E00-9FFF or --exclude "Hangul Syllables"')
 
     def add_font(self, path, xscale, yscale, exclude):
         """
@@ -387,6 +482,105 @@ class Merger:
         src.close()
         self.sources.append(os.path.basename(path))
         return len(wanted), dropped, (sx / em, sy / em)
+
+    def stem_widths(self):
+        """
+        Measure the base font's stem widths from the straight edges of some
+        sample glyphs: each distance between two parallel straight edges of
+        a glyph is a candidate, and the common ones are the stems.
+
+        :returns: a list of widths in font units.
+        """
+        limit = self.upem / 8
+        counts = collections.Counter()
+        for ch in 'lIHTEFiLmn-=+':
+            name = self.cmap.get(ord(ch))
+            if name is None or self.glyf[name].numberOfContours <= 0:
+                continue
+            glyph = self.glyf[name]
+            coords, flags = list(glyph.coordinates), list(glyph.flags)
+            start = 0
+            for end in glyph.endPtsOfContours:
+                points, on_curve = coords[start:end + 1], flags[start:end + 1]
+                start = end + 1
+                edges = {'x': [], 'y': []}
+                for i, (x0, y0) in enumerate(points):
+                    j = (i + 1) % len(points)
+                    x1, y1 = points[j]
+                    if not (on_curve[i] & 1 and on_curve[j] & 1):
+                        continue
+                    if x0 == x1 and abs(y1 - y0) >= limit:
+                        edges['x'].append(x0)
+                    elif y0 == y1 and abs(x1 - x0) >= limit:
+                        edges['y'].append(y0)
+                for values in edges.values():
+                    for a in values:
+                        for b in values:
+                            if 0 < b - a <= limit:
+                                counts[b - a] += 1
+        if not counts:
+            return []
+        most = counts.most_common(1)[0][1]
+        return sorted(w for w, c in counts.items() if c >= most / 4)
+
+    def embolden(self, units, adjust_cvt=False, per_glyph=None):
+        """
+        Thicken every stroke of the base font's glyphs.  Windows renders a
+        font named "Courier New" with extra weight under ClearType (in both
+        GDI and DirectWrite); a merged font under another name does not get
+        that, so this approximates it in the outlines.  Advance widths are
+        unchanged, so glyphs grow symmetrically within their cells.
+
+        At small sizes the hinting snaps stems to the widths stored in the
+        cvt table, which mostly undoes the change; widening the cvt entries
+        that match the font's stem widths makes small sizes match better,
+        but stems then become two pixels wide at a smaller size than in the
+        original font (at 1.5 pixels, so for Courier New with 10 units at
+        30 instead of 37 pixels per em), which is much too heavy there.
+
+        :param units: font units added on each side of each stroke.
+        :param adjust_cvt: if True, also widen matching cvt entries.
+        :param per_glyph: an optional dictionary of glyph name to units,
+            for glyphs that need a different amount (diagonal strokes are
+            hinted differently from stems and need more).
+        :returns: (stem widths found, number of cvt entries adjusted).
+        """
+        from fontTools.ttLib.tables._g_l_y_f import GlyphCoordinates
+
+        widths = []
+        adjusted = 0
+        if adjust_cvt and 'cvt ' in self.font:
+            widths = self.stem_widths()
+            cvt = self.font['cvt '].values
+            for i, value in enumerate(cvt):
+                if any(abs(abs(value) - w) <= 1 for w in widths):
+                    cvt[i] = round(value + 2 * units * (1 if value > 0 else -1))
+                    adjusted += 1
+        per_glyph = per_glyph or {}
+        for name in self.order:
+            glyph = self.glyf[name]
+            amount = per_glyph.get(name, units)
+            if glyph.numberOfContours <= 0 or not amount:
+                continue
+            coords = list(glyph.coordinates)
+            contours = []
+            start = 0
+            for end in glyph.endPtsOfContours:
+                contours.append(coords[start:end + 1])
+                start = end + 1
+            # Outer contours are clockwise in TrueType; if the glyph as a
+            # whole is drawn the other way, expand in the other direction.
+            offset = -amount if signed_area(contours) > 0 else amount
+            new_coords = []
+            for points in contours:
+                new_coords.extend(embolden_contour(points, offset))
+            old_xmin = glyph.xMin
+            glyph.coordinates = GlyphCoordinates(
+                [(round(x), round(y)) for x, y in new_coords])
+            glyph.recalcBounds(self.glyf)
+            advance, lsb = self.hmtx[name]
+            self.hmtx[name] = (advance, lsb + glyph.xMin - old_xmin)
+        return widths, adjusted
 
     def build_cmap(self):
         """Replace the cmap with Unicode subtables covering every mapping."""
@@ -487,8 +681,29 @@ def main():
         'such as "CJK Unified Ideographs Extension" or "Linear B".  May be repeated.  Useful '
         'to make room when the 65535 glyph limit is reached.')
     parser.add_argument(
+        '--embolden', type=float, default=0, metavar='UNITS',
+        help='Thicken each stroke of the base font by this many font units on each side.  '
+        'Windows draws a font named "Courier New" heavier under ClearType than the same '
+        'outlines under any other name; this approximates that extra weight.  For Courier '
+        'New, 20 gives the same total ink as the real font at 17 pixels per em (13 points at '
+        '96 dpi), and 8 at 35 pixels per em (13 points at 192 dpi).')
+    parser.add_argument(
+        '--embolden-chars', action='append', default=[], metavar='CHARS=UNITS',
+        help='Use a different number of units for these characters, given as a string of '
+        'characters or U+ code points separated by spaces.  Diagonal strokes are hinted '
+        'differently from stems and need more; for Courier New at 17 pixels per em, '
+        '"/\\" wants about 25 and "yvAV" about 30 when the rest uses 20.  May be repeated.')
+    parser.add_argument(
+        '--embolden-cvt', action='store_true',
+        help='With --embolden, also widen the hinting control values that match the base '
+        "font's stem widths.  Sizes up to about 24 pixels per em then match Courier New "
+        'much better, but stems turn two pixels wide from about 30 pixels per em instead '
+        'of 37, which is far too heavy until 37.')
+    parser.add_argument(
         '--list-blocks', action='store_true',
-        help='List how many characters each Unicode block would add, then exit.')
+        help='List how many characters each Unicode block would add, with the code point '
+        'range and block name that --exclude accepts for it, then exit.  Blocks already '
+        'excluded are left out, so this shows the effect of --exclude options too.')
     parser.add_argument(
         '--no-fit', dest='fit', action='store_false',
         help='Do not shift or squeeze added glyphs to keep them inside their cells.')
@@ -503,6 +718,29 @@ def main():
         merger.list_blocks([path for path, _, _ in args.fonts], args.exclude)
         return
     print(f'{args.base}: {len(merger.cmap)} characters, {len(merger.order)} glyphs')
+    if args.embolden or args.embolden_chars:
+        per_glyph = {}
+        for spec in args.embolden_chars:
+            chars, _, value = spec.rpartition('=')
+            try:
+                value = float(value)
+            except ValueError:
+                parser.error(f'--embolden-chars {spec!r} must end with =UNITS')
+            if re.fullmatch(r'(U\+[0-9A-Fa-f]+\s*)+', chars.strip()):
+                cps = [int(cp[2:], 16) for cp in chars.split()]
+            else:
+                cps = [ord(ch) for ch in chars]
+            for cp in cps:
+                if cp in merger.cmap:
+                    per_glyph[merger.cmap[cp]] = value
+        widths, adjusted = merger.embolden(args.embolden, args.embolden_cvt, per_glyph)
+        print(f'Emboldened by {args.embolden:g} units per side', end='')
+        if per_glyph:
+            print(f' ({len(per_glyph)} glyphs with their own value)', end='')
+        if args.embolden_cvt:
+            print(f'; stem widths {", ".join(str(w) for w in widths) or "not found"}, '
+                  f'{adjusted} cvt entries widened', end='')
+        print()
     for path, xscale, yscale in args.fonts:
         added, dropped, scale = merger.add_font(path, xscale, yscale, args.exclude)
         print(f'{path},{scale[0] * 100:.0f},{scale[1] * 100:.0f}: added {added} characters')
