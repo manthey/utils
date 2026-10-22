@@ -2,3 +2,6 @@
 *.swp
 .cache
 tool-proxy.yaml
+claude
+agent_*.yaml
+model_card_*.yaml

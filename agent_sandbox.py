@@ -479,8 +479,8 @@ def claude_in(key: str, user: str, ip: str, claude_dir: str):
 
 
 def claude_out(key: str, user: str, ip: str, claude_dir: str):
-    """Run install_claude.sh update in the sandbox and copy its
-    .claude-persist directory back out.
+    """Run install_claude.sh update in the sandbox and copy the files it
+    changed, which it puts in ~/.claude-outbox, back out.
     """
     claude_dir = os.path.expanduser(claude_dir)
     result = run(['ssh'] + ssh_base(key) + [
@@ -488,8 +488,8 @@ def claude_out(key: str, user: str, ip: str, claude_dir: str):
     if result.returncode:
         die('install_claude.sh update failed')
     os.makedirs(claude_dir, exist_ok=True)
-    info(f'copying ~/.claude-persist to {claude_dir}')
-    cmd = ['ssh'] + ssh_base(key) + [f'{user}@{ip}', 'tar -C ~/.claude-persist -cf - .']
+    info(f'copying ~/.claude-outbox to {claude_dir}')
+    cmd = ['ssh'] + ssh_base(key) + [f'{user}@{ip}', 'tar -C ~/.claude-outbox -cf - .']
     logger.info(subprocess.list2cmdline(cmd))
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE)
     with tarfile.open(fileobj=proc.stdout, mode='r|') as tf:
@@ -498,7 +498,7 @@ def claude_out(key: str, user: str, ip: str, claude_dir: str):
         else:
             tf.extractall(claude_dir)
     if proc.wait():
-        die(f'copying ~/.claude-persist failed ({proc.returncode})')
+        die(f'copying ~/.claude-outbox failed ({proc.returncode})')
 
 
 DEFAULT_OLLAMA_PORT = '11434'
@@ -735,7 +735,7 @@ def main():  # noqa
         'container is prefixed with in: and exactly one of src and dest must '
         'include in:. provision creates the container image. ip shows the '
         'container ip. claudeout runs install_claude.sh update in the '
-        'container and copies its ~/.claude-persist back to the --claude '
+        'container and copies the files that changed back to the --claude '
         'directory.')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',

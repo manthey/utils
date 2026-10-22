@@ -69,7 +69,8 @@ Common options (support varies slightly per platform):
   installed (`--no-claude` cancels one from the config file).
   `create`/`start` copy its contents to `~/.claude-persist` in the sandbox and run `install_claude.sh` there
   before shelling in; `claudeout` runs `install_claude.sh update` in the
-  sandbox and copies `~/.claude-persist` back into `DIR`. This keeps
+  sandbox and copies the files it changed (staged in `~/.claude-outbox`)
+  back into `DIR`. This keeps
   Claude Code out of the provisioned images.
 - `--sshkey`: which public key authorizes the host (default
   `~/.ssh/id_ed25519.pub`, then `id_ecdsa`, `id_rsa`; generated if none

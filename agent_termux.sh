@@ -26,8 +26,8 @@
 #   update     apply --ollama to a running sandbox
 #   list       list known sandboxes
 #   cp         copy files to/from the sandbox; one endpoint prefixed in:
-#   claudeout  run install_claude.sh update in the sandbox and copy its
-#              ~/.claude-persist back to the --claude directory
+#   claudeout  run install_claude.sh update in the sandbox and copy the
+#              files that changed back to the --claude directory
 #
 # --claude=DIR names a local .claude-persist directory (containing
 # install_claude.sh; --claude= means the claude directory next to this
@@ -483,16 +483,16 @@ claude_in() {
         info "install_claude.sh failed"
 }
 
-# Run install_claude.sh update in the sandbox and copy ~/.claude-persist back
-# to the --claude directory.
+# Run install_claude.sh update in the sandbox and copy ~/.claude-outbox back
+# to the --claude directory; install_claude.sh puts the files it changed there.
 claude_out() {
     local vm="$1"
     launch_proot "$vm" -c "bash ~/.claude-persist/install_claude.sh update" ||
         die "install_claude.sh update failed"
     mkdir -p "$CLAUDE_DIR"
-    info "copying $vm:~/.claude-persist to $CLAUDE_DIR"
-    cp -a "$(guest_root "$vm")$GUEST_HOME/.claude-persist/." "$CLAUDE_DIR/" ||
-        die "copying ~/.claude-persist failed"
+    info "copying $vm:~/.claude-outbox to $CLAUDE_DIR"
+    cp -a "$(guest_root "$vm")$GUEST_HOME/.claude-outbox/." "$CLAUDE_DIR/" ||
+        die "copying ~/.claude-outbox failed"
 }
 
 set_ollama_url() {

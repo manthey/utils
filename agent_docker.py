@@ -160,15 +160,16 @@ def claude_in(docker_cmd, container_name, claude_dir):
 
 
 def claude_out(docker_cmd, container_name, claude_dir):
-    """Run install_claude.sh update in the container and copy its
-    .claude-persist directory back out.
+    """Run install_claude.sh update in the container and copy the files it
+    changed, which it puts in ~/.claude-outbox, back out.
     """
     src = '/home/ubuntu/.claude-persist'
     cmd = docker_cmd + ['exec', '-i', container_name, 'bash', f'{src}/install_claude.sh', 'update']
     logger.info(cmd)
     subprocess.check_call(cmd)
     os.makedirs(os.path.expanduser(claude_dir), exist_ok=True)
-    cmd = docker_cmd + ['cp', f'{container_name}:{src}/.', host_path(docker_cmd, claude_dir)]
+    cmd = docker_cmd + [
+        'cp', f'{container_name}:/home/ubuntu/.claude-outbox/.', host_path(docker_cmd, claude_dir)]
     logger.info(cmd)
     subprocess.check_call(cmd)
 
@@ -208,8 +209,8 @@ def main():  # noqa
         'of a container via cp <src> <dest>, where the path inside the '
         'container is prefixed with in: and exactly one of src and dest must '
         'include in:. provision creates the container image. claudeout runs '
-        'install_claude.sh update in the container and copies its '
-        '~/.claude-persist back to the --claude directory.')
+        'install_claude.sh update in the container and copies the files '
+        'that changed back to the --claude directory.')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
         help='For cp: two paths, exactly one prefixed in:.  Relative '

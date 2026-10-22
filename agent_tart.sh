@@ -16,8 +16,8 @@
 #   list       list known sandboxes
 #   ip         print the VM IP
 #   cp         copy files to/from the VM; one endpoint prefixed in:
-#   claudeout  run install_claude.sh update in the VM and copy its
-#              ~/.claude-persist back to the --claude directory
+#   claudeout  run install_claude.sh update in the VM and copy the
+#              files that changed back to the --claude directory
 #
 # --claude=DIR names a local .claude-persist directory (containing
 # install_claude.sh; --claude= means the claude directory next to this
@@ -623,17 +623,17 @@ claude_in() {
         info "install_claude.sh failed"
 }
 
-# Run install_claude.sh update in the VM and copy ~/.claude-persist back to
-# the --claude directory.
+# Run install_claude.sh update in the VM and copy ~/.claude-outbox back to
+# the --claude directory; install_claude.sh puts the files it changed there.
 claude_out() {
     local vm="$1"
     run_ssh "$vm" "bash ~/.claude-persist/install_claude.sh update" ||
         die "install_claude.sh update failed"
     mkdir -p "$CLAUDE_DIR"
-    info "copying $vm:~/.claude-persist to $CLAUDE_DIR"
-    run_ssh "$vm" "COPYFILE_DISABLE=1 tar -C ~/.claude-persist -cf - ." |
+    info "copying $vm:~/.claude-outbox to $CLAUDE_DIR"
+    run_ssh "$vm" "COPYFILE_DISABLE=1 tar -C ~/.claude-outbox -cf - ." |
         tar -xf - -C "$CLAUDE_DIR" ||
-        die "copying ~/.claude-persist failed"
+        die "copying ~/.claude-outbox failed"
 }
 
 # Every command that talks to a VM over ssh needs the key resolved first;
