@@ -122,7 +122,9 @@ through a read-write `--mount`). The guest user is unprivileged everywhere.
   (`ghcr.io/cirruslabs/macos-golden-gate-base:latest`) into a base VM
   (`agent_base`) and bootstraps the ssh key into it using the published
   admin/admin credentials; each `create`/`start` clones the base VM.
-- VM sizing: `--cpus` (default 4), `--memory` (MB, default 8192),
+- VM sizing: `--cpus` (default: the greater of 4 and one less than the
+  host's CPU count), `--memory` (MB, default: the greater of 8192 and a
+  third of the host's memory, since tart runs at most two VMs at once),
   `--disk` (GB, default 150).
 - Logs in `~/.agent_tart/logs`; ssh state in `~/.agent_tart/ssh`.
 - ollama: the VM reaches the host over the network like docker does.
@@ -308,7 +310,9 @@ is discarded on `stop`.
 
 ### Windows-specific options
 
-- `--memory` (MB, default 8192); Windows Sandbox has no CPU count setting.
+- `--memory` (MB, default: the greater of 8192 and half of the host's
+  memory, since only one sandbox can run at a time); Windows Sandbox has
+  no CPU count setting.
 - `--backend auto|cli|file` (default: `cli` when `wsb.exe` is on PATH).
 - `--user` (default `agent`); `--user WDAGUtilityAccount` uses the
   built-in account instead of creating one; it is removed from

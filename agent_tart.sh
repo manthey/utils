@@ -50,6 +50,12 @@ GUEST_HOME="/Users/$TART_USER"
 CPUS=4
 MEM=8192
 DISK=150
+# Use more of a larger host: all but one of its CPUs and, since tart runs at
+# most two VMs at once, a third of its memory.
+HOST_CPUS="$(sysctl -n hw.ncpu 2>/dev/null)" || HOST_CPUS=0
+HOST_MEM="$(sysctl -n hw.memsize 2>/dev/null)" || HOST_MEM=0
+[ $((${HOST_CPUS:-0} - 1)) -gt "$CPUS" ] && CPUS=$((HOST_CPUS - 1))
+[ $((${HOST_MEM:-0} / 1048576 / 3)) -gt "$MEM" ] && MEM=$((HOST_MEM / 1048576 / 3))
 
 BASE_NAME="$BASE_VM"
 NAME=""
