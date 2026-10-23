@@ -19,7 +19,7 @@ set -euo pipefail
 # ~/.claude are carried, plus the login (.credentials.json) and
 # ~/.claude.json (onboarding, project trust, /config choices).
 PERSIST="$HOME/.claude-persist"
-ENTRIES=(CLAUDE.md settings.json rules projects .credentials.json)
+ENTRIES=(CLAUDE.md settings.json rules projects history.jsonl .credentials.json)
 # Set by update: every file copied into $PERSIST is also put here, so the host
 # only has to copy what changed.
 OUTBOX=""
