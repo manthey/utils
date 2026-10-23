@@ -51,7 +51,7 @@ TART_USER="${TART_USER:-admin}"
 TART_PASS="${TART_PASS:-admin}"
 GUEST_HOME="/Users/$TART_USER"
 CPUS=4
-MEM=8192
+MEM=4096
 DISK=150
 # Use more of a larger host: all but one of its CPUs and, since tart runs at
 # most two VMs at once, a third of its memory.
