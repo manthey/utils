@@ -47,7 +47,8 @@
 # flows), which runs its termux branch inside the sandbox.
 #
 # Host requirements (termux packages): proot, unzip, openssh, jq, git; the
-# bootstrap zip is cached under ~/.agent_termux. Mounts are read-write
+# bootstrap zip is cached under ~/.agent_termux (provision --no-cache
+# downloads it again; --cache, the default, reuses it). Mounts are read-write
 # (proot has no read-only enforcement); without an explicit --mount of
 # shared storage the guest has no sdcard access.
 
@@ -84,6 +85,7 @@ SSH_PUB=""
 SSH_KEY=""
 COMMAND=""
 LOCAL=0
+CACHE=1
 OLLAMA=""
 CLAUDE_DIR=""
 CONFIG_FILE="$SELF_DIR/agent_termux.yaml"
@@ -103,7 +105,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -163,6 +165,12 @@ parse_args() {
             ;;
         --no-local)
             LOCAL=0
+            ;;
+        --cache)
+            CACHE=1
+            ;;
+        --no-cache)
+            CACHE=0
             ;;
         --ollama | --url)
             OLLAMA="$2"
@@ -676,12 +684,12 @@ provision)
     zip_name="${zip_name//%2B/+}"
     zip_path="$AGENT_DIR/$zip_name"
     check_free_space "provisioning the base"
-    if [ ! -s "$zip_path" ]; then
+    if [ "$CACHE" = 0 ] || [ ! -s "$zip_path" ]; then
         info "downloading $BOOTSTRAP_URL"
         curl -fsSL -o "$zip_path" "$BOOTSTRAP_URL" ||
             die "downloading the bootstrap failed; retry or pass --image <bootstrap zip url>"
     else
-        info "using cached bootstrap $zip_path (delete it to re-download)"
+        info "using cached bootstrap $zip_path (--no-cache to re-download)"
     fi
     if vm_exists "$BASE_NAME"; then
         info "$BASE_NAME exists; deleting it for a fresh provisioning"

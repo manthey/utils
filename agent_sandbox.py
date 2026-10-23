@@ -34,6 +34,9 @@ logger.addHandler(logging.NullHandler())
 SELF_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.expanduser(os.environ.get('AGENT_SANDBOX_DIR', '~/.agent_sandbox'))
 PAYLOAD_DIR = os.path.join(BASE_DIR, 'payload')
+# Downloads made while building the payload, keyed by url; mapped read-write
+# while provisioning.
+CACHE_DIR = os.path.join(BASE_DIR, 'cache')
 KNOWN_HOSTS = os.path.join(BASE_DIR, 'known_hosts')
 # Guest-side paths.  The payload is mapped read-only (read-write while
 # provisioning); each sandbox also gets a read-write "run" folder through
@@ -42,6 +45,7 @@ KNOWN_HOSTS = os.path.join(BASE_DIR, 'known_hosts')
 GUEST_PAYLOAD = r'C:\payload'
 GUEST_RUN = r'C:\mnt\run'
 GUEST_PROJECT = r'C:\mnt\project'
+GUEST_CACHE = r'C:\mnt\cache'
 SCRIPTS = ('agent_sandbox_common.ps1', 'agent_sandbox_payload.ps1',
            'agent_sandbox_provision.ps1', 'install_pi.sh', '.vimrc', 'cover.py')
 # Windows 10 sandbox processes (the file backend has no other handle).
@@ -655,6 +659,7 @@ def cmd_provision(args, backend: str, key: str):
                 os.chmod(path, stat.S_IWRITE)
                 os.remove(path)
     os.makedirs(PAYLOAD_DIR, exist_ok=True)
+    os.makedirs(CACHE_DIR, exist_ok=True)
     refresh_scripts()
     sandbox = Sandbox('agent_provision', backend)
     sandbox.stop()
@@ -665,9 +670,11 @@ def cmd_provision(args, backend: str, key: str):
         'user': args.user,
         'pythons': args.pythons.split(','),
         'pip_tools': ['tox', 'pre-commit', 'virtualenv'],
+        'cache': args.cache,
     }, open(key + '.pub').read())
     config = build_config(
-        [(PAYLOAD_DIR, GUEST_PAYLOAD, False), (sandbox.run_dir, GUEST_RUN, False)],
+        [(PAYLOAD_DIR, GUEST_PAYLOAD, False), (sandbox.run_dir, GUEST_RUN, False),
+         (CACHE_DIR, GUEST_CACHE, False)],
         args.memory, False)
     command = provisioner_command('agent_sandbox_payload.ps1')
     sandbox.start(config, command if backend == 'file' else None)
@@ -830,6 +837,12 @@ def main():  # noqa
         help='Copy the toolchain to C:\\tools in the sandbox (default) rather '
         'than using it from the read-only payload mapping.')
     parser.add_argument('--no-copy-tools', dest='copy_tools', action='store_false')
+    parser.add_argument(
+        '--cache', action='store_true', default=True,
+        help='provision: reuse downloads cached (in the cache folder next to '
+        'the payload) by earlier provisioning (default).  --no-cache '
+        'downloads everything again.')
+    parser.add_argument('--no-cache', dest='cache', action='store_false')
     parser.add_argument(
         '--wait-timeout', type=int,
         help='Seconds to wait for provisioning (default 3600 for provision, '

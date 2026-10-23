@@ -80,6 +80,10 @@ Common options (support varies slightly per platform):
   `agent_termux.yaml`, `agent_sandbox.yaml`). CLI arguments win; later
   scalars win; `--mount`/`--skip` accumulate from every source.
 - `--verbose/-v`: more logging.
+- `--no-cache`: `provision` ignores anything cached by earlier provisioning
+  (docker build layers and base image, tart's copy of the base image,
+  termux's bootstrap zip, the Windows sandbox's downloads) and fetches it
+  again. `--cache` (the default) reuses the cache.
 
 ### Shared provisioning
 
@@ -102,7 +106,7 @@ through a read-write `--mount`). The guest user is unprivileged everywhere.
 
 - `provision` runs `docker build --force-rm -t manthey/agent -f
   agent.Dockerfile .`, so building the image uses the repo as build
-  context.
+  context. `--no-cache` adds `--no-cache --pull`.
 - On a Windows host the script drives docker through `wsl docker`.
 - `--ssh` adds a public key for the `ubuntu` user and exposes ssh on
   `--sshport` (default 2222), optionally finding a free port
@@ -122,6 +126,8 @@ through a read-write `--mount`). The guest user is unprivileged everywhere.
   (`ghcr.io/cirruslabs/macos-golden-gate-base:latest`) into a base VM
   (`agent_base`) and bootstraps the ssh key into it using the published
   admin/admin credentials; each `create`/`start` clones the base VM.
+  tart keeps the base image in its cache; `--no-cache` runs `tart pull`
+  first so the tag is resolved against the registry again.
 - VM sizing: `--cpus` (default: the greater of 4 and one less than the
   host's CPU count), `--memory` (MB, default: the greater of 8192 and a
   third of the host's memory, since tart runs at most two VMs at once),
@@ -133,7 +139,8 @@ through a read-write `--mount`). The guest user is unprivileged everywhere.
 ## agent_termux.sh (Android, termux host)
 
 - Host requirements (termux packages): `proot`, `unzip`, `openssh`, `jq`,
-  `git`. The bootstrap zip is cached under `~/.agent_termux`.
+  `git`. The bootstrap zip is cached under `~/.agent_termux`
+  (`--no-cache` downloads it again).
 - Each sandbox is a nested termux: a termux bootstrap rootfs extracted
   under `~/.agent_termux/<name>/root` and run through `proot -r`. The
   guest is real bionic termux (its own `$PREFIX`, `pkg`, termux-packaged
@@ -274,6 +281,10 @@ installed at the same absolute paths they will have later. The resulting
 `home\`, and the sandbox is destroyed. `VERSIONS.txt` records what was
 fetched.
 
+Downloads are cached in `~\.agent_sandbox\cache`, keyed by url, so a later
+`provision` only downloads releases that changed; files the latest run did
+not use are pruned. `--no-cache` downloads everything again.
+
 #### create / start
 
 1. The payload (read-only), the project directory (read-only), a small
@@ -328,6 +339,7 @@ is discarded on `stop`.
 ~\.agent_sandbox\
   payload\            tools\, home\, scripts\ (copied from the repo on every
                       run so edits to the .ps1/.sh files take effect), VERSIONS.txt
+  cache\              downloads from provision, keyed by url
   known_hosts
   <name>\
     id                sandbox id (cli) or marker (file)

@@ -1,9 +1,10 @@
 # agent_sandbox_payload.ps1 - assemble the agent sandbox payload. Runs INSIDE
 # a Windows Sandbox started by `agent_sandbox.py provision`, with the host's
-# payload folder mapped read-write at C:\payload. This is the equivalent of
-# building agent.Dockerfile or tart's base VM: nothing is installed on the
-# host; the sandbox downloads and arranges everything, then the result is a
-# plain folder the host maps read-only into every later sandbox.
+# payload folder mapped read-write at C:\payload and its download cache at
+# C:\mnt\cache. This is the equivalent of building agent.Dockerfile or
+# tart's base VM: nothing is installed on the host; the sandbox downloads and
+# arranges everything, then the result is a plain folder the host maps
+# read-only into every later sandbox.
 #
 # Result (C:\payload):
 #   tools\git\        PortableGit (bash, vim, ssh client)
@@ -27,9 +28,14 @@ $runArgs = $script:runArgs
 $pythons = @(Get-ArgOr $runArgs 'pythons' @('3.12'))
 $pipTools = @(Get-ArgOr $runArgs 'pip_tools' @())
 $user = Get-ArgOr $runArgs 'user' 'agent'
+$useCache = [bool](Get-ArgOr $runArgs 'cache' $true)
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $dl = 'C:\dl'
+# Downloads are cached by url, so a newer release is still fetched; entries
+# this run did not use are pruned once the payload is complete.
+$cacheDir = 'C:\mnt\cache'
+$cacheUsed = @{}
 New-Item -ItemType Directory -Force -Path $dl, $script:Tools, (Join-Path $script:Tools 'bin') | Out-Null
 $versions = @()
 
@@ -39,8 +45,18 @@ function Get-Json([string]$Url) {
 
 function Get-File([string]$Url, [string]$Name) {
     $dest = Join-Path $dl $Name
-    Log "downloading $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $dest -UseBasicParsing -Headers @{ 'User-Agent' = 'agent_sandbox' }
+    $hash = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Url))
+    $key = (-join ($hash[0..7] | ForEach-Object { $_.ToString('x2') })) + "-$Name"
+    $cached = Join-Path $cacheDir $key
+    $script:cacheUsed[$key] = $true
+    if ($useCache -and (Test-Path $cached)) {
+        Log "using cached $Url"
+    } else {
+        Log "downloading $Url"
+        Invoke-WebRequest -Uri $Url -OutFile "$cached.partial" -UseBasicParsing -Headers @{ 'User-Agent' = 'agent_sandbox' }
+        Move-Item -Force "$cached.partial" $cached
+    }
+    Copy-Item $cached $dest -Force
     return $dest
 }
 
@@ -219,6 +235,12 @@ Invoke-Checked 'copying tools and home into the payload' {
         (Join-Path $homeDir 'AppData\Roaming\Microsoft')
     ) -ExcludeFiles @('ntuser*', 'NTUSER*', 'UsrClass*')
     $script:versions | Set-Content -Path (Join-Path $script:Payload 'VERSIONS.txt')
+}
+
+try {
+    Get-ChildItem $cacheDir -File | Where-Object { -not $cacheUsed.ContainsKey($_.Name) } | Remove-Item -Force
+} catch {
+    Log "WARNING: pruning the download cache failed: $($_.Exception.Message)"
 }
 
 Log 'payload complete'

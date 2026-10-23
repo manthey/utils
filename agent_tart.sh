@@ -24,6 +24,9 @@
 # script); create and start copy it to ~/.claude-persist in the VM and
 # run install_claude.sh there. Without --claude, Claude is not installed.
 #
+# provision --no-cache pulls the base image from its registry instead of
+# using tart's cached copy (--cache, the default, uses the cached copy).
+#
 # cp usage: agent_tart.sh cp [--name NAME] in:<guest path> <local path>
 #           agent_tart.sh cp [--name NAME] <local path> in:<guest path>
 #           (like docker cp; directories are copied recursively)
@@ -66,6 +69,7 @@ SSH_KEY=""
 SSH_PUB=""
 COMMAND=""
 LOCAL=0
+CACHE=1
 OLLAMA=""
 CLAUDE_DIR=""
 CONFIG_FILE="$SELF_DIR/agent_tart.yaml"
@@ -85,7 +89,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -157,6 +161,12 @@ parse_args() {
             ;;
         --no-local)
             LOCAL=0
+            ;;
+        --cache)
+            CACHE=1
+            ;;
+        --no-cache)
+            CACHE=0
             ;;
         --ollama | --url)
             OLLAMA="$2"
@@ -662,6 +672,14 @@ provision)
     fi
     vm_exists "$BASE_NAME" &&
         die "$BASE_NAME could not be removed; refusing to provision over an existing VM"
+    # tart clone only downloads a remote image that is not in its cache, so
+    # re-resolve the tag against the registry first; pull keeps the cached
+    # copy only when its digest is still the one the registry serves.
+    # Local VM names (no registry path) have no cached copy to refresh.
+    if [ "$CACHE" = 0 ] && [ "${BASE_IMAGE#*/}" != "$BASE_IMAGE" ]; then
+        info "pulling $BASE_IMAGE"
+        tart pull "$BASE_IMAGE" || die "pulling $BASE_IMAGE failed"
+    fi
     info "cloning $BASE_IMAGE into $BASE_NAME (large download on first run)"
     tart clone "$BASE_IMAGE" "$BASE_NAME" || die "cloning $BASE_IMAGE failed"
     tart set "$BASE_NAME" --cpu "$CPUS" --memory "$MEM" --disk-size "$DISK" ||

@@ -252,6 +252,11 @@ def main():  # noqa
         help='Mount docker sock with appropriate permissions.')
     parser.add_argument('--no-docker', dest='docker', action='store_false')
     parser.add_argument(
+        '--cache', action='store_true', default=True,
+        help='provision: use the docker build cache (default).  --no-cache '
+        'ignores it and pulls a fresh base image.')
+    parser.add_argument('--no-cache', dest='cache', action='store_false')
+    parser.add_argument(
         '--mount', action='append', default=[],
         help='Mount a folder into the docker.  Recommended format is local:inside:ro')
     parser.add_argument(
@@ -297,6 +302,8 @@ def main():  # noqa
     if args.command == 'provision':
         cmd = docker_cmd + ['build', '--force-rm', '-t', 'manthey/agent',
                             '-f', 'agent.Dockerfile', '.']
+        if not args.cache:
+            cmd[-1:-1] = ['--no-cache', '--pull']
         logger.info(cmd)
         subprocess.check_call(cmd, cwd=os.path.dirname(os.path.abspath(__file__)))
     if args.command in {'list'}:
