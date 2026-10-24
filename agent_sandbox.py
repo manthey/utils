@@ -694,6 +694,7 @@ def cmd_provision(args, backend: str, key: str):
         'pythons': args.pythons.split(','),
         'pip_tools': ['tox', 'pre-commit', 'virtualenv'],
         'cache': args.cache,
+        'debloat': bool(args.debloat),
     }, open(key + '.pub').read())
     config = build_config(
         [(PAYLOAD_DIR, GUEST_PAYLOAD, False), (sandbox.run_dir, GUEST_RUN, False),
@@ -743,6 +744,7 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
         'mounts': specs,
         'ollama': ollama_url(args.ollama),
         'copy_tools': bool(args.copy_tools),
+        'debloat': bool(args.debloat),
     }, open(key + '.pub').read())
     config = build_config(mappings, args.memory, args.gpu)
     command = provisioner_command('agent_sandbox_provision.ps1')
@@ -869,6 +871,11 @@ def main():  # noqa
         'the payload) by earlier provisioning (default).  --no-cache '
         'downloads everything again.')
     parser.add_argument('--no-cache', dest='cache', action='store_false')
+    parser.add_argument(
+        '--no-debloat', dest='debloat', action='store_false',
+        help='Keep the default Windows consumer features (widgets with the '
+        'weather tile, news and interests, suggestions, search highlights) '
+        'running in the sandbox.  They are disabled by default.')
     parser.add_argument(
         '--wait-timeout', type=int,
         help='Seconds to wait for provisioning (default 3600 for provision, '

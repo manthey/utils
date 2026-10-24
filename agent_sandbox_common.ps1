@@ -67,7 +67,7 @@ function Get-ArgOr($RunArgs, [string]$Name, $Default) {
     return $Default
 }
 
-# --- toolchain --------------------------------------------------------------
+# toolchain
 
 function Copy-Tree([string]$Source, [string]$Dest, [string[]]$ExcludeDirs = @(),
                    [string[]]$ExcludeFiles = @()) {
@@ -164,7 +164,7 @@ function Register-Pythons {
     }
 }
 
-# --- sandbox user -----------------------------------------------------------
+# sandbox user
 
 function New-RandomPassword {
     $chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -250,7 +250,7 @@ function Set-HomeOwner([string]$User, [string]$HomeDir) {
     & icacls $HomeDir /grant "$User`:(OI)(CI)F" /T /C /Q | Out-Null
 }
 
-# --- sshd -------------------------------------------------------------------
+# sshd
 
 function Install-Sshd([string]$User) {
     $source = Join-Path $script:Tools 'openssh'
@@ -327,7 +327,7 @@ function Start-Sshd {
     throw 'sshd did not start listening on port 22'
 }
 
-# --- networking -------------------------------------------------------------
+# networking
 
 function Get-SandboxIP {
     $addresses = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
@@ -371,7 +371,7 @@ function Publish-IP {
     return $null
 }
 
-# --- bash -------------------------------------------------------------------
+# bash
 
 function ConvertTo-MsysPath([string]$Path) {
     return '/' + $Path.Substring(0, 1).ToLower() + $Path.Substring(2).Replace('\', '/')
@@ -405,7 +405,63 @@ function Invoke-Bash([string]$User, [string]$Command) {
     }
 }
 
-# --- common sequence --------------------------------------------------------
+# debloat
+
+function Disable-ConsumerFeatures([string]$User) {
+    # The sandbox is a headless agent environment; Windows' consumer shell
+    # extras (widgets with their weather tile, news and interests,
+    # suggestions, search highlights) only waste cycles and connections
+    # there.  Policies under HKLM apply to every user, including ones
+    # created later; the sandbox is rebuilt from scratch on each create, so
+    # they take effect every time.
+    foreach ($policy in @(
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Dsh', 'AllowWidgets'),
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Feeds', 'EnableFeeds'),
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent',
+          'DisableWindowsConsumerFeatures'),
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent',
+          'DisableSoftLanding'),
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent',
+          'DisableTailoredExperiencesWithDiagnosticData'),
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent',
+          'DisableCloudOptimizedContent'),
+        @('HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent',
+          'DisableConsumerAccountStateContent')
+    )) {
+        New-Item -Path $policy[0] -Force | Out-Null
+        Set-ItemProperty -Path $policy[0] -Name $policy[1] -Value 0 -Type DWord
+    }
+    # Per-user settings, applied when the user's hive is loaded (the profile
+    # has just been confirmed by a login).  TaskbarDa hides the taskbar
+    # widgets button, IsDynamicSearchResultEnabled the search highlights.
+    if ($User) {
+        try {
+            $sid = (Get-LocalUser -Name $User -ErrorAction Stop).Sid.Value
+            $hive = "Registry::HKEY_USERS\$sid\Software\Microsoft"
+            foreach ($setting in @(
+                @('Windows\CurrentVersion\Explorer\Advanced', 'TaskbarDa'),
+                @('Windows\CurrentVersion\SearchSettings', 'IsDynamicSearchResultEnabled')
+            )) {
+                $path = "$hive\$($setting[0])"
+                New-Item -Path $path -Force -ErrorAction SilentlyContinue | Out-Null
+                Set-ItemProperty -Path $path -Name $setting[1] -Value 0 -Type DWord `
+                    -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Log "WARNING: could not set per-user debloat settings: $($_.Exception.Message)"
+        }
+    }
+    # Removing the widget host package keeps the taskbar button from
+    # relaunching it; killing the processes covers an already-running shell.
+    Get-AppxPackage MicrosoftWindows.Client.WebExperience -ErrorAction SilentlyContinue |
+        Remove-AppxPackage -ErrorAction SilentlyContinue
+    foreach ($process in 'Widgets', 'WidgetService', 'WidgetsHost', 'WidgetsService') {
+        Stop-Process -Name $process -Force -ErrorAction SilentlyContinue
+    }
+    Log 'consumer features (widgets, news and interests, suggestions) disabled'
+}
+
+# common sequence
 
 function Initialize-Sandbox($RunArgs, [bool]$Bootstrap, [switch]$SkipTools) {
     # The steps shared by provision and create, in order: toolchain, user,
@@ -426,5 +482,8 @@ function Initialize-Sandbox($RunArgs, [bool]$Bootstrap, [switch]$SkipTools) {
     Invoke-Checked 'ensuring the user profile exists' { $script:HomeDir = Confirm-UserProfile $user }
     $homeDir = $script:HomeDir
     Invoke-Checked 'adding host.docker.internal' { Add-HostGatewayEntry }
+    if ([bool](Get-ArgOr $RunArgs 'debloat' $true)) {
+        Invoke-Checked 'disabling consumer features' { Disable-ConsumerFeatures $user }
+    }
     return @{ User = $user; Home = $homeDir }
 }
