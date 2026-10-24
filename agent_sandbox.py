@@ -209,17 +209,39 @@ class Sandbox:
                 ip = open(published).read().strip() or None
         return ip
 
-    def stop(self):
+    def stop(self, wait: float = 60) -> bool:
+        """Stop the sandbox and return whether it is no longer running.
+
+        With wait > 0, poll until the sandbox is gone or the timeout
+        expires.  Windows allows only one sandbox at a time and wsb stop
+        returns before the old instance is fully torn down, so callers that
+        start a new sandbox right afterwards must wait.
+        """
+        running = False
         if self.backend == 'cli':
             sid = self.sandbox_id
-            if sid and sid.lower() in cli_running_ids():
+            running = bool(sid) and sid.lower() in cli_running_ids()
+            if running:
                 info(f'stopping {self.name} ({sid})')
                 wsb('stop', '--id', sid, check=False)
+                deadline = time.time() + wait
+                while wait and time.time() < deadline:
+                    time.sleep(2)
+                    if sid.lower() not in cli_running_ids():
+                        running = False
+                        break
         elif os.path.exists(self.id_file) and file_sandbox_running():
             info(f'stopping {self.name}')
             file_stop_sandbox()
+            deadline = time.time() + wait
+            while wait and time.time() < deadline:
+                time.sleep(1)
+                if not file_sandbox_running():
+                    break
+            running = file_sandbox_running()
         if os.path.exists(self.id_file):
             os.remove(self.id_file)
+        return not running
 
     def start(self, config_xml: str, logon_command: str | None):
         """Launch the sandbox; records its id (cli) or a marker (file)."""
@@ -662,7 +684,8 @@ def cmd_provision(args, backend: str, key: str):
     os.makedirs(CACHE_DIR, exist_ok=True)
     refresh_scripts()
     sandbox = Sandbox('agent_provision', backend)
-    sandbox.stop()
+    if not sandbox.stop(wait=60):
+        die('the previous sandbox did not stop; close it and try again')
     if os.path.isdir(sandbox.run_dir):
         remove_tree(sandbox.run_dir)
     prepare_run_dir(sandbox, {
@@ -695,8 +718,11 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
         die(f'payload not provisioned at {PAYLOAD_DIR}; run {sys.argv[0]} provision')
     refresh_scripts()
     # Like agent_docker.py, create and start always destroy an existing
-    # sandbox and rebuild it from the payload.
-    sandbox.stop()
+    # sandbox and rebuild it from the payload.  Windows allows only one
+    # sandbox, so wait for the old one to be fully gone before starting.
+    if not sandbox.stop(wait=60):
+        die(f'{sandbox.name} did not stop within 60 seconds; close it and '
+            'try again')
     os.makedirs(sandbox.dir, exist_ok=True)
     if os.path.isdir(sandbox.run_dir):
         remove_tree(sandbox.run_dir)
@@ -888,7 +914,8 @@ def main():  # noqa
     elif args.command in {'create', 'start'}:
         cmd_create(args, backend, key, sandbox, current_dir)
     elif args.command == 'stop':
-        sandbox.stop()
+        if not sandbox.stop():
+            die(f'{sandbox.name} did not stop within 60 seconds')
     elif args.command == 'list':
         cmd_list(backend)
     elif args.command == 'ip':
