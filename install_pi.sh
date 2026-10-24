@@ -316,6 +316,12 @@ pi install npm:@richardgill/pi-up-history
 pi install npm:@alexleekt/pi-bump
 pi install npm:@badliveware/pi-compaction-continue
 pi install npm:pi-loop-police
+UPHIST_TS="$HOME/.pi/agent/npm/node_modules/@richardgill/pi-up-history/src/extension.ts"
+sed 's/DEFAULT_MAX_PROMPTS = 30;/DEFAULT_MAX_PROMPTS = 300;/g' "$UPHIST_TS" > "$UPHIST_TS.tmp" &&
+  mv "$UPHIST_TS.tmp" "$UPHIST_TS" || {
+  rm -f "$UPHIST_TS.tmp"
+  echo "ERROR: could not patch pi-up-history prompt buffer in $UPHIST_TS" >&2
+}
 
 cat > "$BINDIR/pidev.sh" <<'EOF'
 #!/usr/bin/env bash
