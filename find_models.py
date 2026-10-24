@@ -7,6 +7,9 @@
 #     "huggingface-hub>=0.20.0",
 #     "tqdm",
 # ]
+# # skip hf-xet as not actually needed
+# [tool.uv]
+# override-dependencies = ["hf-xet; platform_machine == 'never'"]
 # ///
 
 import argparse
