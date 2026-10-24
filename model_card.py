@@ -2816,10 +2816,10 @@ def main():  # noqa
         'first_load.')
     parser.add_argument(
         '-f', '--failed-tests', '--failed',
-        choices={'false', 'partial', 'full'},
+        choices={'false', 'partial', 'full', 'passed'},
         help='Read an existing model card and run only failed tests plus '
         'first_load.  Using "full" will only rerun tests with no partial '
-        'success.')
+        'success.  Using "passed" will rerun only tests that passed.')
     parser.add_argument(
         '-r', '--require-first-load', action='store_true',
         help='If the first load fails, do not write a model card or proceed '
@@ -2959,7 +2959,10 @@ def main():  # noqa
                                   r.timestamp or '') >= after)}
             if args.failed_tests and str(args.failed_tests) != 'false':
                 known = {t.name: t for t in TEST_REGISTRY}
-                if args.failed_tests != 'full':
+                if args.failed_tests == 'passed':
+                    sel_tests &= {name for name, r in existing_results.items()
+                                  if name in known and result_passed(r)}
+                elif args.failed_tests != 'full':
                     sel_tests &= {name for name, r in existing_results.items()
                                   if name in known and not result_passed(r)}
                 else:
