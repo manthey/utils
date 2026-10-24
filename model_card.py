@@ -1880,7 +1880,8 @@ def test_decision_quality(
     answered = len(details) - sum('error' in entry for entry in details.values())
     return TestResult(
         passed=[1 if answered == len(scores) else 0, 1],
-        output='\n'.join(lines + [f'answered: {answered}/{len(scores)}']),
+        output=('\n'.join(lines + [f'answered: {answered}/{len(scores)}']) +
+                f'\nDecision quality score {score:.3f}'),
         score=score,
         details={**details, 'answered_questions': f'{answered}/{len(scores)}'},
         timestamp=get_timestamp(),
