@@ -133,7 +133,12 @@ def free_port(docker_cmd, start):
 
 
 def host_path(docker_cmd, path):
-    path = os.path.abspath(os.path.expanduser(path))
+    path = os.path.expanduser(path)
+    if path.startswith('/'):
+        # Already a posix-style path (e.g. /mnt/c/... or a WSL path);
+        # pass it through rather than converting it to a native path.
+        return path
+    path = os.path.abspath(path)
     if docker_cmd[0] == 'wsl' and path[1:2] == ':':
         path = '/mnt/' + path[0].lower() + '/' + path[2:].replace('\\', '/').lstrip('/')
     return path
@@ -325,6 +330,9 @@ def main():  # noqa
             dst = dst[len(prefix):]
             dst = container_name + ':' + (
                 dst if dst.startswith('/') else '/home/ubuntu/' + dst)
+            src = host_path(docker_cmd, src)
+        else:
+            dst = host_path(docker_cmd, dst)
         cmd = docker_cmd + ['cp', src, dst]
         logger.info(cmd)
         subprocess.check_call(cmd)
@@ -455,7 +463,8 @@ def main():  # noqa
         subprocess.run(cmd)
     if args.command in {'create', 'start'} and args.ssh:
         cmd = docker_cmd + [
-            'cp', args.ssh, container_name + ':/home/ubuntu/.ssh/authorized_keys']
+            'cp', host_path(docker_cmd, args.ssh),
+            container_name + ':/home/ubuntu/.ssh/authorized_keys']
         logger.info(cmd)
         subprocess.check_call(cmd)
         cmd = docker_cmd + [
