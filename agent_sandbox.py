@@ -9,6 +9,7 @@ r"""agent_sandbox.py - Windows Sandbox equivalent of agent_docker.py.
 """
 
 import argparse
+import asyncio
 import ctypes
 import json
 import logging
@@ -402,13 +403,22 @@ def refresh_scripts():
             die(f'{src} is missing')
 
 
-def prepare_run_dir(sandbox: Sandbox, args_dict: dict, pubkey: str):
+def prepare_run_dir(sandbox: Sandbox, args_dict: dict, pubkey: str,
+                    extra_pubkeys: list | None = None):
     """Write the provisioner's inputs into a fresh run folder."""
     os.makedirs(sandbox.run_dir, exist_ok=True)
     with open(os.path.join(sandbox.run_dir, 'args.json'), 'w') as fp:
         json.dump(args_dict, fp, indent=2)
+    # The provisioner's Set-AuthorizedKeys installs every non-empty line of
+    # this file, so --ssh keys are simply appended after the host key.
     with open(os.path.join(sandbox.run_dir, 'authorized_keys'), 'w') as fp:
         fp.write(pubkey.strip() + '\n')
+        for extra in extra_pubkeys or []:
+            fp.write(extra.strip() + '\n')
+
+
+def relay_pid_file(sandbox: Sandbox) -> str:
+    return os.path.join(sandbox.dir, 'relay.pid')
 
 
 def ensure_ssh_key(sshkey: str | None) -> str:
@@ -475,6 +485,206 @@ def require_running(sandbox: Sandbox, key: str, user: str) -> str:
         die(f'{sandbox.name} is not running; create it in the project '
             'directory (or use --src / --name)')
     return wait_ssh(sandbox, key, user, 60)
+
+
+# --ssh relay
+#
+# Windows Sandbox has no equivalent of docker's -p: the sandbox sits behind
+# the host's NAT and nothing in the configuration exposes a port.  With
+# --ssh, create/start start a small detached relay process on the host that
+# forwards a lan-reachable port to the sandbox's sshd.  It is the resident
+# piece docker's daemon would be: it lives as long as the sandbox does and
+# exits by itself as soon as the sandbox stops, however that happens
+# (agent_sandbox.py stop, wsb stop elsewhere, the sandbox window closed).
+
+
+def lan_ip() -> str:
+    """The host's lan address, so other machines know what to connect to."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        # connect() on a udp socket only sets the default destination; no
+        # packet is sent, so the target does not have to be reachable.
+        sock.connect(('8.8.8.8', 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return socket.gethostbyname(socket.gethostname())
+    finally:
+        sock.close()
+
+
+def relay_port(args) -> int:
+    """The host port for the --ssh relay.  Like agent_docker.py's
+    free_port: skip ports published by docker containers (when there is a
+    docker), then bind-test so a collision is reported here rather than
+    failing silently inside the relay.
+    """
+    used = set()
+    docker = shutil.which('docker')
+    if docker:
+        try:
+            report = subprocess.check_output(
+                [docker, 'container', 'ls', '--format', '{{.Ports}}', '-a'],
+                text=True, timeout=10, stderr=subprocess.DEVNULL)
+        except Exception:
+            report = ''
+        for entry in report.replace(',', '\n').replace('\r', '\n').split('\n'):
+            val = entry.split('->')[0].split('/')[0].split(':')[-1]
+            if not val:
+                continue
+            if '-' in val:
+                lo, hi = val.split('-')
+                used.update(range(int(lo), int(hi) + 1))
+            else:
+                used.add(int(val))
+
+    def bindable(port):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(('0.0.0.0', port))
+            return True
+        except OSError:
+            return False
+        finally:
+            sock.close()
+
+    port = args.sshport
+    while True:
+        if port not in used and bindable(port):
+            if port != args.sshport:
+                logger.warning('Using ssh port %s', port)
+            return port
+        if not args.sshfreeport:
+            die(f'--sshport {args.sshport} is not free; use --sshfreeport '
+                'to pick the next free port')
+        port += 1
+
+
+def spawn_relay(args, sandbox: Sandbox, port: int):
+    """Start the detached relay for this sandbox and record its pid."""
+    stop_relay(sandbox)
+    cmd = [sys.executable, os.path.abspath(__file__), '_relay',
+           '--name', sandbox.name, '--backend', sandbox.backend,
+           '--sshport', str(port), '--user', args.user]
+    logger.info(subprocess.list2cmdline(cmd))
+    common = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL)
+    if sys.platform == 'win32':
+        detached = 0x00000008 | 0x00000200  # DETACHED_PROCESS, new group
+        proc = subprocess.Popen(cmd, creationflags=detached, **common)
+    else:
+        proc = subprocess.Popen(cmd, start_new_session=True, **common)
+    with open(relay_pid_file(sandbox), 'w') as fp:
+        fp.write(f'{proc.pid} {port}\n')
+
+
+def relay_state(sandbox: Sandbox) -> tuple[int, int] | None:
+    """The (pid, port) of a live relay, else None.  The pid file can be
+    stale: the relay exits by itself when the sandbox stops and pids get
+    reused, so only a live process whose image is a python interpreter
+    counts.
+    """
+    pid_file = relay_pid_file(sandbox)
+    if not os.path.exists(pid_file):
+        return None
+    pid, _, port = open(pid_file).read().partition(' ')
+    if not pid.isdigit() or not port.strip().isdigit():
+        return None
+    try:
+        alive = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/NH'],
+                               capture_output=True, text=True).stdout
+    except OSError:
+        # No tasklist: cannot verify liveness, treat as not running (the
+        # relay also exits by itself when the sandbox stops).
+        return None
+    if 'python' not in alive.lower():
+        return None
+    return int(pid), int(port)
+
+
+def stop_relay(sandbox: Sandbox):
+    """Kill the sandbox's relay if one is alive; drop a stale pid file."""
+    state = relay_state(sandbox)
+    if os.path.exists(relay_pid_file(sandbox)):
+        os.remove(relay_pid_file(sandbox))
+    if state:
+        subprocess.run(['taskkill', '/F', '/PID', str(state[0])],
+                       capture_output=True)
+
+
+# The sandbox's sshd listens on the standard port inside the guest.
+GUEST_SSH_PORT = 22
+
+
+async def pipe(source: asyncio.StreamReader, sink: asyncio.StreamWriter):
+    try:
+        while chunk := await source.read(65536):
+            sink.write(chunk)
+            await sink.drain()
+    except OSError:
+        pass
+    finally:
+        sink.close()
+
+
+async def relay_connection(reader, writer, sandbox: Sandbox):
+    """Relay one lan connection to the sandbox's sshd.  The sandbox
+    address is resolved per connection, so the relay keeps working across
+    recreates at a new address (clients then see a new ssh host key).
+    """
+    peer = writer.get_extra_info('peername')
+    ip = sandbox.ip()
+    if not ip:
+        logger.info('relay from %s: %s is not running', peer, sandbox.name)
+        writer.close()
+        return
+    try:
+        upstream_reader, upstream_writer = await asyncio.open_connection(
+            ip, GUEST_SSH_PORT)
+    except OSError as exc:
+        logger.info('relay from %s: cannot reach %s:22: %s', peer, ip, exc)
+        writer.close()
+        return
+    logger.info('relay %s -> %s:22', peer, ip)
+    down = asyncio.ensure_future(pipe(upstream_reader, writer))
+    up = asyncio.ensure_future(pipe(reader, upstream_writer))
+    done, pending = await asyncio.wait({down, up},
+                                       return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
+    writer.close()
+    upstream_writer.close()
+
+
+async def serve_relay(sandbox: Sandbox, port: int):
+    """Relay a host port to the sandbox's sshd until the sandbox stops."""
+    server = await asyncio.start_server(
+        lambda reader, writer: relay_connection(reader, writer, sandbox),
+        '0.0.0.0', port)
+
+    async def watch():
+        while True:
+            await asyncio.sleep(5)
+            if not await asyncio.to_thread(sandbox.running):
+                logger.info('the sandbox is gone; the relay on port %s '
+                            'is exiting', port)
+                server.close()
+                return
+
+    watcher = asyncio.ensure_future(watch())
+    try:
+        async with server:
+            # close() cancels serve_forever, so treat that as a normal exit
+            # (the sandbox is gone) rather than letting it propagate.
+            try:
+                await server.serve_forever()
+            except asyncio.CancelledError:
+                pass
+    finally:
+        watcher.cancel()
+
+
+def cmd_relay(args, sandbox: Sandbox):
+    asyncio.run(serve_relay(sandbox, args.sshport))
 
 
 def ssh_interactive(key: str, user: str, ip: str, command: list):
@@ -687,6 +897,7 @@ def cmd_provision(args, backend: str, key: str):
     sandbox = Sandbox('agent_provision', backend)
     if not sandbox.stop(wait=60):
         die('the previous sandbox did not stop; close it and try again')
+    stop_relay(sandbox)
     if os.path.isdir(sandbox.run_dir):
         remove_tree(sandbox.run_dir)
     prepare_run_dir(sandbox, {
@@ -725,6 +936,7 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
     if not sandbox.stop(wait=60):
         die(f'{sandbox.name} did not stop within 60 seconds; close it and '
             'try again')
+    stop_relay(sandbox)
     os.makedirs(sandbox.dir, exist_ok=True)
     if os.path.isdir(sandbox.run_dir):
         remove_tree(sandbox.run_dir)
@@ -737,6 +949,12 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
     skips = []
     for s in args.skips or []:
         skips.extend(p.strip().rstrip('/').replace('/', '\\') for p in s.split(',') if p.strip())
+    extra_pubkeys = []
+    if args.ssh:
+        ssh_path = os.path.expanduser(args.ssh)
+        if not os.path.exists(ssh_path):
+            die(f'ssh key {ssh_path} not found')
+        extra_pubkeys = [line.strip() for line in open(ssh_path) if line.strip()]
     prepare_run_dir(sandbox, {
         'mode': 'create',
         'user': args.user,
@@ -746,7 +964,7 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
         'ollama': ollama_url(args.ollama),
         'copy_tools': bool(args.copy_tools),
         'debloat': bool(args.debloat),
-    }, open(key + '.pub').read())
+    }, open(key + '.pub').read(), extra_pubkeys)
     config = build_config(mappings, args.memory, args.gpu)
     command = provisioner_command('agent_sandbox_provision.ps1')
     sandbox.start(config, command if backend == 'file' else None)
@@ -757,6 +975,11 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
             f'debugging (agent_sandbox.py stop --name {sandbox.name})')
     ip = wait_ssh(sandbox, key, args.user, 120)
     info(f'{sandbox.name} is ready at {ip}')
+    if args.ssh:
+        port = relay_port(args)
+        spawn_relay(args, sandbox, port)
+        info(f'--ssh: other machines connect with ssh -p {port} '
+             f'-o StrictHostKeyChecking=accept-new {args.user}@{lan_ip()}')
     tunnel_note(args, key, ip, ollama_url(args.ollama))
     if args.claude:
         claude_in(key, args.user, ip, args.claude)
@@ -779,7 +1002,9 @@ def cmd_list(backend: str):
             state = 'running' if sid.lower() in running_ids else 'stopped'
         else:
             state = 'running' if file_running else 'stopped'
-        print(f'{entry}\t{state}\t{sandbox.ip() or ""}\t{sid}')
+        relay = relay_state(sandbox)
+        print(f'{entry}\t{state}\t{sandbox.ip() or ""}\t{sid}' +
+              (f'\trelay:{relay[1]}' if relay else ''))
 
 
 def main():  # noqa
@@ -788,7 +1013,7 @@ def main():  # noqa
     parser.add_argument(
         'command',
         choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp', 'provision', 'ip',
-                 'claudeout'],
+                 'claudeout', '_relay'],
         help='Command. create is the same as start followed by exec. start '
         'destroys an existing container, if any, and creates a new one. stop '
         'destroys the container. exec opens a shell into an existing '
@@ -799,7 +1024,8 @@ def main():  # noqa
         'include in:. provision creates the container image. ip shows the '
         'container ip. claudeout runs install_claude.sh update in the '
         'container and copies the files that changed back to the --claude '
-        'directory.')
+        'directory. _relay runs the --ssh relay; it is started by create '
+        'and start and not meant to be run directly.')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
         help='For cp: two paths, exactly one prefixed in:.  For exec: an '
@@ -827,6 +1053,22 @@ def main():  # noqa
         help='Mount a folder into the sandbox.  Recommended format is '
         'local:inside:ro, where inside is relative to the sandbox home '
         '(or ~ or a C:\\ path).')
+    parser.add_argument(
+        '--ssh',
+        help='Add the specified public key for the sandbox user and expose '
+        'ssh on a host port, like agent_docker.py --ssh.  The value is the '
+        'path to a public key file.  Unlike docker, the key is added '
+        'alongside the host key, which this script needs to reach the '
+        'sandbox itself.  A small relay process on the host forwards the '
+        'port for as long as the sandbox runs and exits when it stops.')
+    parser.add_argument(
+        '--sshport', default=2222, type=int,
+        help='The host port for the ssh relay. Default %(default)s')
+    parser.add_argument(
+        '--sshfreeport', action='store_true',
+        help='If specified, find the first free port for ssh starting at '
+        'the specified port.')
+    parser.add_argument('--no-sshfreeport', dest='sshfreeport', action='store_false')
     parser.add_argument(
         '--claude', nargs='?', const=os.path.join(SELF_DIR, 'claude'),
         type=lambda value: value or os.path.join(SELF_DIR, 'claude'),
@@ -890,11 +1132,14 @@ def main():  # noqa
         '--verbose', '-v', action='count', default=0,
         help='Increase verbosity')
     args = parser.parse_intermixed_args()
-    if args.src:
-        os.chdir(os.path.expanduser(args.src))
-    current_dir = os.path.basename(os.getcwd())
-    args = add_config(args, os.getcwd(), parser)
-
+    if args.command == '_relay':
+        # Internal command: no config merging, no chdir.
+        current_dir = ''
+    else:
+        if args.src:
+            os.chdir(os.path.expanduser(args.src))
+        current_dir = os.path.basename(os.getcwd())
+        args = add_config(args, os.getcwd(), parser)
     logger.setLevel(max(1, logging.WARNING - args.verbose * 10))
     logger.addHandler(logging.StreamHandler(sys.stderr))
     logger.debug('Parsed arguments: %r', args)
@@ -915,7 +1160,7 @@ def main():  # noqa
     name = basename + (f'_{args.num}' if args.num is not None else '')
     sandbox = Sandbox(name, backend)
     key = None
-    if args.command not in {'list', 'stop', 'ip'}:
+    if args.command not in {'list', 'stop', 'ip', '_relay'}:
         key = ensure_ssh_key(args.sshkey)
     if args.command == 'provision':
         cmd_provision(args, backend, key)
@@ -924,6 +1169,9 @@ def main():  # noqa
     elif args.command == 'stop':
         if not sandbox.stop():
             die(f'{sandbox.name} did not stop within 60 seconds')
+        stop_relay(sandbox)
+    elif args.command == '_relay':
+        cmd_relay(args, sandbox)
     elif args.command == 'list':
         cmd_list(backend)
     elif args.command == 'ip':
