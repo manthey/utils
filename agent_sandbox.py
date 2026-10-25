@@ -53,6 +53,11 @@ SCRIPTS = ('agent_sandbox_common.ps1', 'agent_sandbox_payload.ps1',
 # Windows 10 sandbox processes (the file backend has no other handle).
 SANDBOX_PROCESSES = ('WindowsSandbox.exe', 'WindowsSandboxClient.exe',
                      'WindowsSandboxRemoteSession.exe', 'WindowsSandboxServer.exe')
+# Windows-only creationflags value; 0 elsewhere so subprocess calls stay
+# portable.  Prevents console windows from flashing when this script or the
+# detached relay (which has no console at all) spawns console programs like
+# wsb.exe and tasklist.exe.
+NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 GUID_RE = re.compile(r'[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}')
 IPV4_RE = re.compile(r'\b(\d{1,3}(?:\.\d{1,3}){3})\b')
 
@@ -147,7 +152,11 @@ def wsb(*args, check=True) -> str:
     # list is polled every couple of seconds; keep it out of -v output.
     logger.log(logging.DEBUG if args[0] == 'list' else logging.INFO,
                subprocess.list2cmdline(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # CREATE_NO_WINDOW: this script and especially the detached relay have
+    # no console, and spawning a console program without it makes Windows
+    # open a visible console window on every call.
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            creationflags=NO_WINDOW)
     if check and result.returncode:
         die(f'{subprocess.list2cmdline(cmd)} failed ({result.returncode}): '
             f'{result.stdout.strip()} {result.stderr.strip()}')
@@ -169,13 +178,15 @@ def cli_ip(sandbox_id: str) -> str | None:
 
 def file_sandbox_running() -> bool:
     output = subprocess.run(
-        ['tasklist', '/FO', 'CSV', '/NH'], capture_output=True, text=True).stdout
+        ['tasklist', '/FO', 'CSV', '/NH'], capture_output=True, text=True,
+        creationflags=NO_WINDOW).stdout
     return any(f'"{name}"' in output for name in SANDBOX_PROCESSES)
 
 
 def file_stop_sandbox():
     for name in SANDBOX_PROCESSES:
-        subprocess.run(['taskkill', '/F', '/IM', name], capture_output=True)
+        subprocess.run(['taskkill', '/F', '/IM', name], capture_output=True,
+                       creationflags=NO_WINDOW)
 
 
 class Sandbox:
@@ -591,7 +602,8 @@ def relay_state(sandbox: Sandbox) -> tuple[int, int] | None:
         return None
     try:
         alive = subprocess.run(['tasklist', '/FI', f'PID eq {pid}', '/NH'],
-                               capture_output=True, text=True).stdout
+                               capture_output=True, text=True,
+                               creationflags=NO_WINDOW).stdout
     except OSError:
         # No tasklist: cannot verify liveness, treat as not running (the
         # relay also exits by itself when the sandbox stops).
@@ -608,7 +620,7 @@ def stop_relay(sandbox: Sandbox):
         os.remove(relay_pid_file(sandbox))
     if state:
         subprocess.run(['taskkill', '/F', '/PID', str(state[0])],
-                       capture_output=True)
+                       capture_output=True, creationflags=NO_WINDOW)
 
 
 # The sandbox's sshd listens on the standard port inside the guest.
