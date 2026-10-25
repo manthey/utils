@@ -1,12 +1,14 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 """install_msvc.py - install MSVC (with ATL and MFC) and the Windows SDK
 into ~/.msvc without administrator rights or the Visual Studio installer.
 
 The packages come straight from Microsoft's Visual Studio manifest: the
 compiler's .vsix packages are zip files, and the SDK's .msi packages are
-unpacked with an administrative install (msiexec /a), which needs no
-elevation.  Payload hashes from the manifest are checked.  vctip.exe, the
-compiler's usage reporter, is removed.
+unpacked like an administrative install (msiexec /a) but by reading the
+MSI tables with msi.dll and exploding the cabinets with expand.exe, so
+the Windows Installer service is not needed.  Payload hashes from the
+manifest are checked.  vctip.exe, the compiler's usage reporter, is
+removed.
 
 The compiler environment (INCLUDE, LIB, LIBPATH and PATH additions) is
 written to the user's environment in the registry, so new sessions,
@@ -19,6 +21,8 @@ https://visualstudio.microsoft.com/license-terms/vs2022-ga-diagnosticbuildtools/
 """
 
 import concurrent.futures
+import ctypes
+import ctypes.wintypes
 import hashlib
 import json
 import os
@@ -53,10 +57,16 @@ MSVC_PACKAGES = (
 )
 SDK_MSIS = (
     'Windows SDK Desktop Headers x64-x86_en-us.msi',
+    # The x64-named header MSIs only carry x64-specific files; the
+    # architecture-neutral headers (most of um and shared) ship in the
+    # x86-named packages, which an x64 install needs as well.
+    'Windows SDK Desktop Headers x86-x86_en-us.msi',
     'Windows SDK Desktop Libs x64-x86_en-us.msi',
     'Windows SDK Desktop Tools x64-x86_en-us.msi',
     'Windows SDK OnecoreUap Headers x64-x86_en-us.msi',
+    'Windows SDK OnecoreUap Headers x86-x86_en-us.msi',
     'Windows SDK for Windows Store Apps Headers-x86_en-us.msi',
+    'Windows SDK for Windows Store Apps Headers OnecoreUap-x86_en-us.msi',
     'Windows SDK for Windows Store Apps Libs-x86_en-us.msi',
     'Windows SDK for Windows Store Apps Tools-x86_en-us.msi',
     'Universal CRT Headers Libraries and Sources-x86_en-us.msi',
@@ -133,6 +143,99 @@ def download_all(payloads, folder):
         return list(pool.map(lambda payload: download(payload, folder), payloads))
 
 
+def long_name(name):
+    """The long form of an MSI 'short|long' name."""
+    return name.split('|')[-1]
+
+
+def msi_string(record, field):
+    """A field of an MSI record as a string."""
+    msi = ctypes.windll.msi
+    buffer = ctypes.create_unicode_buffer(256)
+    size = ctypes.wintypes.DWORD(len(buffer))
+    error = msi.MsiRecordGetStringW(record, field, buffer, ctypes.byref(size))
+    while error == 234:  # ERROR_MORE_DATA
+        buffer = ctypes.create_unicode_buffer(size.value + 1)
+        size.value = len(buffer)
+        error = msi.MsiRecordGetStringW(record, field, buffer, ctypes.byref(size))
+    if error != 0:
+        sys.exit(f'install_msvc: MsiRecordGetStringW failed: {error}')
+    return buffer.value
+
+
+def msi_rows(database, query):
+    """All rows of a query against an open MSI database, as string lists."""
+    msi = ctypes.windll.msi
+    view = ctypes.wintypes.HANDLE()
+    if msi.MsiDatabaseOpenViewW(database, query, ctypes.byref(view)) != 0:
+        sys.exit(f'install_msvc: MsiDatabaseOpenViewW failed: {query}')
+    if msi.MsiViewExecute(view, None) != 0:
+        msi.MsiCloseHandle(view)
+        sys.exit(f'install_msvc: MsiViewExecute failed: {query}')
+    rows = []
+    while True:
+        record = ctypes.wintypes.HANDLE()
+        error = msi.MsiViewFetch(view, ctypes.byref(record))
+        if error == 259:  # ERROR_NO_MORE_ITEMS
+            break
+        if error != 0:
+            msi.MsiCloseHandle(view)
+            sys.exit(f'install_msvc: MsiViewFetch failed: {error}')
+        rows.append([msi_string(record, field) for field in
+                     range(1, msi.MsiRecordGetFieldCount(record) + 1)])
+        msi.MsiCloseHandle(record)
+    msi.MsiCloseHandle(view)
+    return rows
+
+
+def msi_file_plan(msi_path, root):
+    """Map each cabinet of an MSI to its [(member name, target path), ...].
+
+    This replicates how an administrative install (msiexec /a) unpacks a
+    package: the directories are resolved through the Directory table
+    relative to TARGETDIR (directory properties set by AppSearch are not
+    part of the admin sequence), and the cabinet members, which are named
+    after the File table keys, are renamed to their FileName column value.
+    """
+    msi = ctypes.windll.msi
+    database = ctypes.wintypes.HANDLE()
+    if msi.MsiOpenDatabaseW(str(msi_path), 0, ctypes.byref(database)) != 0:
+        sys.exit(f'install_msvc: cannot open {msi_path}')
+    media = sorted((int(sequence), cabinet) for sequence, cabinet in
+                   msi_rows(database, 'SELECT `LastSequence`,`Cabinet` FROM `Media`')
+                   if cabinet)
+    files = [row for row in msi_rows(
+        database, 'SELECT `File`,`Component_`,`FileName`,`Sequence` FROM `File`') if row[3]]
+    component_dir = {row[0]: row[1] for row in msi_rows(
+        database, 'SELECT `Component`,`Directory_` FROM `Component`')}
+    parents = {row[0]: (row[1], row[2]) for row in msi_rows(
+        database, 'SELECT `Directory`,`Directory_Parent`,`DefaultDir` FROM `Directory`')}
+    msi.MsiCloseHandle(database)
+
+    def resolve(directory, seen=()):
+        if directory == 'TARGETDIR':
+            return root
+        if directory in seen:
+            sys.exit(f'install_msvc: directory loop at {directory} in {msi_path}')
+        parent, default = parents[directory]
+        base = resolve(parent, seen + (directory,))
+        # An administrative image uses the source part of a
+        # "target:source" default directory.
+        name = default.split(':')[-1]
+        if name in ('', '.'):
+            return base
+        return base / long_name(name)
+
+    plan = {}
+    for file_key, component, file_name, sequence in files:
+        cabinet = next((cab for last, cab in media if last >= int(sequence)), None)
+        if cabinet is None:
+            sys.exit(f'install_msvc: no cabinet covers {file_name} in {msi_path}')
+        target = resolve(component_dir[component]) / long_name(file_name)
+        plan.setdefault(cabinet, []).append((file_key, target))
+    return plan
+
+
 def extract_vsix(path):
     with zipfile.ZipFile(path) as zf:
         for info in zf.infolist():
@@ -158,14 +261,21 @@ def install_sdk(packages, sdk_package):
     for msi in msis:
         cabs.update(name.decode() for name in re.findall(rb'[0-9a-f]{32}\.cab', msi.read_bytes()))
     download_all([by_name[name] for name in sorted(cabs) if name in by_name], folder)
-    msiexec = Path(os.environ['SYSTEMROOT']) / 'System32' / 'msiexec.exe'
+    expand = Path(os.environ['SYSTEMROOT']) / 'System32' / 'expand.exe'
     for msi in msis:
         log(f'unpacking {msi.name}')
-        subprocess.run([str(msiexec), '/a', str(msi), '/quiet', '/qn',
-                        f'TARGETDIR={DEST}'], check=True)
-    # An administrative install leaves a copy of each .msi in TARGETDIR.
-    for leftover in DEST.glob('*.msi'):
-        leftover.unlink()
+        for cabinet, entries in msi_file_plan(msi, DEST).items():
+            staging = folder / 'extract' / f'{msi.stem}-{Path(cabinet).stem}'
+            staging.mkdir(parents=True, exist_ok=True)
+            subprocess.run([str(expand), '-F:*', str(folder / cabinet), str(staging)],
+                           check=True, stdout=subprocess.DEVNULL)
+            for member, target in entries:
+                source = staging / member
+                if not source.exists():
+                    sys.exit(f'install_msvc: {cabinet} lacks {member}')
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), target)
+            shutil.rmtree(staging)
 
 
 def latest_dir(parent, required=None):
