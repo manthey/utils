@@ -215,7 +215,7 @@ Invoke-Checked 'home directory extras' {
             "bind 'set bell-style none' 2>/dev/null"
         )
     }
-    Invoke-Bash $user 'git config --global user.name Sandbox && git config --global user.email sandbox@example.com' | Out-Null
+    Invoke-Bash $user 'git config --global user.name Container && git config --global user.email container@example.com' | Out-Null
     Set-HomeOwner $user $homeDir
     Remove-BootstrapKey $user
 }
