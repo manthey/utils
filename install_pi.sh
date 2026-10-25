@@ -223,21 +223,26 @@ case ":$PATH:" in
 esac
 
 cat > "$HOME/.pi/agent/extensions/global-guidelines.js" <<'EOF'
+let sessionDate = "";
 export default function addGuidelines(pi) {
-  pi.on("before_agent_start", async (event) => {
-    const datestr = new Date().toISOString().slice(0, 10);
-    const customRule = "\n\n## Global Guidelines:\n" +
-      "- Never use emojis, slang, or metaphors.\n" +
-      "- Never claim code is verified unless you have actually run it.\n" +
-      "- Always use up-to-date versions (e.g., python 3.11-3.15) when possible.\n" +
-      "- If you are in a repo with a .pre-commit-config.yaml, pre-commit must be run and pass on all generated or altered code. You may not alter hooks or ignore rules without first getting approval.\n" +
-      "- When modifying existing code, prefer small changes to major refactors unless otherwise instructed.\n" +
-      "- When testing, if there is a tox configuration, used tox to run test suites rather than manually invoking them. Running a single test without tox for faster iteration is acceptable, but tox should be used for multiple tests.\n" +
-      "- Never perform unrequested refactoring, cleanup, or structural changes. If it wasn't explicitly asked to be changed, leave it intact.\n" +
-      "- The current date is " + datestr + ". Treat this as authoritative runtime context.\n" +
-      "- Your training data may be outdated. Do not use the apparent absence of a model, package, library, API, or feature from your training data as evidence that it does not exist.\n" +
-      "- If you share any links, they must be verified as active and not returning error codes.";
-    return { systemPrompt: event.systemPrompt + customRule };
+  const stampDate = () => {
+    sessionDate = new Date().toISOString().slice(0, 10);
+  };
+  pi.on("session_start", stampDate);
+  pi.on("before_agent_start", (event) => {
+    if (!sessionDate) stampDate();
+    event.systemPromptOptions.promptGuidelines.push(
+      "Never use emojis, slang, or metaphors.",
+      "Never claim code is verified unless you have actually run it.",
+      "Always use up-to-date versions (e.g., python 3.11-3.15) when possible.",
+      "If you are in a repo with a .pre-commit-config.yaml, pre-commit must be run and pass on all generated or altered code. You may not alter hooks or ignore rules without first getting approval.",
+      "When modifying existing code, prefer small changes to major refactors unless otherwise instructed.",
+      "When testing, if there is a tox configuration, used tox to run test suites rather than manually invoking them. Running a single test without tox for faster iteration is acceptable, but tox should be used for multiple tests.",
+      "Never perform unrequested refactoring, cleanup, or structural changes. If it wasn't explicitly asked to be changed, leave it intact.",
+      `The current date is ${sessionDate}. Treat this as authoritative runtime context.`,
+      "Your training data may be outdated. Do not use the apparent absence of a model, package, library, API, or feature from your training data as evidence that it does not exist.",
+      "If you share any links, they must be verified as active and not returning error codes."
+    );
   });
 }
 EOF
