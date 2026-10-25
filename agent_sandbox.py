@@ -523,56 +523,87 @@ def lan_ip() -> str:
         sock.close()
 
 
+def docker_published_ports() -> set:
+    """Ports published by docker containers -- all of them, like
+    agent_docker.py's free_port, so a stopped agent container keeps its
+    port reserved -- or an empty set when there is no docker.
+    """
+    docker = shutil.which('docker')
+    if not docker:
+        return set()
+    try:
+        report = subprocess.check_output(
+            [docker, 'container', 'ls', '--format', '{{.Ports}}', '-a'],
+            text=True, timeout=10, stderr=subprocess.DEVNULL)
+    except Exception:
+        return set()
+    used = set()
+    for entry in report.replace(',', '\n').replace('\r', '\n').split('\n'):
+        val = entry.split('->')[0].split('/')[0].split(':')[-1]
+        if not val:
+            continue
+        if '-' in val:
+            lo, hi = val.split('-')
+            used.update(range(int(lo), int(hi) + 1))
+        else:
+            used.add(int(val))
+    return used
+
+
+def listening_ports() -> set:
+    """Host tcp ports that have a socket in the LISTEN state.
+
+    Used instead of a bind probe, which mistakes the TIME_WAIT leftovers
+    of recently closed connections (for example the previous relay
+    session) for a busy port.
+    """
+    try:
+        output = subprocess.run(['netstat', '-an'], capture_output=True,
+                                text=True, creationflags=NO_WINDOW).stdout
+    except OSError:
+        return set()
+    used = set()
+    for line in output.splitlines():
+        parts = line.split()
+        for index, part in enumerate(parts):
+            if not part.upper().startswith('LISTEN'):
+                continue
+            # The local address sits two columns before the state in the
+            # windows, linux and macos netstat layouts alike.
+            if index >= 2:
+                match = re.search(r'[\.:](\d+)$', parts[index - 2])
+                if match:
+                    used.add(int(match.group(1)))
+            break
+    return used
+
+
 def relay_port(args) -> int:
     """The host port for the --ssh relay.  Like agent_docker.py's
-    free_port: skip ports published by docker containers (when there is a
-    docker), then bind-test so a collision is reported here rather than
-    failing silently inside the relay.
+    free_port, skip ports published by docker containers; also skip ports
+    that currently have a listener.  A bind probe is deliberately not
+    used: it mistakes TIME_WAIT leftovers of recently closed connections
+    for busy ports, walking the relay's port up the range with every
+    recreate.
     """
-    used = set()
-    docker = shutil.which('docker')
-    if docker:
-        try:
-            report = subprocess.check_output(
-                [docker, 'container', 'ls', '--format', '{{.Ports}}', '-a'],
-                text=True, timeout=10, stderr=subprocess.DEVNULL)
-        except Exception:
-            report = ''
-        for entry in report.replace(',', '\n').replace('\r', '\n').split('\n'):
-            val = entry.split('->')[0].split('/')[0].split(':')[-1]
-            if not val:
-                continue
-            if '-' in val:
-                lo, hi = val.split('-')
-                used.update(range(int(lo), int(hi) + 1))
-            else:
-                used.add(int(val))
-
-    def bindable(port):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.bind(('0.0.0.0', port))
-            return True
-        except OSError:
-            return False
-        finally:
-            sock.close()
-
+    used = docker_published_ports() | listening_ports()
     port = args.sshport
-    while True:
-        if port not in used and bindable(port):
-            if port != args.sshport:
-                logger.warning('Using ssh port %s', port)
-            return port
+    while port in used:
         if not args.sshfreeport:
             die(f'--sshport {args.sshport} is not free; use --sshfreeport '
                 'to pick the next free port')
         port += 1
+    if port != args.sshport:
+        logger.warning('Using ssh port %s', port)
+    return port
 
 
 def spawn_relay(args, sandbox: Sandbox, port: int):
     """Start the detached relay for this sandbox and record its pid."""
     stop_relay(sandbox)
+    err_file = os.path.join(sandbox.dir, 'relay.err')
+    if os.path.exists(err_file):
+        os.remove(err_file)
     cmd = [sys.executable, os.path.abspath(__file__), '_relay',
            '--name', sandbox.name, '--backend', sandbox.backend,
            '--sshport', str(port), '--user', args.user]
@@ -586,6 +617,20 @@ def spawn_relay(args, sandbox: Sandbox, port: int):
         proc = subprocess.Popen(cmd, start_new_session=True, **common)
     with open(relay_pid_file(sandbox), 'w') as fp:
         fp.write(f'{proc.pid} {port}\n')
+    # The relay is detached with nowhere to complain, so wait until it is
+    # listening and surface failures here, at create time.
+    deadline = time.time() + 10
+    while True:
+        if proc.poll() is not None:
+            detail = ''
+            if os.path.exists(err_file):
+                detail = ' (' + open(err_file, errors='replace').read().strip() + ')'
+            die(f'the ssh relay exited immediately{detail}')
+        if port in listening_ports():
+            return
+        if time.time() >= deadline:
+            die(f'the ssh relay did not start listening on port {port}')
+        time.sleep(0.5)
 
 
 def relay_state(sandbox: Sandbox) -> tuple[int, int] | None:
@@ -669,9 +714,19 @@ async def relay_connection(reader, writer, sandbox: Sandbox):
 
 async def serve_relay(sandbox: Sandbox, port: int):
     """Relay a host port to the sandbox's sshd until the sandbox stops."""
+    # Bind by hand rather than through start_server's host/port shortcut:
+    # rebinding while old connections linger in TIME_WAIT needs
+    # SO_REUSEADDR, and asyncio sets it on posix but deliberately not on
+    # windows, where a fresh relay after a recreate would otherwise fail
+    # to bind until the old connections time out.  relay_port has already
+    # checked that nothing is listening on the port, so reuse is safe.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('0.0.0.0', port))
+    sock.listen()
     server = await asyncio.start_server(
         lambda reader, writer: relay_connection(reader, writer, sandbox),
-        '0.0.0.0', port)
+        sock=sock)
 
     async def watch():
         while True:
@@ -696,7 +751,18 @@ async def serve_relay(sandbox: Sandbox, port: int):
 
 
 def cmd_relay(args, sandbox: Sandbox):
-    asyncio.run(serve_relay(sandbox, args.sshport))
+    try:
+        asyncio.run(serve_relay(sandbox, args.sshport))
+    except OSError as exc:
+        # The relay is detached with nowhere to complain; leave the error
+        # where spawn_relay's readiness check and the user can find it.
+        try:
+            with open(os.path.join(sandbox.dir, 'relay.err'), 'w') as fp:
+                fp.write(f'{exc}\n')
+        except OSError:
+            pass
+        msg = f'agent_sandbox: relay failed: {exc}'
+        raise SystemExit(msg)
 
 
 def ssh_interactive(key: str, user: str, ip: str, command: list):
