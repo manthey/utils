@@ -11,7 +11,8 @@
 #   tools\node\       portable node 22 (pi's runtime)
 #   tools\python\3.x\ python.org builds (NuGet packages) with pip; the
 #                     newest also has tox, pre-commit and virtualenv
-#   tools\bin\        uv.exe, uvx.exe, jq.exe, rg.exe, fd.exe
+#   tools\bin\        uv.exe, uvx.exe, jq.exe, rg.exe, fd.exe,
+#                     psmux.exe (exposed as tmux), pmux.exe
 #   tools\openssh\    Win32-OpenSSH (sshd for the sandbox)
 #   home\             the sandbox user's home after install_pi.sh ran in it
 #                     (pi, its extensions and config, helper scripts, .bashrc)
@@ -112,7 +113,7 @@ Invoke-Checked 'node' {
 }
 
 # --- single-file tools
-Invoke-Checked 'uv, jq, ripgrep, fd, hadolint' {
+Invoke-Checked 'uv, jq, ripgrep, fd, hadolint, psmux' {
     $bin = Join-Path $script:Tools 'bin'
     $asset = Get-GitHubAsset 'astral-sh/uv' '^uv-x86_64-pc-windows-msvc\.zip$'
     Expand-Zip (Get-File $asset.Url 'uv.zip') (Join-Path $dl 'uv')
@@ -137,6 +138,20 @@ Invoke-Checked 'uv, jq, ripgrep, fd, hadolint' {
     $asset = Get-GitHubAsset 'hadolint/hadolint' '^hadolint-Windows-x86_64\.exe$'
     Copy-Item (Get-File $asset.Url 'hadolint.exe') (Join-Path $bin 'hadolint.exe') -Force
     $script:versions += "hadolint: $($asset.Tag)"
+
+    # psmux: native tmux for Windows (Rust).  The release zip already ships
+    # psmux, pmux and tmux; when a release only ships psmux.exe, expose it
+    # as tmux by copying so both commands always work.
+    $asset = Get-GitHubAsset 'psmux/psmux' '^psmux-v.*-windows-x64\.zip$'
+    Expand-Zip (Get-File $asset.Url 'psmux.zip') (Join-Path $dl 'psmux')
+    foreach ($name in 'psmux.exe', 'pmux.exe', 'tmux.exe') {
+        $source = Find-File (Join-Path $dl 'psmux') $name
+        Copy-Item $source $bin -Force
+    }
+    if (-not (Test-Path (Join-Path $bin 'tmux.exe'))) {
+        Copy-Item (Join-Path $bin 'psmux.exe') (Join-Path $bin 'tmux.exe') -Force
+    }
+    $script:versions += "psmux: $($asset.Tag)"
 }
 
 # --- Win32-OpenSSH
