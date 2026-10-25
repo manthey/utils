@@ -47,7 +47,8 @@ GUEST_RUN = r'C:\mnt\run'
 GUEST_PROJECT = r'C:\mnt\project'
 GUEST_CACHE = r'C:\mnt\cache'
 SCRIPTS = ('agent_sandbox_common.ps1', 'agent_sandbox_payload.ps1',
-           'agent_sandbox_provision.ps1', 'install_pi.sh', '.vimrc', 'cover.py')
+           'agent_sandbox_provision.ps1', 'install_msvc.py', 'install_pi.sh',
+           '.vimrc', 'cover.py')
 # Windows 10 sandbox processes (the file backend has no other handle).
 SANDBOX_PROCESSES = ('WindowsSandbox.exe', 'WindowsSandboxClient.exe',
                      'WindowsSandboxRemoteSession.exe', 'WindowsSandboxServer.exe')

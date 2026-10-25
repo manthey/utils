@@ -94,6 +94,11 @@ Invoke-Checked 'linking mounted folders' {
         }
         Log "linked $target -> $guest ($(if ($mount.readonly) { 'ro' } else { 'rw' }))"
     }
+    $msvc = Join-Path $script:Payload 'scripts\install_msvc.py'
+    if (Test-Path $msvc) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $homeDir '.local\bin') | Out-Null
+        Copy-Item $msvc (Join-Path $homeDir '.local\bin\install_msvc.py') -Force
+    }
     $vimrc = Join-Path $script:RunDir 'vimrc'
     if (Test-Path $vimrc) {
         Copy-Item $vimrc (Join-Path $homeDir '.vimrc') -Force
