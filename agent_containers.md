@@ -269,7 +269,8 @@ host never executes any of the downloaded tools. The sandbox fetches:
 - PortableGit (bash, git, vim, ssh client)
 - node 22 (pi's runtime)
 - python 3.10-3.15 as python.org NuGet builds (`--pythons` to change),
-  with pip; the newest also gets tox, pre-commit and virtualenv
+  with pip; the default (`--default-python`, 3.14) also gets tox,
+  pre-commit and virtualenv and is first on PATH
 - uv, jq, ripgrep, fd
 - Win32-OpenSSH (the sandbox's sshd)
 

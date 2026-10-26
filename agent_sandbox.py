@@ -982,6 +982,7 @@ def cmd_provision(args, backend: str, key: str):
         'mode': 'provision',
         'user': args.user,
         'pythons': args.pythons.split(','),
+        'default_python': args.default_python,
         'pip_tools': ['tox', 'pre-commit', 'virtualenv'],
         'cache': args.cache,
         'debloat': bool(args.debloat),
@@ -1181,6 +1182,11 @@ def main():  # noqa
     parser.add_argument(
         '--pythons', default='3.10,3.11,3.12,3.13,3.14,3.15',
         help='provision: python minor versions to include.  Default %(default)s')
+    parser.add_argument(
+        '--default-python', default='3.14',
+        help='provision: python minor version first on PATH and holding tox, '
+        'pre-commit and virtualenv; the newest is used if it is not '
+        'installed.  Default %(default)s')
     parser.add_argument(
         '--copy-tools', action='store_true', default=True,
         help='Copy the toolchain to C:\\tools in the sandbox (default) rather '

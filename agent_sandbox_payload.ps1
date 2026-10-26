@@ -10,7 +10,8 @@
 #   tools\git\        PortableGit (bash, vim, ssh client)
 #   tools\node\       portable node 22 (pi's runtime)
 #   tools\python\3.x\ python.org builds (NuGet packages) with pip; the
-#                     newest also has tox, pre-commit and virtualenv
+#                     default (default.txt, else the newest) also has tox,
+#                     pre-commit and virtualenv and is first on PATH
 #   tools\bin\        uv.exe, uvx.exe, jq.exe, rg.exe, fd.exe,
 #                     psmux.exe (exposed as tmux), pmux.exe
 #   tools\openssh\    Win32-OpenSSH (sshd for the sandbox)
@@ -27,6 +28,7 @@ $runArgs = $null
 Invoke-Checked 'reading arguments' { $script:runArgs = Read-RunArgs }
 $runArgs = $script:runArgs
 $pythons = @(Get-ArgOr $runArgs 'pythons' @('3.12'))
+$defaultPython = Get-ArgOr $runArgs 'default_python' ''
 $pipTools = @(Get-ArgOr $runArgs 'pip_tools' @())
 $user = Get-ArgOr $runArgs 'user' 'agent'
 $useCache = [bool](Get-ArgOr $runArgs 'cache' $true)
@@ -188,11 +190,17 @@ Invoke-Checked "pythons $($pythons -join ', ')" {
         & $exe -m compileall -q (Join-Path $dest 'Lib') 2>&1 | Out-Null
         $script:versions += "python: $full"
     }
-    $newest = Get-NewestPython
-    if (-not $newest) { throw 'no python was installed' }
+    if ($defaultPython) {
+        Set-Content -Path (Join-Path $root 'default.txt') -Value $defaultPython -Encoding ascii
+    }
+    $default = Get-DefaultPython
+    if (-not $default) { throw 'no python was installed' }
+    if ($defaultPython -and (Split-Path -Leaf $default) -ne $defaultPython) {
+        Log "WARNING: default python $defaultPython is not installed; using $default"
+    }
     if ($pipTools.Count -gt 0) {
-        Log "installing $($pipTools -join ', ') into $newest"
-        & (Join-Path $newest 'python.exe') -m pip install --quiet --no-warn-script-location @pipTools 2>&1 | ForEach-Object { Write-Host $_ }
+        Log "installing $($pipTools -join ', ') into $default"
+        & (Join-Path $default 'python.exe') -m pip install --quiet --no-warn-script-location @pipTools 2>&1 | ForEach-Object { Write-Host $_ }
         if ($LASTEXITCODE -ne 0) { throw 'pip install of the tools failed' }
     }
 }

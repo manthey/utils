@@ -81,15 +81,15 @@ function Copy-Tree([string]$Source, [string]$Dest, [string[]]$ExcludeDirs = @(),
 }
 
 function Get-ToolPaths {
-    $newest = Get-NewestPython
+    $default = Get-DefaultPython
     $paths = @(
         (Join-Path $script:Tools 'git\cmd'),
         (Join-Path $script:Tools 'node'),
         (Join-Path $script:Tools 'bin'),
         $script:SshdDir
     )
-    if ($newest) {
-        $paths += @($newest, (Join-Path $newest 'Scripts'))
+    if ($default) {
+        $paths += @($default, (Join-Path $default 'Scripts'))
     }
     return $paths
 }
@@ -101,9 +101,16 @@ function Get-PythonDirs {
         Sort-Object { [version]$_.Name } | ForEach-Object { $_.FullName })
 }
 
-function Get-NewestPython {
+function Get-DefaultPython {
+    # The version named in tools\python\default.txt (written by the payload
+    # build), else the newest.
     $dirs = @(Get-PythonDirs)
     if ($dirs.Count -eq 0) { return $null }
+    $marker = Join-Path $script:Tools 'python\default.txt'
+    if (Test-Path $marker) {
+        $dir = Join-Path $script:Tools "python\$((Get-Content $marker -TotalCount 1).Trim())"
+        if ($dirs -contains $dir) { return $dir }
+    }
     return $dirs[-1]
 }
 
