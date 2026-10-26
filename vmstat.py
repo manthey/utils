@@ -793,7 +793,7 @@ def wait_until(deadline):
     time.sleep(max(0.0, deadline - time.monotonic()))
 
 
-def run_vm(args, sampler):
+def run_vm(args, sampler):  # noqa
     columns = vm_columns(args.wide, args.active, args.timestamp, args.extended)
     unit = UNITS[args.unit]
     cur = sampler.sample()
@@ -815,14 +815,47 @@ def run_vm(args, sampler):
         values = pick(values, keep)
         size = terminal_size()
         available, height = size
-        candidate = layout(columns, [values], available)
-        grew = (
-            widths is not None and
-            available is not None and
-            any(new > old for new, old in zip(candidate, widths, strict=True))
-        )
+
+        if widths is None:
+            # Compute natural column widths.
+            natural_widths = []
+            for idx, col in enumerate(columns):
+                max_data = max((len(plain(values[idx]))), 1)
+                if col.scalable:
+                    natural = max(col.preferred, col.minimum, len(col.name), max_data)
+                else:
+                    natural = max(col.minimum + len(col.name), max_data)
+                natural_widths.append(natural)
+            total_needed = sum(natural_widths) + len(columns) - 1
+            if available is not None and total_needed <= available:
+                # Data fits; lock these natural widths, no layout needed
+                candidate = natural_widths
+            else:
+                candidate = layout(columns, [values], available)
+        elif size != shown_size:
+            # Terminal resized.  Check if natural widths now fit.
+            natural_widths = []
+            for idx, col in enumerate(columns):
+                max_data = max((len(plain(values[idx]))), 1)
+                if col.scalable:
+                    natural = max(col.preferred, col.minimum, len(col.name), max_data)
+                else:
+                    natural = max(col.minimum + len(col.name), max_data)
+                natural_widths.append(natural)
+            total_needed = sum(natural_widths) + len(columns) - 1
+            if available is not None and total_needed <= available:
+                candidate = natural_widths
+            else:
+                candidate = layout(columns, [values], available)
+        else:
+            # No resize. Don't re-layout on every data change
+            candidate = list(widths)
         page_full = height is not None and since_header >= max(height - 2, 1)
-        if widths is None or (not args.one_header and (size != shown_size or grew or page_full)):
+        if widths is None or (not args.one_header and (
+            size != shown_size or
+            any(new > old for new, old in zip(candidate, widths, strict=True)) or
+            page_full
+        )):
             widths, shown_size = candidate, size
             print(render_header(columns, widths))
             since_header = 0
