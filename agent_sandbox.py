@@ -1179,7 +1179,7 @@ def main():  # noqa
         help='cli: wsb.exe (Windows 11 24H2+); file: .wsb file launch '
         '(Windows 10).  Default: cli when wsb.exe is on PATH.')
     parser.add_argument(
-        '--pythons', default='3.10,3.11,3.12,3.13,3.14',
+        '--pythons', default='3.10,3.11,3.12,3.13,3.14,3.15',
         help='provision: python minor versions to include.  Default %(default)s')
     parser.add_argument(
         '--copy-tools', action='store_true', default=True,
