@@ -16,8 +16,8 @@
 #   list       list known sandboxes
 #   ip         print the VM IP
 #   cp         copy files to/from the VM; one endpoint prefixed in:
-#   claudeout  run install_claude.sh update in the VM and copy the
-#              files that changed back to the --claude directory
+#   claudeout  merge the Claude Code state in the VM into the --claude
+#              directory (several VMs can share one)
 #
 # --claude=DIR names a local .claude-persist directory (containing
 # install_claude.sh; --claude= means the claude directory next to this
@@ -664,9 +664,9 @@ set_ollama_url() {
     run_ssh "$vm" "set_ollama.sh '$url'"
 }
 
-# Copy the --claude directory to ~/.claude-persist in the VM and run its
-# install_claude.sh. COPYFILE_DISABLE keeps macOS tar from adding ._ files.
-claude_in() {
+# Copy the --claude directory to ~/.claude-persist in the VM.
+# COPYFILE_DISABLE keeps macOS tar from adding ._ files.
+claude_copy() {
     local vm="$1"
     [ -f "$CLAUDE_DIR/install_claude.sh" ] || die "$CLAUDE_DIR does not contain install_claude.sh"
     info "copying $CLAUDE_DIR to $vm:~/.claude-persist"
@@ -674,14 +674,24 @@ claude_in() {
         run_ssh "$vm" "mkdir -p ~/.claude-persist && tar -xf - -C ~/.claude-persist"
     local codes=("${PIPESTATUS[@]}")
     [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ] || die "copying $CLAUDE_DIR failed"
+}
+
+# Copy the --claude directory to ~/.claude-persist in the VM and run its
+# install_claude.sh.
+claude_in() {
+    local vm="$1"
+    claude_copy "$vm"
     run_ssh "$vm" "bash ~/.claude-persist/install_claude.sh" ||
         info "install_claude.sh failed"
 }
 
-# Run install_claude.sh update in the VM and copy ~/.claude-outbox back to
-# the --claude directory; install_claude.sh puts the files it changed there.
+# Copy the current --claude directory to the VM again (other VMs may have
+# saved state since this one started), run install_claude.sh update there to
+# merge the VM's state into it, and copy ~/.claude-outbox back to the
+# --claude directory; install_claude.sh puts the files it changed there.
 claude_out() {
     local vm="$1"
+    claude_copy "$vm"
     run_ssh "$vm" "bash ~/.claude-persist/install_claude.sh update" ||
         die "install_claude.sh update failed"
     mkdir -p "$CLAUDE_DIR"

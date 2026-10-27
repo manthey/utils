@@ -6,10 +6,10 @@
 # Usage: install_claude.sh [install|update]
 #   install (default)  install Claude Code and copy the persisted state from
 #                      ~/.claude-persist into ~/.claude and ~/.claude.json
-#   update             copy the state that changed in the sandbox back to
-#                      ~/.claude-persist, and put just the changed files in
-#                      ~/.claude-outbox (the host's claudeout then copies
-#                      that folder out)
+#   update             merge or copy the state that changed in the sandbox
+#                      back to ~/.claude-persist, and put just the changed
+#                      files in ~/.claude-outbox (the host's claudeout then
+#                      copies that folder out)
 #
 # Supported: linux, macOS, and windows under Git Bash (the agent sandbox).
 set -euo pipefail
@@ -20,6 +20,19 @@ set -euo pipefail
 # ~/.claude.json (onboarding, project trust, /config choices).
 PERSIST="$HOME/.claude-persist"
 ENTRIES=(CLAUDE.md settings.json rules projects history.jsonl .credentials.json)
+# Several sandboxes can run at once from the same host folder, so update
+# merges the files every session changes instead of replacing them: the
+# prompt history is the union of both sides' lines, and the two settings
+# files get a three-way merge where a key changed in the sandbox wins, a key
+# changed only on the host is kept, and lists (permissions) are unioned.
+# ~/.claude-base holds the sandbox's copies as of the last install or update
+# and is the base of those merges. The host's claudeout refreshes
+# ~/.claude-persist from the host folder before running update, so the
+# merge sees what other sandboxes have saved since; without that refresh
+# the merge just reproduces the sandbox's files. Everything else (CLAUDE.md,
+# rules, projects, the login) is copied when the sandbox's file is newer.
+BASE="$HOME/.claude-base"
+MERGED=(history.jsonl settings.json)
 # Set by update: every file copied into $PERSIST is also put here, so the host
 # only has to copy what changed.
 OUTBOX=""
@@ -47,9 +60,86 @@ copy_newer() {
   fi
 }
 
+# Union of two prompt histories: the host's lines, plus the lines the sandbox
+# added (in its history but not in the copy it started from), sorted by time.
+# Lines the host dropped are not brought back.
+merge_history() {
+  local base="$1" mine="$2" theirs="$3"
+  jq -nc --slurpfile base "$base" --slurpfile mine "$mine" --slurpfile theirs "$theirs" \
+    '$theirs + ($mine - $base) | unique | sort_by(.timestamp? // 0) | .[]'
+}
+
+# Three-way merge of two settings files (JSON objects), key by key: a key
+# only one side changed takes that side's value (including a deletion), a
+# key both changed takes the sandbox's, nested objects recurse, and lists
+# become the union minus what either side removed.
+merge_settings() {
+  local base="$1" mine="$2" theirs="$3"
+  jq -n --slurpfile base "$base" --slurpfile mine "$mine" --slurpfile theirs "$theirs" '
+    def merge3($b; $m; $t):
+      if $m == $t then $m
+      elif $m == $b then $t
+      elif $t == $b then $m
+      elif ($m | type) == "object" and ($t | type) == "object" then
+        ($b | if type == "object" then . else {} end) as $bo
+        | reduce (($t + $m) | keys_unsorted[]) as $k ({};
+            if ($m | has($k)) and ($t | has($k)) then
+              .[$k] = merge3($bo[$k]; $m[$k]; $t[$k])
+            elif ($m | has($k)) then
+              if ($bo | has($k)) and $m[$k] == $bo[$k] then . else .[$k] = $m[$k] end
+            else
+              if ($bo | has($k)) and $t[$k] == $bo[$k] then . else .[$k] = $t[$k] end
+            end)
+      elif ($m | type) == "array" and ($t | type) == "array" then
+        ($b | if type == "array" then . else [] end) as $ba
+        | reduce ($t + $m)[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end)
+        | . - ($ba - $m) - ($ba - $t)
+      else $m end;
+    merge3($base[0]; $mine[0]; $theirs[0])'
+}
+
+# Merge the sandbox's copy of a file ($2) into the persisted one ($3) with
+# merge_$1, using the copy in $BASE as the base, and stage the result when it
+# differs from what was persisted. If the files cannot be parsed, fall back
+# to copying the sandbox's file when it is newer.
+merge_file() {
+  local kind="$1" mine="$2" theirs="$3" base tmp
+  base="$BASE/$(basename "$3")"
+  [ -s "$mine" ] || return 0
+  [ -s "$base" ] || base=/dev/null
+  [ -s "$theirs" ] || theirs=/dev/null
+  tmp="$(mktemp)"
+  if ! "merge_$kind" "$base" "$mine" "$theirs" > "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "Could not merge $(basename "$3"); copying it instead" >&2
+    copy_newer "$mine" "$3"
+    return 0
+  fi
+  if ! cmp -s "$tmp" "$theirs"; then
+    (umask 077; cp "$tmp" "$3")
+    chmod 600 "$3"
+    stage "$3"
+    echo "Merged $(basename "$3") into $(dirname "$3")"
+  fi
+  rm -f "$tmp"
+}
+
+# Record the sandbox's current copies of the merged files as the base for the
+# next update.
+save_base() {
+  local f
+  rm -rf "$BASE"
+  (umask 077; mkdir -p "$BASE")
+  for f in "${MERGED[@]/#/$HOME/.claude/}" "$HOME/.claude.json"; do
+    [ -s "$f" ] && cp -p "$f" "$BASE/$(basename "$f")"
+  done
+  return 0
+}
+
 # Copy each entry from one ~/.claude-like folder to another; directories are
 # merged. A third argument "force" copies files even when they are older;
-# without it, only files in a directory that are new or newer are copied.
+# without it, only files in a directory that are new or newer are copied,
+# and the files in MERGED are merged rather than copied.
 copy_entries() {
   local from="$1" to="$2" force="${3:-}" entry
   mkdir -p "$to"
@@ -57,6 +147,8 @@ copy_entries() {
     # Already the same file (linked by an older version of this script).
     if [ "$from/$entry" -ef "$to/$entry" ]; then
       continue
+    elif [ -z "$force" ] && [[ " ${MERGED[*]} " == *" $entry "* ]]; then
+      merge_file "${entry%.*}" "$from/$entry" "$to/$entry"
     elif [ -d "$from/$entry" ] && [ -n "$force" ]; then
       mkdir -p "$to/$entry"
       cp -a "$from/$entry/." "$to/$entry/"
@@ -81,7 +173,8 @@ case "${1:-install}" in
     rm -rf "$OUTBOX"
     (umask 077; mkdir -p "$OUTBOX")
     copy_entries "$HOME/.claude" "$PERSIST"
-    copy_newer "$HOME/.claude.json" "$PERSIST/.claude.json"
+    merge_file settings "$HOME/.claude.json" "$PERSIST/.claude.json"
+    save_base
     exit 0
     ;;
   *) echo "Usage: $0 [install|update]" >&2; exit 2 ;;
@@ -146,5 +239,6 @@ esac
 [ -s "$HOME/.claude.json" ] || echo '{}' > "$HOME/.claude.json"
 jq '.hasCompletedOnboarding = true' "$HOME/.claude.json" > "$HOME/.claude.json.tmp" &&
   mv "$HOME/.claude.json.tmp" "$HOME/.claude.json"
+save_base
 
 echo "Done. $("$BINDIR/claude" --version)"

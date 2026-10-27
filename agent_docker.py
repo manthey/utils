@@ -144,9 +144,9 @@ def host_path(docker_cmd, path):
     return path
 
 
-def claude_in(docker_cmd, container_name, claude_dir):
-    """Copy a .claude-persist directory into the container and run its
-    install_claude.sh.
+def claude_copy(docker_cmd, container_name, claude_dir):
+    """Copy a .claude-persist directory into the container as
+    ~/.claude-persist and return that path.
     """
     if not os.path.isfile(os.path.join(os.path.expanduser(claude_dir), 'install_claude.sh')):
         msg = f'{claude_dir} does not contain install_claude.sh'
@@ -158,6 +158,14 @@ def claude_in(docker_cmd, container_name, claude_dir):
     cmd = docker_cmd + ['exec', '--user', 'root', container_name, 'chown', '-R', '1000:1000', dst]
     logger.info(cmd)
     subprocess.check_call(cmd)
+    return dst
+
+
+def claude_in(docker_cmd, container_name, claude_dir):
+    """Copy a .claude-persist directory into the container and run its
+    install_claude.sh.
+    """
+    dst = claude_copy(docker_cmd, container_name, claude_dir)
     cmd = docker_cmd + ['exec', '-i', container_name, 'bash', f'{dst}/install_claude.sh']
     logger.info(cmd)
     if subprocess.run(cmd).returncode:
@@ -165,10 +173,13 @@ def claude_in(docker_cmd, container_name, claude_dir):
 
 
 def claude_out(docker_cmd, container_name, claude_dir):
-    """Run install_claude.sh update in the container and copy the files it
-    changed, which it puts in ~/.claude-outbox, back out.
+    """Copy the current .claude-persist directory into the container again
+    (other containers may have saved state since this one started), run
+    install_claude.sh update there to merge the container's state into it,
+    and copy the files it changed, which it puts in ~/.claude-outbox, back
+    out.
     """
-    src = '/home/ubuntu/.claude-persist'
+    src = claude_copy(docker_cmd, container_name, claude_dir)
     cmd = docker_cmd + ['exec', '-i', container_name, 'bash', f'{src}/install_claude.sh', 'update']
     logger.info(cmd)
     subprocess.check_call(cmd)
@@ -216,9 +227,9 @@ def main():  # noqa
         'in a container. list shows running containers. cp copies into or out '
         'of a container via cp <src> <dest>, where the path inside the '
         'container is prefixed with in: and exactly one of src and dest must '
-        'include in:. provision creates the container image. claudeout runs '
-        'install_claude.sh update in the container and copies the files '
-        'that changed back to the --claude directory.')
+        'include in:. provision creates the container image. claudeout '
+        'merges the Claude Code state in the container into the --claude '
+        'directory (several containers can share one).')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
         help='For cp: two paths, exactly one prefixed in:.  Relative '

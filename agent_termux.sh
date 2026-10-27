@@ -26,8 +26,8 @@
 #   update     apply --ollama to a running sandbox
 #   list       list known sandboxes
 #   cp         copy files to/from the sandbox; one endpoint prefixed in:
-#   claudeout  run install_claude.sh update in the sandbox and copy the
-#              files that changed back to the --claude directory
+#   claudeout  merge the Claude Code state in the sandbox into the --claude
+#              directory (several sandboxes can share one)
 #
 # --claude=DIR names a local .claude-persist directory (containing
 # install_claude.sh; --claude= means the claude directory next to this
@@ -478,24 +478,33 @@ restore_git_modes() {
     fi
 }
 
-# Copy the --claude directory to ~/.claude-persist in the sandbox and run its
-# install_claude.sh. The rootfs is a plain directory, so the copy happens on
-# the host side.
-claude_in() {
+# Copy the --claude directory to ~/.claude-persist in the sandbox. The rootfs
+# is a plain directory, so the copy happens on the host side.
+claude_copy() {
     local vm="$1"
     local dst
     dst="$(guest_root "$vm")$GUEST_HOME/.claude-persist"
     [ -f "$CLAUDE_DIR/install_claude.sh" ] || die "$CLAUDE_DIR does not contain install_claude.sh"
     info "copying $CLAUDE_DIR to $vm:~/.claude-persist"
     mkdir -p "$dst" && cp -a "$CLAUDE_DIR/." "$dst/" || die "copying $CLAUDE_DIR failed"
+}
+
+# Copy the --claude directory to ~/.claude-persist in the sandbox and run its
+# install_claude.sh.
+claude_in() {
+    local vm="$1"
+    claude_copy "$vm"
     launch_proot "$vm" -c "bash ~/.claude-persist/install_claude.sh" ||
         info "install_claude.sh failed"
 }
 
-# Run install_claude.sh update in the sandbox and copy ~/.claude-outbox back
+# Copy the current --claude directory to the sandbox again (other sandboxes
+# may have saved state since this one started), run install_claude.sh update
+# there to merge the sandbox's state into it, and copy ~/.claude-outbox back
 # to the --claude directory; install_claude.sh puts the files it changed there.
 claude_out() {
     local vm="$1"
+    claude_copy "$vm"
     launch_proot "$vm" -c "bash ~/.claude-persist/install_claude.sh update" ||
         die "install_claude.sh update failed"
     mkdir -p "$CLAUDE_DIR"

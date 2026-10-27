@@ -68,10 +68,19 @@ Common options (support varies slightly per platform):
   directory next to the script. Without `--claude`, Claude is not
   installed (`--no-claude` cancels one from the config file).
   `create`/`start` copy its contents to `~/.claude-persist` in the sandbox and run `install_claude.sh` there
-  before shelling in; `claudeout` runs `install_claude.sh update` in the
-  sandbox and copies the files it changed (staged in `~/.claude-outbox`)
-  back into `DIR`. This keeps
-  Claude Code out of the provisioned images.
+  before shelling in; `claudeout` copies the current contents of `DIR` in
+  again, runs `install_claude.sh update` in the sandbox, and copies the
+  files it changed (staged in `~/.claude-outbox`) back into `DIR`. `update`
+  merges rather than replaces the files every session changes, so several
+  sandboxes (for example one per source directory) can share one `DIR` and
+  each `claudeout` keeps what the others saved: the prompt history
+  (`history.jsonl`) becomes the union of both sides, and `settings.json` and
+  `.claude.json` get a key-by-key three-way merge against the copy the
+  sandbox started from (a key changed in the sandbox wins, a key changed
+  only on the host is kept, lists such as permissions are unioned). The
+  other persisted files (`CLAUDE.md`, `rules/`, `projects/`, the login) are
+  copied when the sandbox's copy is newer. Run `claudeout` for one sandbox
+  at a time. This keeps Claude Code out of the provisioned images.
 - `--sshkey`: which public key authorizes the host (default
   `~/.ssh/id_ed25519.pub`, then `id_ecdsa`, `id_rsa`; generated if none
   exists).

@@ -800,10 +800,8 @@ def do_cp(key: str, user: str, ip: str, src: str, dst: str):
         die(f'scp failed ({result.returncode})')
 
 
-def claude_in(key: str, user: str, ip: str, claude_dir: str):
-    """Copy a .claude-persist directory into the sandbox and run its
-    install_claude.sh.
-    """
+def claude_copy(key: str, user: str, ip: str, claude_dir: str):
+    """Copy a .claude-persist directory into the sandbox as ~/.claude-persist."""
     claude_dir = os.path.expanduser(claude_dir)
     if not os.path.isfile(os.path.join(claude_dir, 'install_claude.sh')):
         die(f'{claude_dir} does not contain install_claude.sh')
@@ -817,6 +815,13 @@ def claude_in(key: str, user: str, ip: str, claude_dir: str):
             'mkdir -p ~/.claude-persist && tar -xf - -C ~/.claude-persist'], stdin=fp)
     if result.returncode:
         die('copying the claude directory failed')
+
+
+def claude_in(key: str, user: str, ip: str, claude_dir: str):
+    """Copy a .claude-persist directory into the sandbox and run its
+    install_claude.sh.
+    """
+    claude_copy(key, user, ip, claude_dir)
     result = run(['ssh'] + ssh_base(key) + [
         f'{user}@{ip}', 'bash ~/.claude-persist/install_claude.sh'])
     if result.returncode:
@@ -824,9 +829,12 @@ def claude_in(key: str, user: str, ip: str, claude_dir: str):
 
 
 def claude_out(key: str, user: str, ip: str, claude_dir: str):
-    """Run install_claude.sh update in the sandbox and copy the files it
-    changed, which it puts in ~/.claude-outbox, back out.
+    """Copy the current .claude-persist directory into the sandbox again
+    (other sandboxes may have saved state since this one started), run
+    install_claude.sh update there to merge the sandbox's state into it, and
+    copy the files it changed, which it puts in ~/.claude-outbox, back out.
     """
+    claude_copy(key, user, ip, claude_dir)
     claude_dir = os.path.expanduser(claude_dir)
     result = run(['ssh'] + ssh_base(key) + [
         f'{user}@{ip}', 'bash ~/.claude-persist/install_claude.sh update'])
@@ -1104,9 +1112,9 @@ def main():  # noqa
         'of a container via cp <src> <dest>, where the path inside the '
         'container is prefixed with in: and exactly one of src and dest must '
         'include in:. provision creates the container image. ip shows the '
-        'container ip. claudeout runs install_claude.sh update in the '
-        'container and copies the files that changed back to the --claude '
-        'directory. _relay runs the --ssh relay; it is started by create '
+        'container ip. claudeout merges the Claude Code state in the '
+        'sandbox into the --claude directory (several sandboxes can share '
+        'one). _relay runs the --ssh relay; it is started by create '
         'and start and not meant to be run directly.')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
