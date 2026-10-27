@@ -187,13 +187,16 @@ def add_config(args, src, parser):
     except Exception as exc:
         print('Failed to parse config file', exc)
         return args
-    args = sys.argv[2:]
+    # Prepend the defaults to the whole command line rather than splicing
+    # them in after the first word, so an option given as "--src value" is not
+    # separated from its value.  Later scalars win; append actions accumulate.
+    args = []
     try:
-        if src in config:
-            args = config[src] + args
         if 'all' in config:
-            args = config['all'] + args
-        return parser.parse_intermixed_args(sys.argv[1:2] + args)
+            args += list(config['all'])
+        if src in config:
+            args += list(config[src])
+        return parser.parse_intermixed_args(args + sys.argv[1:])
     except Exception as exc:
         print('Failed to merge config file', args, exc)
         return args

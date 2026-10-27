@@ -248,11 +248,12 @@ print(" ".join(shlex.quote(str(a)) for a in args))
 ORIG_ARGS=("$@")
 parse_args ${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}
 [ -n "$COMMAND" ] || usage
-apply_config
-
+# Change into --src before merging the config so that its per-directory
+# lookup keys on the source directory, as add_config does in agent_docker.py.
 if [ -n "$SRC" ]; then
     cd "$SRC" || die "cannot cd to $SRC"
 fi
+apply_config
 if [ -n "$CLAUDE_DIR" ]; then
     CLAUDE_DIR="${CLAUDE_DIR/#\~/$HOME}"
     [ "${CLAUDE_DIR#/}" != "$CLAUDE_DIR" ] || CLAUDE_DIR="$PWD/$CLAUDE_DIR"
