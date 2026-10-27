@@ -121,7 +121,7 @@ through a read-write `--mount`). The guest user is unprivileged everywhere.
 ## agent_tart.sh (macOS, Apple Silicon)
 
 - Host requirements: `brew install jq sshpass bash`, plus
-  `brew tap openai/tools && brew install openai/tools/tart`.
+  `brew install cirruslabs/cli/tart`.
 - `provision` clones the base image
   (`ghcr.io/cirruslabs/macos-golden-gate-base:latest`) into a base VM
   (`agent_base`) and bootstraps the ssh key into it using the published

@@ -37,7 +37,7 @@
 #
 # Host requirements:
 #   brew install jq sshpass bash
-#   brew tap openai/tools && brew install openai/tools/tart
+#   brew install cirruslabs/cli/tart
 
 set -u
 
@@ -94,7 +94,7 @@ usage() {
 }
 
 safe_name() {
-    printf '%s' "$1" | sed 's/[<>:"/\\|?*[:cntrl:]]/_/g; s/[. ]*$//; s/^$/docker/'
+    printf '%s' "$1" | sed 's/[<>:"/\\|?*[:cntrl:]]/_/g; s/[. ]*$//; s/^$/sandbox/'
 }
 
 parse_args() {
@@ -110,6 +110,12 @@ parse_args() {
             else
                 set -- "${1%%=*}" "${1#*=}"
             fi
+            ;;
+        esac
+        case "$1" in
+        --name | --num | --src | --base | --image | --cpus | --memory | --disk | \
+            --mount | --skip | --ollama | --url | --sshkey | --claude | --config)
+            [ $# -gt 1 ] || die "$1 requires a value"
             ;;
         esac
         case "$1" in
@@ -286,17 +292,26 @@ vm_ip() {
     tart ip "$1" --wait "${2:-120}" 2>/dev/null
 }
 
-# Wait until the VM actually accepts TCP connections on the ssh port. A VM
-# cloned from a base reuses the base's MAC address, so a stale DHCP lease can
-# make `tart ip` return an address seconds before the guest is reachable.
+# Wait until the VM actually accepts TCP connections on the ssh port. Fresh
+# clones get a random MAC address so `tart ip` cannot return another VM's
+# stale DHCP lease, but the address may still be reported before the guest
+# is reachable. If start_vm launched tart run, give up as soon as that process
+# exits instead of waiting out the timeout.
 wait_ssh_ready() {
     local vm="$1"
     local timeout="${2:-300}"
     local waited=0
     local ip
     while [ "$waited" -lt "$timeout" ]; do
+        if [ -n "$TART_PID" ] && ! kill -0 "$TART_PID" 2>/dev/null; then
+            info "tart run for $vm exited; see $LOG_DIR/$vm.log"
+            return 1
+        fi
         if ip="$(tart ip "$vm" 2>/dev/null)" && [ -n "$ip" ]; then
             if (exec 3<>"/dev/tcp/$ip/22") 2>/dev/null; then
+                # Addresses are reused by new VMs with new host keys; a stale
+                # entry would make ssh disable password authentication.
+                ssh-keygen -R "$ip" -f "$KNOWN_HOSTS" >/dev/null 2>&1 || true
                 return 0
             fi
         fi
@@ -447,18 +462,29 @@ bootstrap_ssh_key() {
     fi
     ensure_ssh_key
     info "installing $SSH_KEY.pub into $vm (password bootstrap)"
+    # Offer only the password: keys from the ssh agent would otherwise use up
+    # the server's MaxAuthTries before the password is tried. sshd can accept
+    # connections before password logins work, so retry for a while.
+    local tries=0
     if command -v sshpass >/dev/null 2>&1; then
-        sshpass -p "$TART_PASS" ssh-copy-id \
+        until sshpass -p "$TART_PASS" ssh-copy-id -f \
             -i "$SSH_KEY.pub" \
             -o UserKnownHostsFile="$KNOWN_HOSTS" \
             -o StrictHostKeyChecking=no \
-            "$TART_USER@$(vm_ip "$vm")" ||
-            die "could not install the ssh key into $vm"
+            -o PubkeyAuthentication=no \
+            -o PreferredAuthentications=password,keyboard-interactive \
+            "$TART_USER@$(vm_ip "$vm")"; do
+            tries=$((tries + 1))
+            [ "$tries" -lt 12 ] || die "could not install the ssh key into $vm"
+            info "password login to $vm failed; retrying in 10 seconds"
+            sleep 10
+        done
     else
         command -v expect >/dev/null 2>&1 || die "install sshpass or expect to bootstrap the ssh key"
         expect -c "
             set timeout 60
             spawn ssh -o UserKnownHostsFile=$KNOWN_HOSTS -o StrictHostKeyChecking=no \
+                -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive \
                 $TART_USER@$(vm_ip "$vm") \"mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys\"
             expect {
                 -re \"(P|p)assword:\" { send \"$TART_PASS\r\"; exp_continue }
@@ -547,22 +573,31 @@ link_mounts() {
     while [ "$i" -lt "$MOUNT_COUNT" ]; do
         local tag="${MOUNT_TAGS[$i]}"
         local dst="${MOUNT_DSTS[$i]}"
-        run_ssh "$vm" "mkdir -p \"\$(dirname '$dst')\" && rm -rf '$dst' && \
-            ln -sfn '/Volumes/My Shared Files/$tag' '$dst'" || true
+        local qdst qshare
+        qdst="$(printf '%q' "$dst")"
+        qshare="$(printf '%q' "/Volumes/My Shared Files/$tag")"
+        run_ssh "$vm" "mkdir -p \"\$(dirname $qdst)\" && rm -rf $qdst && ln -sfn $qshare $qdst" ||
+            info "could not link $tag at $dst in $vm; it is still under /Volumes/My Shared Files/$tag"
         i=$((i + 1))
     done
 }
+
+# Callers wait for the VM with wait_ssh_ready, which also notices if the
+# tart run process started here exits early (for example because macOS
+# allows only two VMs at once).
+TART_PID=""
 
 start_vm() {
     local vm="$1"
     shift
     mkdir -p "$LOG_DIR"
+    TART_PID=""
     if vm_running "$vm"; then
         return 0
     fi
     info "starting $vm (log $LOG_DIR/$vm.log)"
     nohup tart run --no-graphics "$@" "$vm" >>"$LOG_DIR/$vm.log" 2>&1 &
-    vm_ip "$vm" 600 >/dev/null || die "VM $vm did not acquire an IP; check $LOG_DIR/$vm.log"
+    TART_PID=$!
 }
 
 tar_exclude_args() {
@@ -592,6 +627,9 @@ transfer_project() {
     info "transferring $CURRENT_DIR to $VM_NAME"
     # shellcheck disable=SC2086
     tar -C "$PWD/.." -cf - $excludes "$CURRENT_DIR" | run_ssh "$vm" "tar -xf - -C ~/"
+    local codes=("${PIPESTATUS[@]}")
+    [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ] ||
+        die "transferring $CURRENT_DIR to $vm failed"
 }
 
 restore_git_modes() {
@@ -632,8 +670,9 @@ claude_in() {
     [ -f "$CLAUDE_DIR/install_claude.sh" ] || die "$CLAUDE_DIR does not contain install_claude.sh"
     info "copying $CLAUDE_DIR to $vm:~/.claude-persist"
     COPYFILE_DISABLE=1 tar -C "$CLAUDE_DIR" -cf - . |
-        run_ssh "$vm" "mkdir -p ~/.claude-persist && tar -xf - -C ~/.claude-persist" ||
-        die "copying $CLAUDE_DIR failed"
+        run_ssh "$vm" "mkdir -p ~/.claude-persist && tar -xf - -C ~/.claude-persist"
+    local codes=("${PIPESTATUS[@]}")
+    [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ] || die "copying $CLAUDE_DIR failed"
     run_ssh "$vm" "bash ~/.claude-persist/install_claude.sh" ||
         info "install_claude.sh failed"
 }
@@ -647,8 +686,9 @@ claude_out() {
     mkdir -p "$CLAUDE_DIR"
     info "copying $vm:~/.claude-outbox to $CLAUDE_DIR"
     run_ssh "$vm" "COPYFILE_DISABLE=1 tar -C ~/.claude-outbox -cf - ." |
-        tar -xf - -C "$CLAUDE_DIR" ||
-        die "copying ~/.claude-outbox failed"
+        tar -xf - -C "$CLAUDE_DIR"
+    local codes=("${PIPESTATUS[@]}")
+    [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ] || die "copying ~/.claude-outbox failed"
 }
 
 # Every command that talks to a VM over ssh needs the key resolved first;
@@ -681,7 +721,7 @@ provision)
     fi
     info "cloning $BASE_IMAGE into $BASE_NAME (large download on first run)"
     tart clone "$BASE_IMAGE" "$BASE_NAME" || die "cloning $BASE_IMAGE failed"
-    tart set "$BASE_NAME" --cpu "$CPUS" --memory "$MEM" --disk-size "$DISK" ||
+    tart set "$BASE_NAME" --random-mac --cpu "$CPUS" --memory "$MEM" --disk-size "$DISK" ||
         die "configuring $BASE_NAME failed"
     ensure_ssh_key
     start_vm "$BASE_NAME"
@@ -717,19 +757,14 @@ create | start)
     fi
     info "cloning $BASE_NAME into $VM_NAME"
     tart clone "$BASE_NAME" "$VM_NAME" || die "cloning $BASE_NAME failed"
-    tart set "$VM_NAME" --cpu "$CPUS" --memory "$MEM" ||
+    tart set "$VM_NAME" --random-mac --cpu "$CPUS" --memory "$MEM" ||
         die "configuring $VM_NAME failed"
     tart set "$VM_NAME" --disk-size "$DISK" 2>/dev/null || true
     build_mount_args
     start_vm "$VM_NAME" ${MOUNT_ARGS[@]+"${MOUNT_ARGS[@]}"}
-    info "waiting for $VM_NAME to accept ssh connections"
-    wait_ssh_ready "$VM_NAME" 300 ||
-        die "$VM_NAME did not become reachable over ssh; check $LOG_DIR/$VM_NAME.log"
-    if [ -n "$SSH_PUB" ]; then
-        ensure_ssh_key
-        run_ssh "$VM_NAME" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" \
-            <"$SSH_PUB"
-    fi
+    # The base already authorizes the key it was provisioned with; this only
+    # falls back to the password bootstrap when --sshkey chose another key.
+    bootstrap_ssh_key "$VM_NAME"
     link_mounts "$VM_NAME"
     transfer_project "$VM_NAME"
     restore_git_modes "$VM_NAME"
@@ -760,7 +795,7 @@ update)
 list)
     tart list --format json 2>/dev/null | jq -r '
         .[] | select(.Source == "local")
-        | [.Name, (if .Running then "running" else "stopped" end), .State, (.Size // "")]
+        | [.Name, (.State // (if .Running then "running" else "stopped" end)), (.Size // "")]
         | @tsv'
     ;;
 
