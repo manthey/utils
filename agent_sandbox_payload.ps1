@@ -64,13 +64,24 @@ function Get-File([string]$Url, [string]$Name) {
 }
 
 function Get-GitHubAsset([string]$Repo, [string]$Pattern) {
-    # Browser download url of the newest release asset matching the regex;
-    # pre-releases are considered when no stable release has the asset.
-    foreach ($release in (Get-Json "https://api.github.com/repos/$Repo/releases?per_page=15")) {
-        $asset = $release.assets | Where-Object { $_.name -match $Pattern } | Select-Object -First 1
-        if ($asset) { return @{ Url = $asset.browser_download_url; Tag = $release.tag_name } }
+    # Download url of the asset matching the regex in the latest stable
+    # release.  This reads the release web pages rather than the REST api,
+    # which allows only 60 unauthenticated requests an hour per ip address.
+    $headers = @{ 'User-Agent' = 'agent_sandbox' }
+    $resp = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" -UseBasicParsing -Headers $headers
+    # Windows PowerShell and PowerShell 7 expose the redirected url differently.
+    $final = if ($resp.BaseResponse.ResponseUri) { $resp.BaseResponse.ResponseUri } else { $resp.BaseResponse.RequestMessage.RequestUri }
+    if ($final.AbsoluteUri -notmatch '/releases/tag/(.+)$') { throw "no latest release for $Repo" }
+    $tag = $Matches[1]
+    $page = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/expanded_assets/$tag" -UseBasicParsing -Headers $headers
+    $linkPattern = 'href="(/' + [regex]::Escape($Repo) + '/releases/download/[^"]+)"'
+    foreach ($link in [regex]::Matches($page.Content, $linkPattern)) {
+        $path = $link.Groups[1].Value
+        if ([uri]::UnescapeDataString($path.Split('/')[-1]) -match $Pattern) {
+            return @{ Url = "https://github.com$path"; Tag = [uri]::UnescapeDataString($tag) }
+        }
     }
-    throw "no asset matching $Pattern in $Repo releases"
+    throw "no asset matching $Pattern in $Repo release $tag"
 }
 
 function Expand-Zip([string]$Zip, [string]$Dest) {
