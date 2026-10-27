@@ -275,11 +275,10 @@ vm_exists() {
 }
 
 vm_running() {
-    if tart list --json 2>/dev/null | jq -e --arg n "$1" '.[] | select(.Name == $n and .Running)' >/dev/null 2>&1; then
+    if tart list --format json 2>/dev/null | jq -e --arg n "$1" '.[] | select(.Name == $n and (.Running == true or .State == "running"))' >/dev/null 2>&1; then
         return 0
     fi
-    # Cross-version fallback: tart ip only succeeds for a running VM.
-    tart ip "$1" >/dev/null 2>&1
+    pgrep -f "tart run.* $1\$" >/dev/null 2>&1
 }
 
 vm_ip() {
@@ -759,7 +758,7 @@ update)
     ;;
 
 list)
-    tart list --json 2>/dev/null | jq -r '
+    tart list --format json 2>/dev/null | jq -r '
         .[] | select(.Source == "local")
         | [.Name, (if .Running then "running" else "stopped" end), .State, (.Size // "")]
         | @tsv'
