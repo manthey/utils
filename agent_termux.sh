@@ -116,6 +116,7 @@ safe_name() {
 parse_args() {
     MOUNTS=()
     SKIPS=()
+    POSITIONALS=()
     while [ $# -gt 0 ]; do
         case "$1" in
         --*=*)
@@ -730,7 +731,7 @@ provision)
     fi
     info "provisioning the base (installs node and pi; log $LOG_DIR/$BASE_NAME.log)"
     launch_proot "$BASE_NAME" -c '
-        pkg install -y git openssh fd ripgrep &&
+        pkg install -y git openssh fd ripgrep uv python &&
         git config --global user.name "Container" &&
         git config --global user.email "container@example.com" &&
         curl -fsSL "https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-$(uname -m | sed "s/aarch64/arm64/")" -o "$PREFIX/bin/hadolint" &&
