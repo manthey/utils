@@ -218,7 +218,7 @@ done
 
 # --- git identity
 
-git config --global user.name "VM"
+git config --global user.name "Container"
 git config --global user.email "container@example.com"
 
 # --- cleanup
