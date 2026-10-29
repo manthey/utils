@@ -109,6 +109,12 @@ merge_file() {
   [ -s "$base" ] || base=/dev/null
   [ -s "$theirs" ] || theirs=/dev/null
   tmp="$(mktemp)"
+  if ! command -v jq >/dev/null 2>&1; then
+    rm -f "$tmp"
+    echo "jq is not installed, so $(basename "$3") cannot be merged; copying it instead" >&2
+    copy_newer "$mine" "$3"
+    return 0
+  fi
   if ! "merge_$kind" "$base" "$mine" "$theirs" > "$tmp" 2>/dev/null; then
     rm -f "$tmp"
     echo "Could not merge $(basename "$3"); copying it instead" >&2
@@ -166,6 +172,34 @@ copy_entries() {
   done
 }
 
+# Set hasCompletedOnboarding in ~/.claude.json with jq, or python3 when jq is
+# not installed; without either, add the key after the object's opening brace.
+set_onboarded() {
+  local f="$HOME/.claude.json" ok=""
+  [ -s "$f" ] || echo '{}' > "$f"
+  if command -v jq >/dev/null 2>&1; then
+    jq '.hasCompletedOnboarding = true' "$f" > "$f.tmp" && ok=1
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import json, sys
+d = json.load(open(sys.argv[1]))
+d["hasCompletedOnboarding"] = True
+json.dump(d, sys.stdout, indent=2)' "$f" > "$f.tmp" && ok=1
+  elif [ -z "$(tr -d '{} \t\r\n' < "$f")" ]; then
+    echo '{"hasCompletedOnboarding": true}' > "$f.tmp" && ok=1
+  elif grep -q '"hasCompletedOnboarding": *true' "$f"; then
+    return 0
+  elif [ "$(head -c 1 "$f")" = "{" ]; then
+    # A JSON object: add the key right after its opening brace.
+    sed '1s/^{/{"hasCompletedOnboarding": true,/' "$f" > "$f.tmp" && ok=1
+  fi
+  if [ -n "$ok" ]; then
+    mv "$f.tmp" "$f"
+  else
+    rm -f "$f.tmp"
+    echo "Could not mark onboarding complete in $f (needs jq or python3)" >&2
+  fi
+}
+
 case "${1:-install}" in
   install) ;;
   update)
@@ -181,21 +215,39 @@ case "${1:-install}" in
 esac
 
 BINDIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
+# Whether the shell that ran this already finds commands in $BINDIR; if not,
+# the profiles get a line that adds it.
+case ":$PATH:" in
+  *":$BINDIR:"*) BINDIR_ON_PATH=1 ;;
+  *) BINDIR_ON_PATH="" ;;
+esac
 # Optional channel or version: "stable", "latest" (default), or e.g. "2.1.89".
 CLAUDE_CHANNEL="${CLAUDE_CHANNEL:-}"
+
+# Download a URL to stdout with curl, or wget when curl is not installed.
+fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "$1"
+  else
+    echo "ERROR: neither curl nor wget is installed" >&2
+    return 1
+  fi
+}
 
 case "$(uname -s)" in
 MINGW*|MSYS*|CYGWIN*)
   # install.sh refuses Git Bash; the PowerShell installer puts claude.exe in
   # %USERPROFILE%\.local\bin, which is $BINDIR here.
   installer="$(mktemp -d)/install.ps1"
-  curl -fsSL https://claude.ai/install.ps1 -o "$installer"
+  fetch https://claude.ai/install.ps1 > "$installer"
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$installer")" \
     ${CLAUDE_CHANNEL:+"$CLAUDE_CHANNEL"}
   rm -rf "$(dirname "$installer")"
   ;;
 *)
-  curl -fsSL https://claude.ai/install.sh | bash -s ${CLAUDE_CHANNEL:+"$CLAUDE_CHANNEL"}
+  fetch https://claude.ai/install.sh | bash -s ${CLAUDE_CHANNEL:+"$CLAUDE_CHANNEL"}
   ;;
 esac
 
@@ -223,6 +275,10 @@ if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ -s "$HOME/.claude-persist/oauth_to
 fi
 EOF
   grep -qF 'DISABLE_AUTOUPDATER=1' "$PROFILE" || echo 'export DISABLE_AUTOUPDATER=1' >> "$PROFILE"
+  if [ -z "$BINDIR_ON_PATH" ] && ! grep -qF "# claude bindir" "$PROFILE"; then
+    printf 'case ":$PATH:" in *":%s:"*) ;; *) export PATH="%s:$PATH" ;; esac  # claude bindir\n' \
+      "$BINDIR" "$BINDIR" >> "$PROFILE"
+  fi
 done
 
 case ":$PATH:" in
@@ -236,9 +292,11 @@ esac
 }
 # Mark onboarding complete so a fresh sandbox skips the first-run screens
 # even before a copy has been persisted.
-[ -s "$HOME/.claude.json" ] || echo '{}' > "$HOME/.claude.json"
-jq '.hasCompletedOnboarding = true' "$HOME/.claude.json" > "$HOME/.claude.json.tmp" &&
-  mv "$HOME/.claude.json.tmp" "$HOME/.claude.json"
+set_onboarded
 save_base
 
 echo "Done. $("$BINDIR/claude" --version)"
+if [ -z "$BINDIR_ON_PATH" ]; then
+  echo "$BINDIR was not on PATH; it was added to ${PROFILES[*]}. In this shell, run:"
+  echo "  export PATH=\"$BINDIR:\$PATH\""
+fi
