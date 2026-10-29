@@ -185,9 +185,21 @@ if strlen(finddir(&g:backupdir))==0
     call mkdir(&g:backupdir, "p", 02777)
 endif
 if has("win32")
-    call system("for /f \"tokens=* skip=2500\" \%F in ('dir ".shellescape(&g:backupdir)." /o-d /tc /b') do del ".shellescape(&g:backupdir."\\\%F"))
+    let s:rotatecmd = "for /f \"tokens=* skip=2500\" \%F in ('dir ".shellescape(&g:backupdir)." /o-d /tc /b') do del ".shellescape(&g:backupdir."\\\%F")
 else
-    call system("find ".shellescape(&g:backupdir)." -type f -print0 | xargs -0 ls -A1tr | head -n -2500 | xargs -d '\n' rm -f")
+    let s:rotatecmd = "find ".shellescape(&g:backupdir)." -type f -printf '%T@ %p\\n' | sort -n | head -n -2500 | cut -d' ' -f2- | xargs -r -d '\\n' rm -f"
+endif
+" Rotate in the background so startup doesn't wait on it.  The job is left
+" running if vim exits first; if it is interrupted, the next start catches up.
+if has("job")
+    if has("win32")
+        let s:rotatejob = 'cmd /s /c "'.s:rotatecmd.'"'
+    else
+        let s:rotatejob = ['sh', '-c', s:rotatecmd]
+    endif
+    call job_start(s:rotatejob, {'in_io': 'null', 'out_io': 'null', 'err_io': 'null', 'stoponexit': ''})
+else
+    call system(s:rotatecmd)
 endif
 execute "set backupext=_".strftime("%y%m%d%H%M")
 set nobackup
@@ -270,8 +282,8 @@ set ttymouse=
 " nvm use 24
 " npm install -g bash-language-server
 " npm install -g typescript typescript-language-server
-" # Then, `which typescript-language-server` and put the path in the statements
-" # below.
+" # The newest nvm node version with a language server installed is used
+" # regardless of the active `nvm use`.
 " Linux:
 "  sudo apt-get install openjdk-17-jdk
 "  mkdir -p ~/.local/share/langservers
@@ -296,14 +308,36 @@ let s:lsptmp = (exists('$TMPDIR') ? $TMPDIR : (exists('$TEMP') ? $TEMP : '/tmp')
 if !isdirectory(s:lsptmp)
     call mkdir(s:lsptmp, 'p')
 endif
-if executable('/home/manthey/.nvm/versions/node/v24.11.1/bin/typescript-language-server')
+" Sort nvm paths by node version (so v24.14.0 > v24.2.0 > v9.1.0)
+function! s:VersionCmp(a, b) abort
+  let l:va = split(matchstr(a:a, 'node/v\zs[0-9.]\+'), '\.')
+  let l:vb = split(matchstr(a:b, 'node/v\zs[0-9.]\+'), '\.')
+  for l:i in range(min([len(l:va), len(l:vb)]))
+    if str2nr(l:va[l:i]) != str2nr(l:vb[l:i])
+      return str2nr(l:va[l:i]) - str2nr(l:vb[l:i])
+    endif
+  endfor
+  return len(l:va) - len(l:vb)
+endfunction
+" Return [node, script] for an npm-installed tool, or [] if not found.
+" Use the newest nvm install that has it, regardless of the active `nvm use`;
+" fall back to PATH for non-nvm installs.
+function! s:NodeTool(name) abort
+  let l:nvm = exists('$NVM_DIR') ? $NVM_DIR : expand('~/.nvm')
+  let l:found = sort(glob(l:nvm . '/versions/node/*/bin/' . a:name, 0, 1),
+        \ function('s:VersionCmp'))
+  let l:path = empty(l:found) ? exepath(a:name) : l:found[-1]
+  if empty(l:path)
+    return []
+  endif
+  let l:node = fnamemodify(l:path, ':h') . '/node'
+  return [executable(l:node) ? l:node : 'node', l:path]
+endfunction
+let s:tsls = s:NodeTool('typescript-language-server')
+if !empty(s:tsls)
   au User lsp_setup call lsp#register_server({
         \ 'name': 'tsserver',
-        \ 'cmd': {server_info->[
-        \   '/home/manthey/.nvm/versions/node/v24.11.1/bin/node',
-        \   '/home/manthey/.nvm/versions/node/v24.11.1/bin/typescript-language-server',
-        \   '--stdio'
-        \ ]},
+        \ 'cmd': {server_info->s:tsls + ['--stdio']},
         \ 'allowlist': ['javascript', 'javascriptreact', 'typescript', 'typescriptreact'],
         \ 'initialization_options': {
         \     'tsserver': {
@@ -314,14 +348,11 @@ if executable('/home/manthey/.nvm/versions/node/v24.11.1/bin/typescript-language
         \ 'env': {'TMPDIR': s:lsptmp}
         \ })
 endif
-if executable('/home/manthey/.nvm/versions/node/v24.11.1/bin/bash-language-server')
+let s:bashls = s:NodeTool('bash-language-server')
+if !empty(s:bashls)
   au User lsp_setup call lsp#register_server({
         \ 'name': 'bashls',
-        \ 'cmd': {server_info->[
-        \   '/home/manthey/.nvm/versions/node/v24.11.1/bin/node',
-        \   '/home/manthey/.nvm/versions/node/v24.11.1/bin/bash-language-server',
-        \   'start'
-        \ ]},
+        \ 'cmd': {server_info->s:bashls + ['start']},
         \ 'whitelist': ['sh', 'bash'],
         \ })
 endif
