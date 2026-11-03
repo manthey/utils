@@ -430,8 +430,11 @@ def main():  # noqa
                             tf.addfile(info)
                             continue
                         info = tf.gettarinfo(full_path, arcname=arcname)
-                        with open(full_path, 'rb') as fobj:
-                            tf.addfile(info, fobj)
+                        try:
+                            with open(full_path, 'rb') as fobj:
+                                tf.addfile(info, fobj)
+                        except PermissionError:
+                            print(f'Permission error: {full_path}; skipping')
                     for dirname in dirs:
                         full_path = os.path.join(dirpath, dirname)
                         if os.path.islink(full_path):
