@@ -25,7 +25,7 @@
 #   exec       shell into a running sandbox
 #   update     apply --ollama to a running sandbox
 #   list       list known sandboxes
-#   cp         copy files to/from the sandbox; one endpoint prefixed in:
+#   cp         copy files to/from the sandbox; in: prefixes guest paths
 #   claudeout  merge the Claude Code state in the sandbox into the --claude
 #              directory (several sandboxes can share one)
 #
@@ -34,9 +34,10 @@
 # script); create and start copy it to ~/.claude-persist in the sandbox and
 # run install_claude.sh there. Without --claude, Claude is not installed.
 #
-# cp usage: agent_termux.sh cp [--name NAME] in:<guest path> <local path>
-#           agent_termux.sh cp [--name NAME] <local path> in:<guest path>
-#           (like docker cp; directories are copied recursively)
+# cp usage: agent_termux.sh cp [--name NAME] in:<guest path>... <local path>
+#           agent_termux.sh cp [--name NAME] <local path>... in:<guest path>
+#           (like docker cp; directories are copied recursively; quote a
+#           glob such as '*.svs' to have it expanded here or in the sandbox)
 #
 # A running sandbox is a proot-wrapped sshd on a localhost-only port, so
 # exec and cp work over ssh like the other agents. The guest shares the
@@ -105,7 +106,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,53p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,54p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -392,36 +393,72 @@ run_ssh() {
         127.0.0.1 "$@"
 }
 
-# docker-cp-style copy: exactly one endpoint is prefixed in: and refers to a
-# path in the sandbox (relative paths are relative to the guest home). scp -r
+# Expand a host glob into the GLOB_MATCHES array. A path that exists as
+# written, or that has no glob characters, is kept as is; a glob that
+# matches nothing leaves the array empty.
+expand_host_glob() {
+    local IFS=
+    GLOB_MATCHES=()
+    case "$1" in
+    *[*?[]*) ;;
+    *)
+        GLOB_MATCHES=("$1")
+        return
+        ;;
+    esac
+    if [ -e "$1" ] || [ -L "$1" ]; then
+        GLOB_MATCHES=("$1")
+        return
+    fi
+    shopt -s nullglob
+    # shellcheck disable=SC2206 # deliberately unquoted to glob (IFS is empty)
+    GLOB_MATCHES=($1)
+    shopt -u nullglob
+}
+
+# docker-cp-style copy: the last argument is the destination; either it or
+# every source is prefixed in: and refers to a path in the sandbox (relative
+# paths are relative to the guest home). Host globs are expanded here, so
+# they can be passed quoted; scp expands globs in guest paths itself. scp -r
 # copies directories recursively and is harmless for plain files.
 do_cp() {
-    local src="$1"
-    local dst="$2"
-    if [ "${src#in:}" != "$src" ] && [ "${dst#in:}" != "$dst" ]; then
-        die "cp: only one endpoint may be a in: path"
-    fi
-    if [ "${src#in:}" = "$src" ] && [ "${dst#in:}" = "$dst" ]; then
-        die "cp: one endpoint must be a in: path"
-    fi
+    local dst="${!#}"
+    local src
+    local -a srcs=()
+    for src in "${@:1:$#-1}"; do
+        if [ "${dst#in:}" != "$dst" ] && [ "${src#in:}" != "$src" ]; then
+            die "cp: sources may not be in: paths when the destination is"
+        fi
+        if [ "${dst#in:}" = "$dst" ] && [ "${src#in:}" = "$src" ]; then
+            die "cp: either the destination or every source must be a in: path"
+        fi
+    done
     local port
     port="$(vm_port "$VM_NAME")" || die "sandbox $VM_NAME is not running"
-    if [ "${src#in:}" != "$src" ]; then
-        info "copying $VM_NAME:${src#in:} to $dst"
+    if [ "${dst#in:}" = "$dst" ]; then
+        for src in "${@:1:$#-1}"; do
+            srcs+=("127.0.0.1:${src#in:}")
+        done
+        info "copying ${srcs[*]} from $VM_NAME to $dst"
         scp -r -P "$port" \
             -o UserKnownHostsFile="$KNOWN_HOSTS" \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             -o BatchMode=yes \
-            "127.0.0.1:${src#in:}" "$dst"
+            "${srcs[@]}" "$dst"
     else
-        info "copying $src to $VM_NAME:${dst#in:}"
+        for src in "${@:1:$#-1}"; do
+            expand_host_glob "$src"
+            [ "${#GLOB_MATCHES[@]}" -gt 0 ] || die "cp: no files match $src"
+            srcs+=("${GLOB_MATCHES[@]}")
+        done
+        info "copying ${srcs[*]} to $VM_NAME:${dst#in:}"
         scp -r -P "$port" \
             -o UserKnownHostsFile="$KNOWN_HOSTS" \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             -o BatchMode=yes \
-            "$src" "127.0.0.1:${dst#in:}"
+            "${srcs[@]}" "127.0.0.1:${dst#in:}"
     fi
 }
 
@@ -859,10 +896,10 @@ list)
     ;;
 
 cp)
-    if [ "${#POSITIONALS[@]}" -ne 2 ]; then
+    if [ "${#POSITIONALS[@]}" -lt 2 ]; then
         usage
     fi
-    do_cp "${POSITIONALS[${#POSITIONALS[@]} - 2]}" "${POSITIONALS[${#POSITIONALS[@]} - 1]}"
+    do_cp "${POSITIONALS[@]}"
     ;;
 
 claudeout)

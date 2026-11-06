@@ -29,7 +29,7 @@ All four scripts use the same command set and semantics:
 <agent> stop               destroy the sandbox
 <agent> update --ollama .. apply --ollama to a running sandbox
 <agent> list               list known sandboxes
-<agent> cp in:<path> <local>   /  cp <local> in:<path>
+<agent> cp in:<path>... <local>  /  cp <local>... in:<path>
 <agent> claudeout --claude ..  save Claude Code state back to the host
 ```
 
@@ -43,9 +43,14 @@ Sandboxes are ephemeral: `stop` destroys the sandbox, and `create`/`start`
 always destroy an existing sandbox of the same name and build a fresh one
 from the base. `create` is `start` followed by `exec`.
 
-`cp` works like `docker cp`: exactly one of the two paths is prefixed `in:`,
-directories are copied recursively, and relative guest paths are relative to
-the guest user's home.
+`cp` works like `docker cp`: the last path is the destination, and either it
+or every source is prefixed `in:`. Directories are copied recursively, and
+relative guest paths are relative to the guest user's home. Sources may be
+globs; quote them (e.g. `cp '*.svs' in:.`) to have them expanded by the agent
+script (host paths) or in the sandbox (`in:` paths) rather than by your shell.
+Copying several sources needs an existing destination directory. When
+`agent_docker.py` copies in, it gives the ubuntu user ownership of only what
+it copied, not of the rest of the destination directory.
 
 ### Options
 

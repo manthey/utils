@@ -11,6 +11,7 @@ r"""agent_sandbox.py - Windows Sandbox equivalent of agent_docker.py.
 import argparse
 import asyncio
 import ctypes
+import glob
 import json
 import logging
 import os
@@ -784,17 +785,36 @@ def guest_path(path: str) -> str:
     return path
 
 
-def do_cp(key: str, user: str, ip: str, src: str, dst: str):
-    src_in, dst_in = src.startswith('in:'), dst.startswith('in:')
-    if src_in == dst_in:
-        die('cp requires exactly one endpoint prefixed in:')
+def expand_host_glob(path: str) -> list:
+    """Expand a host path that contains glob characters.  A path that exists
+    as written, or has no glob characters, is returned unchanged; a glob that
+    matches nothing returns an empty list.
+    """
+    local = os.path.expanduser(path)
+    if not any(c in path for c in '*?[') or os.path.lexists(local):
+        return [path]
+    return sorted(glob.glob(local))
+
+
+def do_cp(key: str, user: str, ip: str, operands: list):
+    *srcs, dst = operands
+    srcs_in = {src.startswith('in:') for src in srcs}
+    dst_in = dst.startswith('in:')
+    if len(srcs_in) != 1 or dst_in in srcs_in:
+        die('cp requires either the destination or every source to be prefixed in:')
     target = f'{user}@{ip}'
-    if src_in:
-        cmd = ['scp', '-r'] + ssh_base(key) + [
-            f'{target}:{guest_path(src[3:])}', dst]
+    if dst_in:
+        expanded = []
+        for src in srcs:
+            matches = expand_host_glob(src)
+            if not matches:
+                die(f'cp: no files match {src}')
+            expanded.extend(matches)
+        cmd = ['scp', '-r'] + ssh_base(key) + expanded + [f'{target}:{guest_path(dst[3:])}']
     else:
+        # scp expands globs in remote paths itself.
         cmd = ['scp', '-r'] + ssh_base(key) + [
-            src, f'{target}:{guest_path(dst[3:])}']
+            f'{target}:{guest_path(src[3:])}' for src in srcs] + [dst]
     result = run(cmd)
     if result.returncode:
         die(f'scp failed ({result.returncode})')
@@ -1109,8 +1129,8 @@ def main():  # noqa
         'destroys the container. exec opens a shell into an existing '
         'container and optionally runs a command. update sets the ollama url '
         'in a container. list shows running containers. cp copies into or out '
-        'of a container via cp <src> <dest>, where the path inside the '
-        'container is prefixed with in: and exactly one of src and dest must '
+        'of a container via cp <src>... <dest>, where paths inside the '
+        'container are prefixed with in: and either dest or every src must '
         'include in:. provision creates the container image. ip shows the '
         'container ip. claudeout merges the Claude Code state in the '
         'sandbox into the --claude directory (several sandboxes can share '
@@ -1118,7 +1138,10 @@ def main():  # noqa
         'and start and not meant to be run directly.')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
-        help='For cp: two paths, exactly one prefixed in:.  For exec: an '
+        help='For cp: one or more sources and a destination; either the '
+        'destination or every source is prefixed in:.  Sources may be globs '
+        '(quote them to expand them here or in the sandbox rather than in '
+        'your shell).  For exec: an '
         'optional command to run instead of an interactive shell.')
     parser.add_argument('--name', help='Sandbox name')
     parser.add_argument('--num', type=int, help='Sandbox name suffix')
@@ -1284,10 +1307,10 @@ def main():  # noqa
         set_ollama(key, args.user, ip, args.ollama)
         tunnel_note(args, key, ip, ollama_url(args.ollama))
     elif args.command == 'cp':
-        if len(args.operands) != 2:
-            parser.error('cp requires exactly two operands')
+        if len(args.operands) < 2:
+            parser.error('cp requires at least two operands')
         ip = require_running(sandbox, key, args.user)
-        do_cp(key, args.user, ip, *args.operands)
+        do_cp(key, args.user, ip, args.operands)
     elif args.command == 'claudeout':
         if not args.claude:
             parser.error('claudeout requires --claude')

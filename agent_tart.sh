@@ -15,7 +15,7 @@
 #   update     apply --ollama to a running sandbox
 #   list       list known sandboxes
 #   ip         print the VM IP
-#   cp         copy files to/from the VM; one endpoint prefixed in:
+#   cp         copy files to/from the VM; in: prefixes guest paths
 #   claudeout  merge the Claude Code state in the VM into the --claude
 #              directory (several VMs can share one)
 #
@@ -27,9 +27,10 @@
 # provision --no-cache pulls the base image from its registry instead of
 # using tart's cached copy (--cache, the default, uses the cached copy).
 #
-# cp usage: agent_tart.sh cp [--name NAME] in:<guest path> <local path>
-#           agent_tart.sh cp [--name NAME] <local path> in:<guest path>
-#           (like docker cp; directories are copied recursively)
+# cp usage: agent_tart.sh cp [--name NAME] in:<guest path>... <local path>
+#           agent_tart.sh cp [--name NAME] <local path>... in:<guest path>
+#           (like docker cp; directories are copied recursively; quote a
+#           glob such as '*.svs' to have it expanded here or in the VM)
 #
 # The in-VM provisioning lives in agent_tart_provision.sh; pi is installed by
 # install_pi.sh (shared with the docker flow). mini-swe-agent support from
@@ -89,7 +90,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -372,39 +373,75 @@ run_scp() {
         "$src" "$TART_USER@$ip:$dst"
 }
 
-# docker-cp-style copy: exactly one endpoint is prefixed in: and refers to a
-# path in the VM (relative paths are relative to the guest home). scp -r
+# Expand a host glob into the GLOB_MATCHES array. A path that exists as
+# written, or that has no glob characters, is kept as is; a glob that
+# matches nothing leaves the array empty.
+expand_host_glob() {
+    local IFS=
+    GLOB_MATCHES=()
+    case "$1" in
+    *[*?[]*) ;;
+    *)
+        GLOB_MATCHES=("$1")
+        return
+        ;;
+    esac
+    if [ -e "$1" ] || [ -L "$1" ]; then
+        GLOB_MATCHES=("$1")
+        return
+    fi
+    shopt -s nullglob
+    # shellcheck disable=SC2206 # deliberately unquoted to glob (IFS is empty)
+    GLOB_MATCHES=($1)
+    shopt -u nullglob
+}
+
+# docker-cp-style copy: the last argument is the destination; either it or
+# every source is prefixed in: and refers to a path in the VM (relative
+# paths are relative to the guest home). Host globs are expanded here, so
+# they can be passed quoted; scp expands globs in guest paths itself. scp -r
 # copies directories recursively and is harmless for plain files.
 do_cp() {
-    local src="$1"
-    local dst="$2"
-    if [ "${src#in:}" != "$src" ] && [ "${dst#in:}" != "$dst" ]; then
-        die "cp: only one endpoint may be a in: path"
-    fi
-    if [ "${src#in:}" = "$src" ] && [ "${dst#in:}" = "$dst" ]; then
-        die "cp: one endpoint must be a in: path"
-    fi
+    local dst="${!#}"
+    local src
+    local -a srcs=()
+    for src in "${@:1:$#-1}"; do
+        if [ "${dst#in:}" != "$dst" ] && [ "${src#in:}" != "$src" ]; then
+            die "cp: sources may not be in: paths when the destination is"
+        fi
+        if [ "${dst#in:}" = "$dst" ] && [ "${src#in:}" = "$src" ]; then
+            die "cp: either the destination or every source must be a in: path"
+        fi
+    done
     if ! vm_exists "$VM_NAME"; then
         die "VM $VM_NAME does not exist; run $0 create in the project directory (or use --src)"
     fi
     local ip
     ip="$(vm_ip "$VM_NAME" 10)" || die "no IP for VM $VM_NAME (is it running?)"
-    if [ "${src#in:}" != "$src" ]; then
-        info "copying $VM_NAME:${src#in:} to $dst"
+    if [ "${dst#in:}" = "$dst" ]; then
+        for src in "${@:1:$#-1}"; do
+            srcs+=("$TART_USER@$ip:${src#in:}")
+        done
+        info "copying ${srcs[*]} from $VM_NAME to $dst"
         scp -r -i "$SSH_KEY" \
             -o UserKnownHostsFile="$KNOWN_HOSTS" \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             -o BatchMode=yes \
-            "$TART_USER@$ip:${src#in:}" "$dst"
+            "${srcs[@]}" "$dst"
     else
-        info "copying $src to $VM_NAME:${dst#in:}"
+        for src in "${@:1:$#-1}"; do
+            expand_host_glob "$src"
+            [ "${#GLOB_MATCHES[@]}" -gt 0 ] || die "cp: no files match $src"
+            srcs+=("${GLOB_MATCHES[@]}")
+        done
+        info "copying ${srcs[*]} to $VM_NAME:${dst#in:}"
         scp -r -i "$SSH_KEY" \
             -o UserKnownHostsFile="$KNOWN_HOSTS" \
             -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
             -o BatchMode=yes \
-            "$src" "$TART_USER@$ip:${dst#in:}"
+            "${srcs[@]}" "$TART_USER@$ip:${dst#in:}"
     fi
 }
 
@@ -815,10 +852,10 @@ ip)
     ;;
 
 cp)
-    if [ "${#POSITIONALS[@]}" -ne 2 ]; then
+    if [ "${#POSITIONALS[@]}" -lt 2 ]; then
         usage
     fi
-    do_cp "${POSITIONALS[${#POSITIONALS[@]} - 2]}" "${POSITIONALS[${#POSITIONALS[@]} - 1]}"
+    do_cp "${POSITIONALS[@]}"
     ;;
 
 claudeout)

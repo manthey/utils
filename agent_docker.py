@@ -8,10 +8,13 @@
 
 import argparse
 import fnmatch
+import glob
 import logging
 import os
 import platform
+import posixpath
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -138,10 +141,68 @@ def host_path(docker_cmd, path):
         # Already a posix-style path (e.g. /mnt/c/... or a WSL path);
         # pass it through rather than converting it to a native path.
         return path
+    # abspath drops a trailing /., which tells docker cp to copy a
+    # directory's contents rather than the directory itself; keep it.
+    contents = path.endswith(('/.', os.sep + '.'))
     path = os.path.abspath(path)
+    sep = os.sep
     if docker_cmd[0] == 'wsl' and path[1:2] == ':':
         path = '/mnt/' + path[0].lower() + '/' + path[2:].replace('\\', '/').lstrip('/')
+        sep = '/'
+    if contents:
+        path = path.rstrip(sep) + sep + '.'
     return path
+
+
+def has_glob(path):
+    return any(c in path for c in '*?[')
+
+
+def expand_host_glob(path):
+    """Expand a host path that contains glob characters.  A path that exists
+    as written, or has no glob characters, is returned unchanged; a glob that
+    matches nothing returns an empty list.
+    """
+    local = os.path.expanduser(path)
+    if not has_glob(path) or os.path.lexists(local):
+        return [path]
+    return sorted(glob.glob(local))
+
+
+def container_sh(docker_cmd, container_name, script, user=None, check=True):
+    """Run a sh script in the container, passing it on stdin so that it isn't
+    reinterpreted by wsl's shell on Windows.
+    """
+    cmd = docker_cmd + ['exec', '-i']
+    if user:
+        cmd += ['--user', user]
+    cmd += [container_name, 'sh', '-s']
+    logger.info('%r: %s', cmd, script)
+    return subprocess.run(cmd, input=script.encode(), stdout=subprocess.PIPE, check=check)
+
+
+def expand_container_glob(docker_cmd, container_name, path):
+    """Expand an absolute container path that contains glob characters.  A
+    glob that matches nothing returns an empty list.
+    """
+    if not has_glob(path):
+        return [path]
+    script = ('p=' + shlex.quote(path) + '\nIFS=\n'
+              'for f in $p; do\n'
+              '  if [ -e "$f" ] || [ -L "$f" ]; then printf \'%s\\0\' "$f"; fi\n'
+              'done\n')
+    out = container_sh(docker_cmd, container_name, script).stdout.decode()
+    return [entry for entry in out.split('\0') if entry]
+
+
+def copied_names(local_path, docker_path):
+    """The names that docker cp creates inside a destination directory when
+    copying local_path (passed to docker as docker_path).
+    """
+    if docker_path.endswith(('/.', '\\.')):
+        # docker cp copies the contents of a directory ending in /.
+        return sorted(os.listdir(os.path.expanduser(local_path)))
+    return [os.path.basename(os.path.normpath(os.path.abspath(os.path.expanduser(local_path))))]
 
 
 def claude_copy(docker_cmd, container_name, claude_dir):
@@ -225,16 +286,17 @@ def main():  # noqa
         'destroys the container. exec opens a shell into an existing '
         'container and optionally runs a command. update sets the ollama url '
         'in a container. list shows running containers. cp copies into or out '
-        'of a container via cp <src> <dest>, where the path inside the '
-        'container is prefixed with in: and exactly one of src and dest must '
+        'of a container via cp <src>... <dest>, where paths inside the '
+        'container are prefixed with in: and either dest or every src must '
         'include in:. provision creates the container image. claudeout '
         'merges the Claude Code state in the container into the --claude '
         'directory (several containers can share one).')
     parser.add_argument(
         'operands', nargs='*', metavar='operand',
-        help='For cp: two paths, exactly one prefixed in:.  Relative '
-        'container paths are relative to /home/ubuntu.  Example: '
-        'agent_docker.py cp out.txt in:/tmp/in.txt')
+        help='For cp: one or more sources and a destination; either the '
+        'destination or every source is prefixed in:.  Sources may be globs; '
+        'multiple sources need an existing destination directory.  Relative '
+        'container paths are relative to /home/ubuntu.')
     parser.add_argument('--name', help='Docker container name')
     parser.add_argument('--num', type=int, help='Docker container suffix')
     parser.add_argument('--src', help='Source path.  Defaults to current working directory.')
@@ -328,33 +390,67 @@ def main():  # noqa
     if args.command in {'list'}:
         list_known(docker_cmd, container_name)
     if args.command in {'cp'}:
-        if len(args.operands) != 2:
-            parser.error('cp requires exactly two operands')
+        if len(args.operands) < 2:
+            parser.error('cp requires at least two operands')
         prefix = 'in:'
-        src, dst = args.operands
-        src_in = src.startswith(prefix)
+        *srcs, dst = args.operands
+        srcs_in = {src.startswith(prefix) for src in srcs}
         dst_in = dst.startswith(prefix)
-        if src_in == dst_in:
-            parser.error('cp requires exactly one endpoint prefixed ' + prefix)
-        if src_in:
-            src = src[len(prefix):]
-            src = container_name + ':' + (
-                src if src.startswith('/') else '/home/ubuntu/' + src)
+        if len(srcs_in) != 1 or dst_in in srcs_in:
+            parser.error('cp requires either the destination or every source '
+                         'to be prefixed ' + prefix)
+
+        def container_path(path):
+            path = path[len(prefix):]
+            return path if path.startswith('/') else '/home/ubuntu/' + path
+
         if dst_in:
-            dst = dst[len(prefix):]
-            dst = container_name + ':' + (
-                dst if dst.startswith('/') else '/home/ubuntu/' + dst)
-            src = host_path(docker_cmd, src)
+            expanded = []
+            for src in srcs:
+                matches = expand_host_glob(src)
+                if not matches:
+                    parser.error(f'cp: no files match {src}')
+                expanded.extend(matches)
+            dst = container_path(dst)
+            dst_is_dir = not container_sh(
+                docker_cmd, container_name, f'test -d {shlex.quote(dst)}\n',
+                check=False).returncode
+            if len(expanded) > 1 and not dst_is_dir:
+                parser.error(f'cp: {dst} must be an existing directory when '
+                             'copying multiple sources')
+            copied = [] if dst_is_dir else [dst]
+            for src in expanded:
+                docker_src = host_path(docker_cmd, src)
+                cmd = docker_cmd + ['cp', docker_src, f'{container_name}:{dst}']
+                logger.info(cmd)
+                subprocess.check_call(cmd)
+                if dst_is_dir:
+                    copied.extend(posixpath.join(dst, name)
+                                  for name in copied_names(src, docker_src))
+            # Only change ownership of what was copied, not everything that
+            # was already in a destination directory.
+            if copied:
+                container_sh(
+                    docker_cmd, container_name,
+                    'chown -R -h 1000:1000 -- ' +
+                    shlex.join(copied) + '\n',
+                    user='root')
         else:
+            expanded = []
+            for src in srcs:
+                matches = expand_container_glob(
+                    docker_cmd, container_name, container_path(src))
+                if not matches:
+                    parser.error(f'cp: no files match {src}')
+                expanded.extend(matches)
             dst = host_path(docker_cmd, dst)
-        cmd = docker_cmd + ['cp', src, dst]
-        logger.info(cmd)
-        subprocess.check_call(cmd)
-        if dst_in:
-            cmd = docker_cmd + ['exec', '--user', 'root', container_name,
-                                'chown', '-R', '1000:1000', dst.split(':', 1)[1]]
-            logger.info(cmd)
-            subprocess.check_call(cmd)
+            if len(expanded) > 1 and not os.path.isdir(os.path.expanduser(dst)):
+                parser.error(f'cp: {dst} must be an existing directory when '
+                             'copying multiple sources')
+            for src in expanded:
+                cmd = docker_cmd + ['cp', f'{container_name}:{src}', dst]
+                logger.info(cmd)
+                subprocess.check_call(cmd)
     if args.command in {'create', 'start', 'stop'}:
         renamed_id = rename_if_exists(docker_cmd, container_name)
         if renamed_id:
