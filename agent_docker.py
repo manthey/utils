@@ -9,6 +9,7 @@
 import argparse
 import fnmatch
 import glob
+import json
 import logging
 import os
 import platform
@@ -251,6 +252,42 @@ def claude_out(docker_cmd, container_name, claude_dir):
     subprocess.check_call(cmd)
 
 
+def print_ip(docker_cmd, container_name):
+    """Print the address(es) at which a container can be reached from the
+    host: the container's IP addresses (when it is running) and any published
+    ports (used for ssh).  Exits with an error for an unknown container or a
+    stopped one.
+
+    The JSON output is parsed here rather than read with a --format template
+    because the top-level NetworkSettings.IPAddress entry does not exist on
+    some docker versions and networks; the address is always available under
+    NetworkSettings.Networks.
+    """
+    cmd = docker_cmd + ['container', 'inspect', container_name]
+    logger.info(cmd)
+    try:
+        info = json.loads(subprocess.check_output(cmd, stderr=subprocess.DEVNULL))
+    except subprocess.CalledProcessError:
+        info = None
+    shown = []
+    if info:
+        net = info[0].get('NetworkSettings', {})
+        for network in (net.get('Networks') or {}).values():
+            for key in ('IPAddress', 'GlobalIPv6Address'):
+                if network.get(key):
+                    shown.append(network[key])
+        for proto_port, bindings in sorted((net.get('Ports') or {}).items()):
+            for binding in bindings or []:
+                host_ip = binding.get('HostIp') or '0.0.0.0'
+                if ':' in host_ip:
+                    host_ip = f'[{host_ip}]'
+                shown.append(f'{proto_port} -> {host_ip}:{binding.get("HostPort")}')
+    if not shown:
+        msg = 'Failed to determine ip'
+        raise SystemExit(msg)
+    print('\n'.join(shown))
+
+
 def add_config(args, src, parser):
     if not os.path.exists(args.config):
         return args
@@ -279,13 +316,15 @@ def main():  # noqa
     parser = argparse.ArgumentParser()
     parser.add_argument(
         'command',
-        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'cp', 'provision',
-                 'claudeout'],
+        choices=['create', 'start', 'stop', 'exec', 'update', 'list', 'ip', 'cp',
+                 'provision', 'claudeout'],
         help='Command. create is the same as start followed by exec. start '
         'destroys an existing container, if any, and creates a new one. stop '
         'destroys the container. exec opens a shell into an existing '
         'container and optionally runs a command. update sets the ollama url '
-        'in a container. list shows running containers. cp copies into or out '
+        'in a container. list shows running containers. ip prints the '
+        'address(es) at which the container can be reached from the host: '
+        'its IP address and any published ports. cp copies into or out '
         'of a container via cp <src>... <dest>, where paths inside the '
         'container are prefixed with in: and either dest or every src must '
         'include in:. provision creates the container image. claudeout '
@@ -389,6 +428,8 @@ def main():  # noqa
         subprocess.check_call(cmd, cwd=os.path.dirname(os.path.abspath(__file__)))
     if args.command in {'list'}:
         list_known(docker_cmd, container_name)
+    if args.command in {'ip'}:
+        print_ip(docker_cmd, container_name)
     if args.command in {'cp'}:
         if len(args.operands) < 2:
             parser.error('cp requires at least two operands')

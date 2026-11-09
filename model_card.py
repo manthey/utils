@@ -2816,7 +2816,8 @@ def main():  # noqa
         'first_load.')
     parser.add_argument(
         '-f', '--failed-tests', '--failed',
-        choices={'false', 'partial', 'full', 'passed'},
+        # choices={'false', 'partial', 'full', 'passed'},
+        default='false',
         help='Read an existing model card and run only failed tests plus '
         'first_load.  Using "full" will only rerun tests with no partial '
         'success.  Using "passed" will rerun only tests that passed.')
@@ -2958,16 +2959,22 @@ def main():  # noqa
                               (r.version == known[name].version and (
                                   r.timestamp or '') >= after)}
             if args.failed_tests and str(args.failed_tests) != 'false':
+                fparts = args.failed_tests.split(',')
+                fmode = fparts[0]
                 known = {t.name: t for t in TEST_REGISTRY}
-                if args.failed_tests == 'passed':
+                if fmode == 'passed':
                     sel_tests &= {name for name, r in existing_results.items()
                                   if name in known and result_passed(r)}
-                elif args.failed_tests != 'full':
+                elif fmode != 'full':
                     sel_tests &= {name for name, r in existing_results.items()
                                   if name in known and not result_passed(r)}
                 else:
                     sel_tests &= {name for name, r in existing_results.items()
                                   if name in known and result_complete_fail(r)}
+                if len(fparts) >= 2:
+                    fbefore = get_timestamp(fparts[1])
+                    sel_tests -= {name for name, r in existing_results.items()
+                                  if r.timestamp and r.timestamp > fbefore}
             sel_tests.add('first_load')
             run_names = [t.name for t in TEST_REGISTRY if t.name in sel_tests]
             if len(run_names) <= 1:
