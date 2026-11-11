@@ -323,6 +323,7 @@ pi install npm:pi-loop-police
 # in testing, context-mode allows more models to succeed
 pi install npm:context-mode
 pi install npm:@richardgill/pi-up-history
+PI_OFFLINE=0 pi update --extensions
 UPHIST_TS="$HOME/.pi/agent/npm/node_modules/@richardgill/pi-up-history/src/extension.ts"
 sed 's/DEFAULT_MAX_PROMPTS = 30;/DEFAULT_MAX_PROMPTS = 300;/g' "$UPHIST_TS" > "$UPHIST_TS.tmp" &&
   mv "$UPHIST_TS.tmp" "$UPHIST_TS" || {
