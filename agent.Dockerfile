@@ -59,8 +59,19 @@ RUN apt-get update && \
       unzip \
       vim \
       # agent use \
+      bc \
       fd-find \
+      file \
+      gdb \
+      hyperfine \
+      parallel \
       ripgrep \
+      sqlite3 \
+      strace \
+      tree \
+      xxd \
+      zip \
+      zstd \
       # testing convenience \
       fonts-dejavu \
       libmagic-dev \
@@ -85,6 +96,8 @@ RUN apt-get update && \
     find /usr/share/X11/locale -mindepth 1 -maxdepth 1 ! -name 'en_US*' ! -name 'C' ! -name 'en' -type d -exec rm -rf {} + && \
     find /usr/share/i18n -mindepth 1 ! -name 'en_US*' ! -name 'C' -type f -exec rm -f {} + && \
     rm -rf /usr/bin/pebble && \
+    # ubuntu names fd fdfind \
+    ln -s /usr/bin/fdfind /usr/local/bin/fd && \
     curl -L https://github.com/pyenv/pyenv-installer/raw/master/bin/pyenv-installer | bash && \
     find / -xdev -name __pycache__ -type d -exec rm -r {} \+ && \
     rm -rf /etc/ssh/ssh_host* && \
@@ -172,7 +185,19 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | b
     nvm alias default 22 && \
     npm install -g npm@latest && \
     ln -s $(dirname $(which npm)) "$NVM_DIR/current"
-RUN cd /tmp && npx playwright install
+# Put playwright's browsers on PATH under their usual names; chromium needs
+# --no-sandbox because user namespaces are blocked in the container.
+RUN cd /tmp && npx playwright install && \
+    for f in ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome; do chrome="$f"; done && \
+    for f in ~/.cache/ms-playwright/firefox-*/firefox/firefox; do firefox="$f"; done && \
+    test -x "$chrome" && test -x "$firefox" && \
+    for name in chromium chromium-browser google-chrome; do \
+      printf '#!/bin/sh\nexec "%s" --no-sandbox "$@"\n' "$chrome" > ~/.local/bin/$name && \
+      chmod +x ~/.local/bin/$name; \
+    done && \
+    ln -sf "$firefox" ~/.local/bin/firefox && \
+    chromium --headless --dump-dom 'data:text/html,ok' >/dev/null && \
+    firefox --version
 RUN uv venv --seed --no-project --python=python3.13 .env
 RUN cat <<'EOF' > /home/ubuntu/.local/bin/start_services.sh
 pkill redis-server

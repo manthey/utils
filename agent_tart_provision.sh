@@ -99,6 +99,8 @@ brew trust mongodb/brew 2>/dev/null || true
 # wheel-building C libraries: libtiff openjpeg little-cms2 libffi
 # services for testing: redis memcached rabbitmq (brings openjdk)
 # mongodb-community
+# agent use: macOS already has bc, file, xxd, sqlite3, zip, and lldb (from
+# the Command Line Tools); gdb and strace do not run on Apple Silicon.
 brew install \
     bash coreutils jq wget curl git \
     cmake ninja pkg-config ccache \
@@ -107,6 +109,7 @@ brew install \
     autoconf automake libtool \
     ripgrep fd vim tmux less pandoc imagemagick libmagic optipng xmlstarlet \
     shellcheck hadolint universal-ctags \
+    hyperfine tree parallel zstd \
     redis memcached rabbitmq mongodb-community
 
 # --- pyenv pythons
@@ -161,6 +164,25 @@ if [ -s "$HOME/.nvm-pi/nvm.sh" ]; then
     nvm use 22 >/dev/null 2>&1 || true
     step "playwright browsers"
     npx playwright install || true
+    # Put playwright's browsers on PATH under their usual names. Wrappers,
+    # not symlinks, so the app bundles resolve their frameworks.
+    pw_cache="$HOME/Library/Caches/ms-playwright"
+    chrome="$(find "$pw_cache" -path '*/chromium-*/Contents/MacOS/*' -type f -perm -u+x \
+        -name 'Chromium' -o -path '*/chromium-*/Contents/MacOS/*' -type f -perm -u+x \
+        -name 'Google Chrome for Testing' 2>/dev/null | sort | tail -1)"
+    firefox="$(find "$pw_cache" -path '*/firefox-*/Contents/MacOS/firefox' -type f 2>/dev/null |
+        sort | tail -1)"
+    mkdir -p "$HOME/.local/bin"
+    if [ -n "$chrome" ]; then
+        for name in chromium chromium-browser google-chrome; do
+            printf '#!/bin/sh\nexec "%s" "$@"\n' "$chrome" >"$HOME/.local/bin/$name"
+            chmod +x "$HOME/.local/bin/$name"
+        done
+    fi
+    if [ -n "$firefox" ]; then
+        printf '#!/bin/sh\nexec "%s" "$@"\n' "$firefox" >"$HOME/.local/bin/firefox"
+        chmod +x "$HOME/.local/bin/firefox"
+    fi
 fi
 
 # --- services (macOS equivalent of the image's start_services.sh)

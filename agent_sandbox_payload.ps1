@@ -12,8 +12,8 @@
 #   tools\python\3.x\ python.org builds (NuGet packages) with pip; the
 #                     default (default.txt, else the newest) also has tox,
 #                     pre-commit and virtualenv and is first on PATH
-#   tools\bin\        uv.exe, uvx.exe, jq.exe, rg.exe, fd.exe,
-#                     psmux.exe (exposed as tmux), pmux.exe
+#   tools\bin\        uv.exe, uvx.exe, jq.exe, rg.exe, fd.exe, hyperfine.exe,
+#                     zstd.exe, psmux.exe (exposed as tmux), pmux.exe
 #   tools\openssh\    Win32-OpenSSH (sshd for the sandbox)
 #   home\             the sandbox user's home after install_pi.sh ran in it
 #                     (pi, its extensions and config, helper scripts, .bashrc)
@@ -126,7 +126,7 @@ Invoke-Checked 'node' {
 }
 
 # --- single-file tools
-Invoke-Checked 'uv, jq, ripgrep, fd, hadolint, psmux' {
+Invoke-Checked 'uv, jq, ripgrep, fd, hyperfine, zstd, hadolint, psmux' {
     $bin = Join-Path $script:Tools 'bin'
     $asset = Get-GitHubAsset 'astral-sh/uv' '^uv-x86_64-pc-windows-msvc\.zip$'
     Expand-Zip (Get-File $asset.Url 'uv.zip') (Join-Path $dl 'uv')
@@ -147,6 +147,16 @@ Invoke-Checked 'uv, jq, ripgrep, fd, hadolint, psmux' {
     Expand-Zip (Get-File $asset.Url 'fd.zip') (Join-Path $dl 'fd')
     Copy-Item (Find-File (Join-Path $dl 'fd') 'fd.exe') $bin -Force
     $script:versions += "fd: $($asset.Tag)"
+
+    $asset = Get-GitHubAsset 'sharkdp/hyperfine' '^hyperfine-v.*-x86_64-pc-windows-msvc\.zip$'
+    Expand-Zip (Get-File $asset.Url 'hyperfine.zip') (Join-Path $dl 'hyperfine')
+    Copy-Item (Find-File (Join-Path $dl 'hyperfine') 'hyperfine.exe') $bin -Force
+    $script:versions += "hyperfine: $($asset.Tag)"
+
+    $asset = Get-GitHubAsset 'meta/zstd' '^zstd-v.*-win64\.zip$'
+    Expand-Zip (Get-File $asset.Url 'zstd.zip') (Join-Path $dl 'zstd')
+    Copy-Item (Find-File (Join-Path $dl 'zstd') 'zstd.exe') $bin -Force
+    $script:versions += "zstd: $($asset.Tag)"
 
     $asset = Get-GitHubAsset 'hadolint/hadolint' '^hadolint-Windows-x86_64\.exe$'
     Copy-Item (Get-File $asset.Url 'hadolint.exe') (Join-Path $bin 'hadolint.exe') -Force

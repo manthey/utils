@@ -19,7 +19,7 @@ set -euo pipefail
 # ~/.claude are carried, plus the login (.credentials.json) and
 # ~/.claude.json (onboarding, project trust, /config choices).
 PERSIST="$HOME/.claude-persist"
-ENTRIES=(CLAUDE.md settings.json rules projects history.jsonl .credentials.json)
+ENTRIES=(CLAUDE.md settings.json rules projects hooks history.jsonl .credentials.json)
 # Several sandboxes can run at once from the same host folder, so update
 # merges the files every session changes instead of replacing them: the
 # prompt history is the union of both sides' lines, and the two settings

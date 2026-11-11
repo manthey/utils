@@ -8,7 +8,7 @@ export BINDIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 # On termux this is only a preference: the packaged node is built against
 # bionic libc, and node builds that nvm downloads (glibc) cannot execute
 # there, so the package manager's node is used whatever version it has.
-PI_NODE_VERSION="${PI_NODE_VERSION:-22}"
+PI_NODE_VERSION="${PI_NODE_VERSION:-24}"
 
 # Detect the supported environments once up front. TERMUX_VERSION is set by
 # the termux environment itself, with uname -o reporting Android as fallback.
@@ -118,7 +118,13 @@ else
   mkdir -p "$NVM_DIR"
 
   if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash
+    if [ "$REUSE_SHARED" -eq 1 ]; then
+      curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | bash
+    else
+      # Private nvm: keep the installer from adding it to the shell profile,
+      # where it would replace the host's NVM_DIR and default node.
+      curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh | PROFILE=/dev/null bash
+    fi
   fi
 
   # shellcheck disable=SC1091
@@ -574,6 +580,18 @@ $CASE_PATH_LINE
 EOF
 )"
   PROFILE="${PREFIX:-/data/data/com.termux/files/usr}/etc/bash.bashrc"
+elif [ "$REUSE_SHARED" -eq 0 ]; then
+  # Private nvm (or no nvm at all, on windows): keep it out of the profile.
+  # Sourcing it there would repoint NVM_DIR and put pi's node ahead of the
+  # host's default node in every new shell, and `nvm install` would then
+  # target the private nvm. The pi wrapper in BINDIR selects pi's node itself.
+  PROFILE_BLOCK="$(cat <<EOF
+export BINDIR="\${XDG_BIN_HOME:-\$HOME/.local/bin}"
+$CASE_PATH_LINE
+EOF
+)"
+  PROFILE="${XDG_CONFIG_HOME:-$HOME}/bashrc"
+  [ -f "$PROFILE" ] || PROFILE="$HOME/.bashrc"
 else
   PROFILE_BLOCK="$(cat <<EOF
 export BINDIR="\${XDG_BIN_HOME:-\$HOME/.local/bin}"
