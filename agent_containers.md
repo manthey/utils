@@ -197,7 +197,7 @@ docker).
 
 - The Windows OpenSSH client (`ssh`, `scp`, `ssh-keygen`; installed by
   default on current builds, otherwise Settings > Optional features).
-- Python 3.10+ with pyyaml, or `uv run agent_sandbox.py ...` (the script
+- Python 3.11+ with pyyaml, or `uv run agent_sandbox.py ...` (the script
   has PEP 723 metadata).
 
 ### Backends
@@ -289,7 +289,7 @@ host never executes any of the downloaded tools. The sandbox fetches:
 
 - PortableGit (bash, git, vim, ssh client)
 - node 22 (pi's runtime)
-- python 3.10-3.15 as python.org NuGet builds (`--pythons` to change),
+- python 3.11-3.15 as python.org NuGet builds (`--pythons` to change),
   with pip; the default (`--default-python`, 3.14) also gets tox,
   pre-commit and virtualenv and is first on PATH
 - uv, jq, ripgrep, fd, hyperfine, zstd

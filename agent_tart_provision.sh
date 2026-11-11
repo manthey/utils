@@ -7,7 +7,7 @@
 # the docker flow. See agent_tart.md.
 #
 # Optional environment variables:
-#   PYTHONS                  pyenv versions to build (default 3.10-3.15)
+#   PYTHONS                  pyenv versions to build (default 3.11-3.15)
 #   MACOSX_DEPLOYMENT_TARGET lowest macOS for built wheels (default 11.0,
 #                            the Apple Silicon floor; sets the wheel platform
 #                            tag, e.g. macosx_11_0_arm64)
@@ -16,7 +16,7 @@
 
 set -euo pipefail
 
-PYTHONS="${PYTHONS:-3.10 3.11 3.12 3.13 3.14 3.15}"
+PYTHONS="${PYTHONS:-3.11 3.12 3.13 3.14 3.15}"
 export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 export CFLAGS="${CFLAGS:--std=gnu17 -march=native}"
 # Do not use -march=native for release wheels; it embeds host CPU features.

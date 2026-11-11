@@ -148,7 +148,7 @@ function Set-ToolchainEnvironment([string]$User) {
 
 function Register-Pythons {
     # PEP 514 registration (HKLM, so every user sees it): this is how tox
-    # and virtualenv find python3.10 ... python3.14 without a py launcher.
+    # and virtualenv find python3.11 ... python3.15 without a py launcher.
     foreach ($dir in Get-PythonDirs) {
         $minor = Split-Path -Leaf $dir
         $exe = Join-Path $dir 'python.exe'
