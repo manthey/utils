@@ -101,6 +101,13 @@ brew trust mongodb/brew 2>/dev/null || true
 # mongodb-community
 # agent use: macOS already has bc, file, xxd, sqlite3, zip, and lldb (from
 # the Command Line Tools); gdb and strace do not run on Apple Silicon.
+# Node comes from nvm (22 as the default, 24 privately for pi), so brew's node
+# kegs must never be linked. The base image ships node@24 linked; mongosh
+# (from mongodb-community) pulls in brew's unversioned node, and upgrading the
+# still-linked node@24 then collides with node's npm files under
+# lib/node_modules and fails the whole install. Upgrades keep a keg's link
+# state, so unlinking first avoids that.
+brew unlink node@24 >/dev/null 2>&1 || true
 brew install \
     bash coreutils jq wget curl git \
     cmake ninja pkg-config ccache \
@@ -111,6 +118,7 @@ brew install \
     shellcheck hadolint universal-ctags \
     hyperfine tree parallel zstd \
     redis memcached rabbitmq mongodb-community
+brew unlink node >/dev/null 2>&1 || true
 
 # --- pyenv pythons
 
@@ -152,16 +160,39 @@ export PATH="$HOME/.local/bin:$PATH"
 uv venv --clear --seed --no-project --python 3.13 "$HOME/.env" ||
     uv venv --clear --seed --no-project "$HOME/.env"
 
+# --- node: 22 as the default in the shared nvm, as in agent.Dockerfile
+
+step "node 22 (shared nvm)"
+export NVM_DIR="$HOME/.nvm"
+mkdir -p "$NVM_DIR"
+if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+    # The shell profiles step wires nvm up itself.
+    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.4/install.sh |
+        PROFILE=/dev/null bash
+fi
+# nvm is not safe under set -euo pipefail.
+set +euo pipefail
+# shellcheck disable=SC1091
+. "$NVM_DIR/nvm.sh"
+nvm install 22 && nvm alias default 22 && nvm use 22
+nvm_status=$?
+set -euo pipefail
+[ "$nvm_status" -eq 0 ] || {
+    echo "ERROR: could not install node 22 with nvm" >&2
+    exit 1
+}
+ln -sfn "$(dirname "$(command -v node)")" "$NVM_DIR/current"
+
+# With the shared nvm's default (22) active and not matching pi's version,
+# install_pi.sh puts pi's node (24) in a private ~/.nvm-pi and leaves the
+# default alone.
 step "pi (via install_pi.sh)"
 bash "$HOME/.agent_tart_provision/install_pi.sh"
 export PATH="$HOME/.local/bin:$PATH"
 
-# --- node 22 + playwright browsers
+# --- playwright browsers (under the default node 22)
 
-if [ -s "$HOME/.nvm-pi/nvm.sh" ]; then
-    # shellcheck disable=SC1091
-    . "$HOME/.nvm-pi/nvm.sh"
-    nvm use 22 >/dev/null 2>&1 || true
+if command -v npx >/dev/null 2>&1; then
     step "playwright browsers"
     npx playwright install || true
     # Put playwright's browsers on PATH under their usual names. Wrappers,
@@ -235,6 +266,14 @@ export MACOSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
 export PI_OFFLINE=1
 export PI_SKIP_VERSION_CHECK=1
 eval "\$(pyenv init -)" 2>/dev/null || true
+EOF
+    # Default node 22. The trailing $NVM_DIR/current covers shells that do not
+    # run nvm's init; pi's wrapper in ~/.local/bin picks node 24 itself.
+    # shellcheck disable=SC2016
+    grep -qF 'NVM_DIR="$HOME/.nvm"' "$profile" || cat >>"$profile" <<'EOF'
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+export PATH="$PATH:$NVM_DIR/current"
 EOF
 done
 
