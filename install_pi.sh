@@ -640,6 +640,110 @@ else
   }
 fi
 
+# Coalesce marker-less multi-line pastes (earendil-works/pi#7321). Windows
+# console input strips bracketed-paste markers, so pi sees one Enter per
+# line and submits each pasted line as a separate message. The coalescer
+# holds a burst containing line breaks for 35 ms and, when more data follows
+# a line break, re-wraps it in \x1b[200~...\x1b[201~ so pi treats it as one
+# paste. Real bracketed pastes, escape sequences (arrow keys, kitty,
+# mouse reports, terminal replies), and lone Enter presses pass through
+# untouched. Best effort: a failure here warns but never fails the install.
+patch_pi_paste() {
+  local npm_root pkg target node_bin tmp
+  node_bin="$PI_NODE_BIN/node"
+  npm_root="$(PATH="$PI_NODE_BIN:$PATH" npm root -g 2>/dev/null || true)"
+  target=""
+  already=""
+  for pkg in "$npm_root/@earendil-works/pi-coding-agent" \
+             "$HOME"/.nvm-pi/versions/node/*/lib/node_modules/@earendil-works/pi-coding-agent; do
+    target="$(grep -rlF --include='chunk-*.js' \
+      'stdinDataHandler=data=>{this.stdinBuffer.process(data)}' \
+      "$pkg/dist/bundle/chunks/" 2>/dev/null | head -1 || true)"
+    [ -n "$target" ] && break
+    already="$(grep -rlF --include='chunk-*.js' \
+      '_pcq' "$pkg/dist/bundle/chunks/" 2>/dev/null | head -1 || true)"
+    [ -n "$already" ] && break
+  done
+  if [ -n "$already" ]; then
+    echo "pi paste patch already present: $already"
+    return 0
+  fi
+  if [ -z "$target" ]; then
+    echo "WARNING: paste patch skipped; pi bundle chunk not found" >&2
+    return 0
+  fi
+  cp "$target" "$target.pre-paste-patch.bak"
+  "$node_bin" --input-type=module - "$target" <<'PPEOF'
+import fs from "node:fs";
+const file = process.argv[2];
+const OLD = 'stdinDataHandler=data=>{this.stdinBuffer.process(data)}';
+const NEW = `stdinDataHandler=data=>{
+  let q=this._pcq||(this._pcq={buf:"",t:null,paste:false,start:0});
+  let flush=()=>{
+    if(q.t){clearTimeout(q.t);q.t=null}
+    let b=q.buf,p=q.paste;q.buf="";q.paste=false;
+    if(!b)return;
+    if(b.includes("\\x1b[200~")||b.includes("\\x1b[201~")){this.stdinBuffer.process(b);return}
+    if(p)this.stdinBuffer.process("\\x1b[200~"+b+"\\x1b[201~");
+    else this.stdinBuffer.process(b);
+  };
+  if(q.t){
+    clearTimeout(q.t);q.t=null;
+    if(data.includes("\\x1b")){q.paste=false;flush();this.stdinBuffer.process(data);return}
+    q.buf+=data;
+    if(/[\\r\\n]./.test(q.buf.replace(/\\r\\n/g,"\\r")))q.paste=true;
+    if(Date.now()-q.start<500)q.t=setTimeout(flush,35);
+    else flush();
+    return;
+  }
+  if(!data||data.includes("\\x1b")||data==="\\r"||data==="\\n"){this.stdinBuffer.process(data);return}
+  if(data.includes("\\r")||data.includes("\\n")){
+    q.buf=data;q.start=Date.now();
+    q.paste=/[\\r\\n]./.test(data.replace(/\\r\\n/g,"\\r"));
+    q.t=setTimeout(flush,35);
+    return;
+  }
+  this.stdinBuffer.process(data);
+}`;
+let src = fs.readFileSync(file, "utf8");
+if (!src.includes(OLD)) {
+  console.error("error: exact patch site not found in " + file);
+  process.exit(1);
+}
+fs.writeFileSync(file, src.replace(OLD, NEW));
+console.log("patched: " + file);
+PPEOF
+  if [ $? -ne 0 ]; then
+    mv "$target.pre-paste-patch.bak" "$target"
+    echo "WARNING: paste patch failed to apply; original restored" >&2
+    return 0
+  fi
+  tmp="$(mktemp /tmp/pi-chunk-XXXXXX.mjs)"
+  cp "$target" "$tmp"
+  if ! "$node_bin" --check "$tmp"; then
+    rm -f "$tmp"
+    mv "$target.pre-paste-patch.bak" "$target"
+    echo "WARNING: paste patch produced invalid syntax; original restored" >&2
+    return 0
+  fi
+  rm -f "$tmp"
+  if [ "$IS_WINDOWS" -eq 1 ]; then
+    pi --help >/dev/null 2>&1 || {
+      mv "$target.pre-paste-patch.bak" "$target"
+      echo "WARNING: patched pi failed to run; original restored" >&2
+      return 0
+    }
+  else
+    "$BINDIR/pi" --help >/dev/null 2>&1 || {
+      mv "$target.pre-paste-patch.bak" "$target"
+      echo "WARNING: patched pi failed to run; original restored" >&2
+      return 0
+    }
+  fi
+  echo "Applied multi-line paste patch to: $target"
+}
+patch_pi_paste
+
 # The config files were written with the docker default ollama url above.
 # Apply the platform-appropriate default instead: localhost on termux (ollama
 # runs on the device), the host gateway on a tart mac or windows sandbox, and

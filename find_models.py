@@ -498,6 +498,7 @@ def fetch_gguf_auxiliary_size_bytes(api: huggingface_hub.HfApi, repo_id: str) ->
 def select_best_quantization(
     candidates: list[ModelInfo], gpu_memory_gb: float,
     min_memory: float | None, context_limit_gb: float | None = None,
+    preferred_quants: list[str] | None = None,
 ) -> ModelInfo | None:
     fitting = [
         m for m in candidates if QUANT_PRIORITY_BITS.get(m.quantization, (None, 0))[0] is not None]
@@ -509,6 +510,10 @@ def select_best_quantization(
         fitting = [m for m in fitting if (min_memory or 0) <= m.size_gb <= gpu_memory_gb]
     if not fitting:
         return None
+    for quant in preferred_quants or []:
+        for m in fitting:
+            if m.quantization == quant:
+                return m
     fitting.sort(key=lambda m: QUANT_PRIORITY_BITS.get(m.quantization, (99, 0))[0])
     return fitting[0]
 
@@ -558,6 +563,7 @@ def discover_models(  # noqa
     limit: int, downloads: int, name_filter: str | None = None,
     min_memory: float | None = None, context_memory: int = 32768,
     context_limit_gb: float | None = None,
+    preferred_quants: list[str] | None = None,
 ) -> list[ModelInfo]:
     print(f'Fetching {model_filter} models from HuggingFace')
     tags = set()
@@ -663,7 +669,9 @@ def discover_models(  # noqa
                 has_embedding=caps['has_embedding'],
                 has_decision=caps['has_decision'],
             ))
-        best = select_best_quantization(candidates, gpu_memory_gb, min_memory, context_limit_gb)
+        best = select_best_quantization(
+            candidates, gpu_memory_gb, min_memory, context_limit_gb,
+            preferred_quants=preferred_quants)
         if best:
             discovered[model.id] = best
         else:
@@ -1344,7 +1352,20 @@ def main():  # noqa
         '-x', '--context-limit', type=float, default=None,
         help='Use context memory as the measure for choosing models',
     )
+    parser.add_argument(
+        '-q', '--quants', '--prefer-quants', dest='prefer_quants', default=None,
+        help='Comma-separated quantizations to prefer per model, in order '
+             '(e.g. Q4_K_M,Q2_K_L): pick the first one that exists for the '
+             'model and fits; otherwise fall back to the default choice',
+    )
     args = parser.parse_args()
+    preferred_quants = None
+    if args.prefer_quants:
+        preferred_quants = [q.strip().upper() for q in args.prefer_quants.split(',') if q.strip()]
+        unknown = [q for q in preferred_quants if q not in QUANT_PRIORITY_BITS]
+        if unknown:
+            print(f'Warning: unknown quantization(s) ignored: {", ".join(unknown)}')
+        preferred_quants = [q for q in preferred_quants if q in QUANT_PRIORITY_BITS] or None
     if args.local:
         args.source = 'local'
     source = set(args.source.split(','))
@@ -1425,6 +1446,7 @@ def main():  # noqa
             limit=args.limit, downloads=args.downloads, name_filter=args.regex,
             min_memory=args.min, context_memory=args.context_memory,
             context_limit_gb=args.context_limit,
+            preferred_quants=preferred_quants,
         ))
     if args.before or args.after:
         before = dateutil.parser.parse(args.before).astimezone(
