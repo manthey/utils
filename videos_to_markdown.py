@@ -319,8 +319,14 @@ def process_directory(args):  # noqa
         for filepath in file_list:
             if not filepath.is_file():
                 continue
-            if filepath.suffix.lower() not in {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv'}:
+            if filepath.suffix.lower() not in {
+                    '.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.gif',
+                    '.webp', '.apng', '.png'}:
                 continue
+            if filepath.suffix.lower() in {'.gif', '.png', '.apng', '.webp'}:
+                with PIL.Image.open(filepath) as img:
+                    if getattr(img, 'n_frames', 1) < 2:
+                        continue
             md_path = filepath.with_suffix(suffix)
             if args.out:
                 if os.path.isdir(args.out):
