@@ -86,6 +86,15 @@ Common options (support varies slightly per platform):
   other persisted files (`CLAUDE.md`, `rules/`, `projects/`, the login) are
   copied when the sandbox's copy is newer. Run `claudeout` for one sandbox
   at a time. This keeps Claude Code out of the provisioned images.
+- `--prune-claude`: after `claudeout` copies back, delete the session
+  transcripts in the `--claude` directory that have not changed in longer
+  than the `cleanupPeriodDays` in its `settings.json` (Claude Code's default
+  of 30 days when that is not set), as Claude Code does in `~/.claude` at
+  startup: each `projects/<project>/<session>.jsonl` and its `<session>`
+  folder (subagent transcripts and tool results). Project folders left empty
+  are removed; other files there, such as a project's `memory` folder, are
+  kept. Other commands ignore it; `--no-prune-claude` cancels one from the
+  config file.
 - `--sshkey`: which public key authorizes the host (default
   `~/.ssh/id_ed25519.pub`, then `id_ecdsa`, `id_rsa`; generated if none
   exists).

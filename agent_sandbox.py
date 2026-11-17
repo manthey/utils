@@ -874,6 +874,45 @@ def claude_out(key: str, user: str, ip: str, claude_dir: str):
         die(f'copying ~/.claude-outbox failed ({proc.returncode})')
 
 
+def prune_claude(claude_dir: str):
+    """Delete the session transcripts in a .claude-persist directory that
+    have not changed in more than its settings.json's cleanupPeriodDays
+    (default 30), as Claude Code does at startup: each
+    projects/<project>/<session>.jsonl along with its <session> folder
+    (subagent transcripts and tool results).  Project folders left empty are
+    removed; other files, such as a project's memory folder, are kept.
+    """
+    claude_dir = os.path.expanduser(claude_dir)
+    projects = os.path.join(claude_dir, 'projects')
+    if not os.path.isdir(projects):
+        return
+    days = 30
+    settings = os.path.join(claude_dir, 'settings.json')
+    if os.path.isfile(settings):
+        try:
+            with open(settings) as fptr:
+                days = json.load(fptr).get('cleanupPeriodDays', days)
+        except (OSError, ValueError, AttributeError):
+            days = None
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        info(f'not pruning: cannot read a positive cleanupPeriodDays from {settings}')
+        return
+    cutoff = time.time() - days * 86400
+    count = 0
+    for path in glob.glob(os.path.join(glob.escape(projects), '*', '*.jsonl')):
+        if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+            if os.path.isdir(path[:-len('.jsonl')]):
+                remove_tree(path[:-len('.jsonl')])
+            os.remove(path)
+            count += 1
+    for entry in os.listdir(projects):
+        try:
+            os.rmdir(os.path.join(projects, entry))
+        except OSError:
+            pass
+    info(f'pruned {count} session(s) older than {days} day(s) from {projects}')
+
+
 DEFAULT_OLLAMA_PORT = '11434'
 
 
@@ -1192,6 +1231,14 @@ def main():  # noqa
         '--claude, Claude is not installed.')
     parser.add_argument('--no-claude', dest='claude', action='store_const', const=None)
     parser.add_argument(
+        '--prune-claude', action='store_true',
+        help='claudeout: after copying back, delete the session transcripts '
+        '(projects/<project>/<session>.jsonl and its <session> folder) in the '
+        '--claude directory older than the cleanupPeriodDays in its '
+        'settings.json (default 30), as Claude Code does.  Ignored by other '
+        'commands.')
+    parser.add_argument('--no-prune-claude', dest='prune_claude', action='store_false')
+    parser.add_argument(
         '--skip', action='append', dest='skips',
         help='Files or folders to exclude from the copy. Use commas for '
         'multiple patterns in one --skip (e.g., ".venv,*.pyc") or repeat '
@@ -1316,6 +1363,8 @@ def main():  # noqa
             parser.error('claudeout requires --claude')
         ip = require_running(sandbox, key, args.user)
         claude_out(key, args.user, ip, args.claude)
+        if args.prune_claude:
+            prune_claude(args.claude)
 
 
 if __name__ == '__main__':

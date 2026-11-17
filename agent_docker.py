@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 
 import yaml
 
@@ -252,6 +253,45 @@ def claude_out(docker_cmd, container_name, claude_dir):
     subprocess.check_call(cmd)
 
 
+def prune_claude(claude_dir):
+    """Delete the session transcripts in a .claude-persist directory that
+    have not changed in more than its settings.json's cleanupPeriodDays
+    (default 30), as Claude Code does at startup: each
+    projects/<project>/<session>.jsonl along with its <session> folder
+    (subagent transcripts and tool results).  Project folders left empty are
+    removed; other files, such as a project's memory folder, are kept.
+    """
+    claude_dir = os.path.expanduser(claude_dir)
+    projects = os.path.join(claude_dir, 'projects')
+    if not os.path.isdir(projects):
+        return
+    days = 30
+    settings = os.path.join(claude_dir, 'settings.json')
+    if os.path.isfile(settings):
+        try:
+            with open(settings) as fptr:
+                days = json.load(fptr).get('cleanupPeriodDays', days)
+        except (OSError, ValueError, AttributeError):
+            days = None
+    if isinstance(days, bool) or not isinstance(days, int) or days < 1:
+        logger.warning('Not pruning: cannot read a positive cleanupPeriodDays from %s', settings)
+        return
+    cutoff = time.time() - days * 86400
+    count = 0
+    for path in glob.glob(os.path.join(glob.escape(projects), '*', '*.jsonl')):
+        if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+            if os.path.isdir(path[:-len('.jsonl')]):
+                shutil.rmtree(path[:-len('.jsonl')])
+            os.remove(path)
+            count += 1
+    for entry in os.listdir(projects):
+        try:
+            os.rmdir(os.path.join(projects, entry))
+        except OSError:
+            pass
+    logger.warning('Pruned %d session(s) older than %d day(s) from %s', count, days, projects)
+
+
 def print_ip(docker_cmd, container_name):
     """Print the address(es) at which a container can be reached from the
     host: the container's IP addresses (when it is running) and any published
@@ -388,6 +428,14 @@ def main():  # noqa
         'it.  Without a value (--claude=), this is %(const)s.  Without '
         '--claude, Claude is not installed.')
     parser.add_argument('--no-claude', dest='claude', action='store_const', const=None)
+    parser.add_argument(
+        '--prune-claude', action='store_true',
+        help='claudeout: after copying back, delete the session transcripts '
+        '(projects/<project>/<session>.jsonl and its <session> folder) in the '
+        '--claude directory older than the cleanupPeriodDays in its '
+        'settings.json (default 30), as Claude Code does.  Ignored by other '
+        'commands.')
+    parser.add_argument('--no-prune-claude', dest='prune_claude', action='store_false')
     parser.add_argument(
         '--skip', action='append', dest='skips',
         help='Files or folders to exclude from the copy. Use commas for '
@@ -603,6 +651,8 @@ def main():  # noqa
         if not args.claude:
             parser.error('claudeout requires --claude')
         claude_out(docker_cmd, container_name, args.claude)
+        if args.prune_claude:
+            prune_claude(args.claude)
     if args.command in {'create', 'start', 'exec', 'update'} and args.ollama:
         host = args.ollama
         if '/' not in args.ollama and ':' not in args.ollama:

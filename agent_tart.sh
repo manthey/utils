@@ -23,6 +23,9 @@
 # install_claude.sh; --claude= means the claude directory next to this
 # script); create and start copy it to ~/.claude-persist in the VM and
 # run install_claude.sh there. Without --claude, Claude is not installed.
+# claudeout --prune-claude then deletes the session transcripts in the
+# --claude directory older than the cleanupPeriodDays in its settings.json
+# (default 30), as Claude Code does; other commands ignore it.
 #
 # provision --no-cache pulls the base image from its registry instead of
 # using tart's cached copy (--cache, the default, uses the cached copy).
@@ -73,6 +76,7 @@ LOCAL=0
 CACHE=1
 OLLAMA=""
 CLAUDE_DIR=""
+PRUNE_CLAUDE=""
 CONFIG_FILE="$SELF_DIR/agent_tart.yaml"
 MOUNTS=()
 SKIPS=()
@@ -90,7 +94,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,41p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -191,6 +195,12 @@ parse_args() {
             ;;
         --no-claude)
             CLAUDE_DIR=""
+            ;;
+        --prune-claude)
+            PRUNE_CLAUDE=1
+            ;;
+        --no-prune-claude)
+            PRUNE_CLAUDE=""
             ;;
         --config)
             CONFIG_FILE="$2"
@@ -739,6 +749,32 @@ claude_out() {
     [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ] || die "copying ~/.claude-outbox failed"
 }
 
+# Delete the session transcripts in the --claude directory that have not
+# changed in more than its settings.json's cleanupPeriodDays (default 30), as
+# Claude Code does at startup: each projects/<project>/<session>.jsonl and
+# its <session> folder (subagent transcripts and tool results). Project
+# folders left empty are removed; other files, such as a project's memory
+# folder, are kept.
+prune_claude() {
+    local projects="$CLAUDE_DIR/projects" settings="$CLAUDE_DIR/settings.json" days=30 f count=0
+    [ -d "$projects" ] || return 0
+    if [ -s "$settings" ]; then
+        days="$(jq -r '.cleanupPeriodDays // 30' "$settings" 2>/dev/null)" || days=""
+    fi
+    case "$days" in
+    '' | *[!0-9]* | 0*)
+        info "not pruning: cannot read a positive cleanupPeriodDays from $settings"
+        return 0
+        ;;
+    esac
+    while IFS= read -r f; do
+        rm -rf "${f%.jsonl}" "$f"
+        count=$((count + 1))
+    done < <(find "$projects" -mindepth 2 -maxdepth 2 -type f -name '*.jsonl' -mmin +$((days * 1440)))
+    find "$projects" -mindepth 1 -maxdepth 1 -type d -empty -exec rmdir {} +
+    info "pruned $count session(s) older than $days day(s) from $projects"
+}
+
 # Every command that talks to a VM over ssh needs the key resolved first;
 # ensure_ssh_key is a no-op when it is already set.
 case "$COMMAND" in
@@ -862,5 +898,6 @@ claudeout)
     [ -n "$CLAUDE_DIR" ] || die "claudeout requires --claude"
     vm_running "$VM_NAME" || die "$VM_NAME is not running"
     claude_out "$VM_NAME"
+    [ -z "$PRUNE_CLAUDE" ] || prune_claude
     ;;
 esac
