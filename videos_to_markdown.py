@@ -66,8 +66,8 @@ def describe_sequence(
 
 def get_duration(video_path: Path, ffmpeg_bin: str) -> float:
     cmd = [
-        ffmpeg_bin, '-hide_banner', '-loglevel', 'info', '-i', str(video_path),
-        '-map', '0:v:0', '-vf', 'showinfo', '-f', 'null', '-',
+        ffmpeg_bin, '-nostdin', '-hide_banner', '-loglevel', 'info', '-i',
+        str(video_path), '-map', '0:v:0', '-vf', 'showinfo', '-f', 'null', '-',
     ]
     # logger.debug('Command %s', ' '.join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -78,7 +78,7 @@ def get_duration(video_path: Path, ffmpeg_bin: str) -> float:
 
 def detect_scene_changes(video_path: Path, ffmpeg_bin: str, threshold: float) -> list[float]:
     cmd = [
-        ffmpeg_bin, '-i', str(video_path),
+        ffmpeg_bin, '-nostdin', '-i', str(video_path),
         '-vf', f"select='gt(scene,{threshold})',showinfo",
         '-f', 'null', '-',
     ]
@@ -140,8 +140,8 @@ def extract_frames_at(
             out = Path(temp_dir) / f'frame_{i:04d}.jpg'
             ft = math.floor(ts * 1000) / 1000
             cmd = [
-                ffmpeg_bin, '-y', '-ss', f'{ft:.3f}', '-i', str(video_path),
-                '-frames:v', '1', '-q:v', '2',
+                ffmpeg_bin, '-nostdin', '-y', '-ss', f'{ft:.3f}', '-i',
+                str(video_path), '-frames:v', '1', '-q:v', '2',
             ]
             if max_size:
                 cmd += ['-vf',
