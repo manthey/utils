@@ -406,7 +406,6 @@ def main():
     for agent, sessions_dir, func in sources:
         sessions_dir = os.path.expanduser(sessions_dir)
         if not os.path.isdir(sessions_dir):
-            print(f'Sessions directory not found: {sessions_dir}', file=sys.stderr)
             continue
         totals[agent] = 0
         for filepath, count, usage_sum, data in func(sessions_dir, args):
@@ -414,7 +413,6 @@ def main():
                 continue
             print(f'## {filepath}')
             branch_label = args.branch.upper()
-            print(f'- Agent: {agent}')
             print(f'- Calls ({branch_label}): ' + ', '.join(
                 f'{k}: {count[k]}' for k in sorted(count)
             ))
