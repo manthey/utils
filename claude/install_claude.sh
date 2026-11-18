@@ -242,7 +242,20 @@ MINGW*|MSYS*|CYGWIN*)
   # %USERPROFILE%\.local\bin, which is $BINDIR here.
   installer="$(mktemp -d)/install.ps1"
   fetch https://claude.ai/install.ps1 > "$installer"
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$installer")" \
+  # Windows PowerShell's web requests use the system proxy, not
+  # HTTPS_PROXY; when that is set, run the installer from a wrapper that
+  # points them at it (the agent sandbox allows no other way out).
+  run="$installer"
+  if [ -n "${HTTPS_PROXY:-${https_proxy:-}}" ]; then
+    run="$(dirname "$installer")/wrapper.ps1"
+    cat > "$run" <<'EOF'
+$proxy = if ($env:HTTPS_PROXY) { $env:HTTPS_PROXY } else { $env:https_proxy }
+[Net.WebRequest]::DefaultWebProxy = New-Object Net.WebProxy($proxy, $true)
+& (Join-Path $PSScriptRoot 'install.ps1') @args
+exit $LASTEXITCODE
+EOF
+  fi
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$run")" \
     ${CLAUDE_CHANNEL:+"$CLAUDE_CHANNEL"}
   rm -rf "$(dirname "$installer")"
   ;;

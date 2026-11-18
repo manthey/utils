@@ -37,6 +37,12 @@
 # --claude directory older than the cleanupPeriodDays in its settings.json
 # (default 30), as Claude Code does; other commands ignore it.
 #
+# --proxy=PORT (or HOST:PORT; --proxy alone means port 3128) sets the proxy
+# environment variables in the sandbox so that programs that honor them go
+# through agent_proxy.py running on the host, which asks before allowing
+# destinations that are not on its whitelist. Nothing stops a program in
+# the sandbox from ignoring the proxy; only agent_docker.py enforces it.
+#
 # cp usage: agent_termux.sh cp [--name NAME] in:<guest path>... <local path>
 #           agent_termux.sh cp [--name NAME] <local path>... in:<guest path>
 #           (like docker cp; directories are copied recursively; quote a
@@ -93,6 +99,7 @@ CACHE=1
 OLLAMA=""
 CLAUDE_DIR=""
 PRUNE_CLAUDE=""
+PROXY=""
 CONFIG_FILE="$SELF_DIR/agent_termux.yaml"
 MOUNTS=()
 SKIPS=()
@@ -110,7 +117,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,63p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -194,6 +201,22 @@ parse_args() {
             ;;
         --no-claude)
             CLAUDE_DIR=""
+            ;;
+        --proxy)
+            # Like agent_docker.py, the value is optional: --proxy alone (or
+            # --proxy=) means the default port. The next word is only taken
+            # as the value if it is a port or host:port.
+            PROXY=3128
+            if [ $# -gt 1 ] && { [ -z "$2" ] || [[ "$2" =~ ^([^-[:space:]][^[:space:]]*:)?[0-9]+$ ]]; }; then
+                PROXY="${2:-3128}"
+                shift
+            fi
+            ;;
+        --help | -h)
+            usage
+            ;;
+        --no-proxy)
+            PROXY=""
             ;;
         --prune-claude)
             PRUNE_CLAUDE=1
@@ -364,6 +387,15 @@ ensure_ssh_key() {
 # binaries need because they chain-load the Android system linker. Guest
 # writes can only land in the sandbox (mount requests arrive as extra
 # binds).
+# The guest shares the device's network, so a bare --proxy port is the
+# proxy on localhost.
+proxy_url() {
+    case "$PROXY" in
+    *:*) printf 'http://%s' "$PROXY" ;;
+    *) printf 'http://127.0.0.1:%s' "$PROXY" ;;
+    esac
+}
+
 launch_proot() {
     local vm="$1"
     shift
@@ -376,6 +408,13 @@ launch_proot() {
         LD_PRELOAD="$GUEST_PREFIX/lib/libtermux-exec.so"
     )
     [ -n "${TERMUX_VERSION:-}" ] && env_args+=("TERMUX_VERSION=$TERMUX_VERSION")
+    if [ -n "$PROXY" ]; then
+        local url
+        url="$(proxy_url)"
+        env_args+=("HTTP_PROXY=$url" "HTTPS_PROXY=$url" "http_proxy=$url" "https_proxy=$url"
+            "NO_PROXY=localhost,127.0.0.1,::1" "no_proxy=localhost,127.0.0.1,::1"
+            "NODE_USE_ENV_PROXY=1")
+    fi
     local host_binds=(-b /proc -b /dev -b /sys)
     local os_dir
     for os_dir in /system /apex /linkerconfig; do
@@ -856,6 +895,16 @@ create | start)
     cat "$SSH_KEY.pub" > "$(guest_root "$VM_NAME")$GUEST_HOME/.ssh/authorized_keys"
     chmod 600 "$(guest_root "$VM_NAME")$GUEST_HOME/.ssh/authorized_keys"
     build_mount_args
+    if [ -n "$PROXY" ]; then
+        # ssh sessions get their environment from the guest's bash.bashrc.
+        url="$(proxy_url)"
+        info "using the proxy at $url (agent_proxy.py must listen there)"
+        cat >>"$(guest_root "$VM_NAME")$GUEST_PREFIX/etc/bash.bashrc" <<EOF
+export HTTP_PROXY='$url' HTTPS_PROXY='$url' http_proxy='$url' https_proxy='$url'
+export NO_PROXY='localhost,127.0.0.1,::1' no_proxy='localhost,127.0.0.1,::1'
+export NODE_USE_ENV_PROXY=1
+EOF
+    fi
     transfer_project "$VM_NAME"
     restore_git_modes "$VM_NAME"
     [ -z "$CLAUDE_DIR" ] || claude_in "$VM_NAME"

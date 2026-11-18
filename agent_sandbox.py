@@ -837,12 +837,17 @@ def claude_copy(key: str, user: str, ip: str, claude_dir: str):
         die('copying the claude directory failed')
 
 
-def claude_in(key: str, user: str, ip: str, claude_dir: str):
+def claude_in(key: str, user: str, ip: str, claude_dir: str, proxy_port: int | None = None):
     """Copy a .claude-persist directory into the sandbox and run its
-    install_claude.sh.
+    install_claude.sh.  With a proxy port, that port is forwarded to the
+    host for the install, since the sandbox's proxy settings point at its
+    own loopback and the user's tunnel may not be running yet.
     """
     claude_copy(key, user, ip, claude_dir)
-    result = run(['ssh'] + ssh_base(key) + [
+    forward = []
+    if proxy_port is not None:
+        forward = ['-R', f'{proxy_port}:127.0.0.1:{proxy_port}']
+    result = run(['ssh'] + ssh_base(key) + forward + [
         f'{user}@{ip}', 'bash ~/.claude-persist/install_claude.sh'])
     if result.returncode:
         info('install_claude.sh failed')
@@ -932,6 +937,16 @@ def ollama_url(value: str | None) -> str:
     return host.rstrip('/')
 
 
+def proxy_url(value: str | None) -> str:
+    """Expand --proxy the way ollama_url expands --ollama: a bare port is
+    agent_proxy.py on the host, forwarded to the sandbox's own loopback by
+    the ssh tunnel; host:port is used as given.  Empty without --proxy.
+    """
+    if not value:
+        return ''
+    return f'http://{value}' if ':' in value else f'http://127.0.0.1:{value}'
+
+
 def tunnel_port(url: str) -> int | None:
     """The port to forward when the ollama url points at the sandbox's own
     loopback, else None.
@@ -947,9 +962,13 @@ def tunnel_note(args, key: str, ip: str, url: str):
     sandbox (agent_containers.md, "Windows Sandbox: reaching ollama").
     """
     port = tunnel_port(url)
-    if port is None:
+    proxy = tunnel_port(proxy_url(args.proxy)) if args.proxy else None
+    if port is None and proxy is None:
         return
-    cmd = ['ssh', '-N', '-R', f'{port}:127.0.0.1:{port}']
+    cmd = ['ssh', '-N']
+    for forward in (port, proxy):
+        if forward is not None:
+            cmd += ['-R', f'{forward}:127.0.0.1:{forward}']
     if args.sshkey:
         cmd += ['-i', key]
     # Sandbox IPs are reused with new host keys; the script's own
@@ -958,8 +977,12 @@ def tunnel_note(args, key: str, ip: str, url: str):
             '-o', 'StrictHostKeyChecking=no',
             '-o', 'ServerAliveInterval=30',
             f'{args.user}@{ip}']
-    info(f"pi uses ollama at {url}; to reach the host's ollama, keep this "
-         'running in a host terminal:')
+    if proxy is not None:
+        info(f'programs that honor the proxy settings use agent_proxy.py on port {proxy} '
+             'of this machine')
+    if port is not None:
+        info(f"pi uses ollama at {url} (the host's ollama)")
+    info('for these to work, keep this running in a host terminal:')
     print(f'  {subprocess.list2cmdline(cmd)}', file=sys.stderr)
 
 
@@ -1111,6 +1134,7 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
         'skips': skips,
         'mounts': specs,
         'ollama': ollama_url(args.ollama),
+        'proxy': proxy_url(args.proxy),
         'copy_tools': bool(args.copy_tools),
         'debloat': bool(args.debloat),
     }, open(key + '.pub').read(), extra_pubkeys)
@@ -1131,7 +1155,8 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
              f'-o StrictHostKeyChecking=accept-new {args.user}@{lan_ip()}')
     tunnel_note(args, key, ip, ollama_url(args.ollama))
     if args.claude:
-        claude_in(key, args.user, ip, args.claude)
+        claude_in(key, args.user, ip, args.claude,
+                  tunnel_port(proxy_url(args.proxy)) if args.proxy else None)
     if args.command == 'create':
         ssh_interactive(key, args.user, ip, [])
     info(f'connect with: {sys.argv[0]} exec --name {sandbox.name}')
@@ -1191,6 +1216,16 @@ def main():  # noqa
         'and port, or a full base url.  A bare port (default 11434) means '
         "the host's ollama forwarded into the sandbox over an ssh tunnel "
         '(the command is printed by create and start).')
+    parser.add_argument(
+        '--proxy', nargs='?', const='3128',
+        help='When starting a sandbox, set its proxy environment variables '
+        'so that programs that honor them go through agent_proxy.py, which '
+        'must be running on the host and asks before allowing destinations '
+        'that are not on its whitelist.  The value is the port the proxy '
+        'listens on (default %(const)s), forwarded into the sandbox over '
+        "the ssh tunnel, or a host:port to use as given.  The sandbox's "
+        'firewall blocks all other outbound access.')
+    parser.add_argument('--no-proxy', dest='proxy', action='store_const', const=None)
     parser.add_argument(
         '--gpu', '--gpus', action='store_true',
         help='Enable the virtual GPU in the sandbox.')

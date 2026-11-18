@@ -95,6 +95,12 @@ Common options (support varies slightly per platform):
   are removed; other files there, such as a project's `memory` folder, are
   kept. Other commands ignore it; `--no-prune-claude` cancels one from the
   config file.
+- `--proxy[=PORT]`: route the sandbox's network access through
+  `agent_proxy.py` on the host (default port 3128; `host:port` is also
+  accepted), which asks before allowing destinations that are not on its
+  whitelist. Enforced by `agent_docker.py` and `agent_sandbox.py` only; see
+  "Network access" below.
+  `--no-proxy` cancels one from the config file.
 - `--sshkey`: which public key authorizes the host (default
   `~/.ssh/id_ed25519.pub`, then `id_ecdsa`, `id_rsa`; generated if none
   exists).
@@ -129,6 +135,109 @@ and `google-chrome`) and `firefox`; in docker the chromium names add
 The project is copied in at `create`/`start` (with `--skip` applied).
 Results leave the sandbox only when the host copies them out with `cp` (or
 through a read-write `--mount`). The guest user is unprivileged everywhere.
+
+### Network access (agent_proxy.py)
+
+By default a sandbox has unrestricted network access. `agent_proxy.py` is an
+http proxy that runs on the host, in its own terminal, and decides which
+destinations sandboxes may reach:
+
+```
+agent_proxy.py                 # on the host; leave it running
+<agent> create --proxy         # in another terminal
+```
+
+Each destination (host and port) is checked against a blacklist, then a
+whitelist. Anything on neither waits, and the proxy asks at its console:
+
+```
+[agent_utils] CONNECT api.github.com:443
+  1 allow once   2 allow this session   3 add to whitelist
+  4 deny once    5 deny this session    6 add to blacklist
+  (3 and 6 can be followed by a rule, such as: 3 *.example.com)
+>
+```
+
+A session lasts until the proxy exits. Requests to the same destination wait
+on one question; if the program that asked has given up by the time "allow
+once" is answered, the next request to that destination is allowed instead.
+Programs often time out while a question is open and need to be retried.
+With `--no-prompt`, or when the proxy's input is not a terminal that stays
+open, destinations that are not on the whitelist are denied.
+
+The lists are `~/.agent_proxy/whitelist.txt` and `blacklist.txt` (`--dir`,
+`--whitelist`, `--blacklist`). Both start empty. The proxy only appends to
+them (answers 3 and 6); remove or change rules by editing the files, which
+are reread when they change. One rule per line:
+
+```
+example.com        that host, ports 80 and 443
+example.com:8080   that host, that port only
+example.com:*      that host, any port
+*.example.com      any subdomain, but not example.com itself
+.example.com       example.com and any subdomain
+10.1.2.3:5000      an address; ipv6 addresses as [::1]:5000
+```
+
+Every request is appended to `~/.agent_proxy/proxy.log` as a line of json:
+time, sandbox, method, host, port, whether it was allowed and why, bytes
+sent and received, and for plain http the url. `-v` also prints each allowed
+request.
+
+What the proxy does and does not do:
+
+- https is tunneled without being decrypted, so the proxy sees and decides
+  on the host and port only, not urls or content. An allowed host can be
+  sent anything.
+- A name that resolves to an address that is not on the public internet
+  (the host itself, the local network) needs that address to be allowed as
+  well, so an allowed name cannot be pointed at local services.
+- `host.docker.internal` (`--host-alias`) means the machine the proxy runs
+  on; allow the host's ollama with the rule `host.docker.internal:11434`.
+- Only http and https go through the proxy, and only from programs that
+  honor the `HTTP_PROXY`/`HTTPS_PROXY` environment variables (curl, pip, uv,
+  npm, git over https, Claude Code, and node programs such as pi through
+  `NODE_USE_ENV_PROXY=1`, which is set).
+
+How strictly `--proxy` holds depends on the platform:
+
+| script             | with `--proxy`                                           |
+|--------------------|----------------------------------------------------------|
+| `agent_docker.py`  | enforced: the container has no other route out           |
+| `agent_tart.sh`    | proxy environment set; other access is not blocked       |
+| `agent_termux.sh`  | proxy environment set; other access is not blocked       |
+| `agent_sandbox.py` | enforced: the sandbox's firewall blocks other access     |
+
+- docker: the container is attached only to an internal docker network
+  (`<name>_net`), which has no route to the internet, the host or the LAN.
+  A relay container (`<name>_proxy`, running `agent_proxy.py relay`) sits on
+  both that network and the default one and forwards the proxy port to the
+  host, and the `--ssh` port to the container. Programs that ignore the
+  proxy settings fail instead of connecting directly. On linux the proxy
+  must listen on the docker bridge address, which it does by default when
+  there is a `docker0` interface (otherwise use `--listen`). `--docker`
+  (the docker socket) defeats this. To check from inside the container,
+  both of these should fail:
+
+  ```
+  curl -m 5 --noproxy '*' https://example.com
+  getent hosts example.com
+  ```
+
+- tart: the proxy is reached at the VM's default gateway, so run
+  `agent_proxy.py --listen <that address>` (typically `192.168.64.1`).
+- termux: the guest shares the device's network; the proxy is on localhost.
+- Windows Sandbox: the proxy port is forwarded into the sandbox by the same
+  ssh tunnel as ollama (`create` and `start` print the command, and forward
+  it themselves while installing Claude Code). Provisioning sets the
+  sandbox's firewall to block all outbound connections, including DNS,
+  except to loopback (where the tunnel's ports are) and to a `--proxy` or
+  `--ollama` given as `host:port`; the sandbox user is not an administrator
+  and cannot change it. Without the tunnel running, nothing in the sandbox
+  can reach the network. Windows PowerShell and other .NET Framework
+  programs use the Windows proxy setting rather than `HTTPS_PROXY`, so they
+  fail unless told about the proxy (`install_claude.sh` does this for the
+  Claude Code installer).
 
 ---
 

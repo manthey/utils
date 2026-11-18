@@ -27,6 +27,12 @@
 # --claude directory older than the cleanupPeriodDays in its settings.json
 # (default 30), as Claude Code does; other commands ignore it.
 #
+# --proxy=PORT (or HOST:PORT; --proxy alone means port 3128) sets the proxy
+# environment variables in the VM so that programs that honor them go
+# through agent_proxy.py running on the host, which asks before allowing
+# destinations that are not on its whitelist. Nothing stops a program in
+# the VM from ignoring the proxy; only agent_docker.py enforces it.
+#
 # provision --no-cache pulls the base image from its registry instead of
 # using tart's cached copy (--cache, the default, uses the cached copy).
 #
@@ -77,6 +83,7 @@ CACHE=1
 OLLAMA=""
 CLAUDE_DIR=""
 PRUNE_CLAUDE=""
+PROXY=""
 CONFIG_FILE="$SELF_DIR/agent_tart.yaml"
 MOUNTS=()
 SKIPS=()
@@ -94,7 +101,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
@@ -195,6 +202,22 @@ parse_args() {
             ;;
         --no-claude)
             CLAUDE_DIR=""
+            ;;
+        --proxy)
+            # Like agent_docker.py, the value is optional: --proxy alone (or
+            # --proxy=) means the default port. The next word is only taken
+            # as the value if it is a port or host:port.
+            PROXY=3128
+            if [ $# -gt 1 ] && { [ -z "$2" ] || [[ "$2" =~ ^([^-[:space:]][^[:space:]]*:)?[0-9]+$ ]]; }; then
+                PROXY="${2:-3128}"
+                shift
+            fi
+            ;;
+        --help | -h)
+            usage
+            ;;
+        --no-proxy)
+            PROXY=""
             ;;
         --prune-claude)
             PRUNE_CLAUDE=1
@@ -711,6 +734,30 @@ set_ollama_url() {
     run_ssh "$vm" "set_ollama.sh '$url'"
 }
 
+# Set the proxy environment variables for every shell in the VM. zsh reads
+# ~/.zshenv even for the commands this script runs over ssh.
+set_proxy_env() {
+    local vm="$1"
+    local host="$2"
+    local url
+    case "$host" in
+    *:*)
+        url="http://$host"
+        ;;
+    *)
+        local gateway
+        gateway="$(run_ssh "$vm" "netstat -nr | awk '/default/{print \$2; exit}'")"
+        url="http://$gateway:$host"
+        ;;
+    esac
+    info "using the proxy at $url (agent_proxy.py must listen there)"
+    run_ssh "$vm" "tee -a ~/.zshenv ~/.bashrc >/dev/null" <<EOF || die "setting the proxy failed"
+export HTTP_PROXY='$url' HTTPS_PROXY='$url' http_proxy='$url' https_proxy='$url'
+export NO_PROXY='localhost,127.0.0.1,::1' no_proxy='localhost,127.0.0.1,::1'
+export NODE_USE_ENV_PROXY=1
+EOF
+}
+
 # Copy the --claude directory to ~/.claude-persist in the VM.
 # COPYFILE_DISABLE keeps macOS tar from adding ._ files.
 claude_copy() {
@@ -849,6 +896,7 @@ create | start)
     # The base already authorizes the key it was provisioned with; this only
     # falls back to the password bootstrap when --sshkey chose another key.
     bootstrap_ssh_key "$VM_NAME"
+    [ -z "$PROXY" ] || set_proxy_env "$VM_NAME" "$PROXY"
     link_mounts "$VM_NAME"
     transfer_project "$VM_NAME"
     restore_git_modes "$VM_NAME"

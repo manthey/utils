@@ -27,6 +27,7 @@ $project = Get-ArgOr $runArgs 'project' ''
 $skips = @(Get-ArgOr $runArgs 'skips' @())
 $mounts = @(Get-ArgOr $runArgs 'mounts' @())
 $ollama = Get-ArgOr $runArgs 'ollama' ''
+$proxy = Get-ArgOr $runArgs 'proxy' ''
 
 if (-not (Test-Path (Join-Path $script:Payload 'home'))) {
     Fail 'the payload has no home skeleton; run agent_sandbox.py provision'
@@ -117,6 +118,18 @@ Invoke-Checked 'ollama url' {
     if ($ollama) { $arg = " '$ollama'" }
     $code = Invoke-Bash $user "~/.local/bin/set_ollama.sh$arg"
     if ($code -ne 0) { Log 'WARNING: set_ollama.sh failed' }
+}
+
+Invoke-Checked 'proxy' {
+    # Machine variables: ssh sessions build their environment from the
+    # registry at logon.
+    if ($proxy) {
+        [Environment]::SetEnvironmentVariable('HTTP_PROXY', $proxy, 'Machine')
+        [Environment]::SetEnvironmentVariable('HTTPS_PROXY', $proxy, 'Machine')
+        [Environment]::SetEnvironmentVariable('NO_PROXY', 'localhost,127.0.0.1,::1', 'Machine')
+        [Environment]::SetEnvironmentVariable('NODE_USE_ENV_PROXY', '1', 'Machine')
+        Limit-NetworkToProxy @($proxy, $ollama)
+    }
 }
 
 Invoke-Checked 'fixing ownership' { Set-HomeOwner $user $homeDir }

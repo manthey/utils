@@ -27,6 +27,7 @@ import yaml
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+PROXY_PORT = 3128
 
 
 def safe_filename(name: str) -> str:
@@ -292,6 +293,89 @@ def prune_claude(claude_dir):
     logger.warning('Pruned %d session(s) older than %d day(s) from %s', count, days, projects)
 
 
+def proxy_env(container_name):
+    """The environment that sends a container's network access to its
+    relay (see proxy_start).
+    """
+    url = f'http://{container_name}_proxy:{PROXY_PORT}'
+    local = 'localhost,127.0.0.1,::1'
+    return {
+        'HTTP_PROXY': url, 'HTTPS_PROXY': url, 'http_proxy': url, 'https_proxy': url,
+        'NO_PROXY': local, 'no_proxy': local, 'NODE_USE_ENV_PROXY': '1'}
+
+
+def proxy_remove(docker_cmd, container_name):
+    """Remove the relay container and the network that --proxy creates for
+    a container, if they exist.
+    """
+    for cmd in (['rm', '-f', container_name + '_proxy'],
+                ['network', 'rm', container_name + '_net']):
+        cmd = docker_cmd + cmd
+        logger.info(cmd)
+        subprocess.run(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def proxy_start(docker_cmd, container_name, proxy, gateway, ssh_port=None):
+    """Prepare to route all of a container's network access through
+    agent_proxy.py running on the host, and return the docker run options
+    that do so.
+
+    The container is attached only to an internal docker network, which has
+    no route to anywhere else.  A relay container is attached to both that
+    network and the default one; it forwards the proxy port to the proxy on
+    the host and, since an internal network cannot publish ports, the ssh
+    port to the container.
+    """
+    relay, network = container_name + '_proxy', container_name + '_net'
+    target = proxy if ':' in proxy else f'host.docker.internal:{proxy}'
+    # In isolated mode the host has no address on the network, so the
+    # container cannot reach services on the host either; older versions of
+    # docker do not have it.
+    isolated = ['-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated']
+    for opts in (isolated, []):
+        cmd = docker_cmd + ['network', 'create', '--internal'] + opts + [network]
+        logger.info(cmd)
+        if not subprocess.run(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            break
+    else:
+        msg = f'Failed to create the docker network {network}'
+        raise SystemExit(msg)
+    if not opts:
+        logger.warning(
+            'This docker cannot isolate the sandbox network from the host; services that '
+            "listen on all of the host's addresses can be reached without the proxy.")
+    forwards = [f'{PROXY_PORT}={target}@{container_name}']
+    publish = []
+    if ssh_port:
+        forwards.append(f'2222={container_name}:2222')
+        publish = ['-p', f'{ssh_port}:2222']
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent_proxy.py')
+    for cmd in (
+        ['run', '-d', '--rm', '--name', relay,
+         '--add-host', f'host.docker.internal:{gateway}'] + publish +
+        ['manthey/agent:latest', 'sleep', 'infinity'],
+        ['network', 'connect', network, relay],
+        ['cp', host_path(docker_cmd, script), f'{relay}:/tmp/agent_proxy.py'],
+        ['exec', '-d', relay, 'python3', '/tmp/agent_proxy.py', 'relay'] + forwards,
+    ):
+        cmd = docker_cmd + cmd
+        logger.info(cmd)
+        subprocess.check_call(cmd, stdout=subprocess.DEVNULL)
+    host, _, port = target.rpartition(':')
+    if container_sh(docker_cmd, relay, f'timeout 5 bash -c "</dev/tcp/{host}/{port}"\n',
+                    check=False).returncode:
+        logger.warning(
+            'Nothing answers at %s, so the sandbox has no network access.  Start '
+            'agent_proxy.py on the host; it has to listen on the address at which docker '
+            'containers reach the host (see its --listen option).', target)
+    opts = ['--network', network]
+    for key, value in proxy_env(container_name).items():
+        opts.extend(['-e', f'{key}={value}'])
+    return opts
+
+
 def print_ip(docker_cmd, container_name):
     """Print the address(es) at which a container can be reached from the
     host: the container's IP addresses (when it is running) and any published
@@ -383,6 +467,14 @@ def main():  # noqa
         '--ollama', '--url',
         help='Replacement url for ollama.  This can be just a port, a host '
         'and port, or a full base url.')
+    parser.add_argument(
+        '--proxy', nargs='?', const=str(PROXY_PORT),
+        help='When starting a container, give it no network access except '
+        'through agent_proxy.py, which must be running on the host and asks '
+        'before allowing destinations that are not on its whitelist.  The '
+        'value is the port the proxy listens on (default %(const)s) or its '
+        'host:port.')
+    parser.add_argument('--no-proxy', dest='proxy', action='store_const', const=None)
     parser.add_argument(
         '--fuse', action='store_true',
         help='Pass options to allow fuse to work when starting a container.')
@@ -546,6 +638,7 @@ def main():  # noqa
             cmd = docker_cmd + ['rm', '-f', renamed_id]
             logger.info(cmd)
             subprocess.run(cmd, stderr=subprocess.DEVNULL, check=False)
+        proxy_remove(docker_cmd, container_name)
     if args.command in {'create', 'start'}:
         skip_patterns = []
         if args.skips:
@@ -570,9 +663,13 @@ def main():  # noqa
             other_opts.extend(['-v', '/var/run/docker.sock:/var/run/docker.sock'])
         if args.ssh:
             port = free_port(docker_cmd, args.sshport)
-            other_opts.extend(['-p', f'{port}:2222'])
+            if not args.proxy:
+                other_opts.extend(['-p', f'{port}:2222'])
             if port != args.sshport:
                 logger.warning('Using ssh port %s', port)
+        if args.proxy:
+            other_opts.extend(proxy_start(
+                docker_cmd, container_name, args.proxy, gateway, port if args.ssh else None))
         cmd = docker_cmd + [
             'run', '-d', '--rm', '--name', container_name,
             '--add-host', f'host.docker.internal:{gateway}',
@@ -677,6 +774,13 @@ def main():  # noqa
              'chmod 0600 /home/ubuntu/.ssh/authorized_keys')]
         logger.info(cmd)
         subprocess.check_call(cmd)
+        if args.proxy:
+            # ssh sessions do not inherit the container's environment
+            container_sh(
+                docker_cmd, container_name,
+                ''.join(f'echo {shlex.quote(f"{key}={value}")} >> /etc/environment\n'
+                        for key, value in proxy_env(container_name).items()),
+                user='root')
         cmd = docker_cmd + [
             'exec', '-it', '--user', 'root', container_name, 'bash', '-c',
             '/usr/sbin/sshd']

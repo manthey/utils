@@ -141,6 +141,8 @@ function Set-ToolchainEnvironment([string]$User) {
     [Environment]::SetEnvironmentVariable('NPM_CONFIG_PREFIX', (Join-Path $homeDir '.npm-global'), 'Machine')
     [Environment]::SetEnvironmentVariable('PI_OFFLINE', '1', 'Machine')
     [Environment]::SetEnvironmentVariable('PI_SKIP_VERSION_CHECK', '1', 'Machine')
+    [Environment]::SetEnvironmentVariable('DISABLE_TELEMETRY', '1', 'Machine')
+    [Environment]::SetEnvironmentVariable('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', '1', 'Machine')
     [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Machine')
     $env:Path = (($paths + @($env:Path -split ';')) -join ';')
     $env:NPM_CONFIG_PREFIX = Join-Path $homeDir '.npm-global'
@@ -362,6 +364,51 @@ function Add-HostGatewayEntry {
     $lines += "$gateway`thost.docker.internal"
     $lines | Set-Content -Path $hosts -Encoding ASCII
     Log "host.docker.internal -> $gateway"
+}
+
+function Limit-NetworkToProxy([string[]]$Urls) {
+    # With --proxy, the sandbox reaches the network only through
+    # agent_proxy.py: every outbound connection is blocked except to
+    # loopback, where the ssh tunnel forwards the proxy port (Windows
+    # Firewall does not filter loopback), and to the given urls that are not
+    # on loopback (a --proxy or --ollama given as host:port).  The firewall
+    # is stateful, so inbound ssh keeps working.  The sandbox user is not an
+    # administrator and cannot undo this.  Names are resolved first, since
+    # DNS is blocked afterwards.
+    $allow = @()
+    foreach ($url in $Urls) {
+        if (-not $url) { continue }
+        $uri = [Uri]$url
+        if ($uri.IsLoopback) { continue }
+        $addresses = @([Net.Dns]::GetHostAddresses($uri.Host) | ForEach-Object { $_.IPAddressToString })
+        if ($addresses.Count -eq 0) { throw "could not resolve $($uri.Host)" }
+        $allow += @{ Host = $uri.Host; Port = $uri.Port; Addresses = $addresses }
+    }
+    # The built-in outbound allow rules would still let traffic out (DNS,
+    # for one, can carry data); only DHCP is kept, so the address lease can
+    # be renewed.
+    Get-NetFirewallRule -ErrorAction Stop |
+        Where-Object { $_.Direction -eq 'Outbound' -and $_.Action -eq 'Allow' -and
+                       $_.Enabled -eq 'True' -and $_.Name -notlike 'CoreNet-DHCP*' } |
+        Disable-NetFirewallRule -ErrorAction Stop
+    foreach ($entry in $allow) {
+        New-NetFirewallRule -DisplayName "agent-sandbox $($entry.Host):$($entry.Port)" `
+            -Direction Outbound -Action Allow -Protocol TCP `
+            -RemoteAddress $entry.Addresses -RemotePort $entry.Port -ErrorAction Stop | Out-Null
+        Log "allowed $($entry.Host):$($entry.Port) ($($entry.Addresses -join ', '))"
+    }
+    Set-NetFirewallProfile -All -Enabled True -DefaultOutboundAction Block -ErrorAction Stop
+    # The block must hold: a direct connection to a public address fails.
+    $client = New-Object Net.Sockets.TcpClient
+    try {
+        $connected = $client.ConnectAsync('1.1.1.1', 443).Wait(5000)
+    } catch {
+        $connected = $false
+    } finally {
+        $client.Close()
+    }
+    if ($connected) { throw 'a direct connection to 1.1.1.1:443 still succeeds' }
+    Log 'outbound network access is limited to the proxy'
 }
 
 function Publish-IP {
