@@ -718,7 +718,7 @@ PPEOF
     echo "WARNING: paste patch failed to apply; original restored" >&2
     return 0
   fi
-  tmp="$(mktemp /tmp/pi-chunk-XXXXXX.mjs)"
+  tmp="$(mktemp ${TMPDIR}/pi-chunk-XXXXXX.mjs)"
   cp "$target" "$tmp"
   if ! "$node_bin" --check "$tmp"; then
     rm -f "$tmp"
