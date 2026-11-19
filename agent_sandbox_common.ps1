@@ -141,7 +141,10 @@ function Set-ToolchainEnvironment([string]$User) {
     [Environment]::SetEnvironmentVariable('NPM_CONFIG_PREFIX', (Join-Path $homeDir '.npm-global'), 'Machine')
     [Environment]::SetEnvironmentVariable('PI_OFFLINE', '1', 'Machine')
     [Environment]::SetEnvironmentVariable('PI_SKIP_VERSION_CHECK', '1', 'Machine')
+    [Environment]::SetEnvironmentVariable('DISABLE_TELEMETRY', '1', 'Machine')
+    [Environment]::SetEnvironmentVariable('CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', '1', 'Machine')
     [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'Machine')
+
     $env:Path = (($paths + @($env:Path -split ';')) -join ';')
     $env:NPM_CONFIG_PREFIX = Join-Path $homeDir '.npm-global'
 }

@@ -265,6 +265,8 @@ export CFLAGS="$CFLAGS"
 export MACOSX_DEPLOYMENT_TARGET="$MACOSX_DEPLOYMENT_TARGET"
 export PI_OFFLINE=1
 export PI_SKIP_VERSION_CHECK=1
+export DISABLE_TELEMETRY=1
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 eval "\$(pyenv init -)" 2>/dev/null || true
 EOF
     # Default node 22. The trailing $NVM_DIR/current covers shells that do not

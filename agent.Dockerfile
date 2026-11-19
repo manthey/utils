@@ -265,6 +265,8 @@ PS1='\h:$(truncate_current_directory)$(parse_git_branch)$ '
 export LANG=en_US.UTF-8
 export PI_OFFLINE=1
 export PI_SKIP_VERSION_CHECK=1
+export DISABLE_TELEMETRY=1
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export PYENV_ROOT="/.pyenv"
 export CFLAGS="-std=gnu17 -march=native"
 export PATH="$HOME/.local/bin:$HOME/.nvm:$HOME/.env:$HOME/.env:/.pyenv/bin:/.pyenv/shims:$PATH"
