@@ -635,7 +635,7 @@ def layout(columns, rows, available):
         column = columns[index]
         if not column.scalable:
             return natural_widths[index]
-        lowest = max(column.minimum, len(column.name))
+        lowest = column.minimum
         return max(lowest, column.preferred) if use_preferred else lowest
 
     for use_preferred in (True, False):
@@ -668,7 +668,8 @@ def render_header(columns, widths):
             groups.append([column.group, width])
     top = ' '.join(name[:span].center(span, '-') for name, span in groups)
     bottom = ' '.join(
-        column.name.ljust(width) if column.text else column.name.rjust(width)
+        (column.name[:width]).ljust(width) if column.text
+        else (column.name[:width]).rjust(width)
         for column, width in zip(columns, widths, strict=True)
     )
     return f'{top}\n{bottom}'
@@ -716,7 +717,7 @@ def vm_columns(wide, active, timestamp, extended):
         columns += [
             Column('kernel', 'wired', memory, 4),
             Column('commit', 'commit', memory, 4),
-            Column('commit', '%lim', 4, 4, scalable=False),
+            Column('commit', '%lm' if wide else 'lm', 3 if wide else 2, 2, scalable=False),
             Column('compress', 'comp', memory, 4),
             Column('compress', 'cmp', 4, 4),
             Column('compress', 'dcmp', 4, 4),
