@@ -1581,7 +1581,7 @@ def test_temperature_variation(
 
 
 @register_test('knowledge_recency', 'Knowledge recency')
-def test_knowledge_recenecy(
+def test_knowledge_recency(
     client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
 ) -> TestResult:
     system_prompt = (
@@ -1598,6 +1598,30 @@ def test_knowledge_recenecy(
             {'role': 'user', 'content': prompt},
         ]},
         'present': [r'pretty-format-json'],
+    })
+
+
+@register_test('knowledge_recency_2', 'Knowledge recency 2025')
+def test_knowledge_recency_2(
+    client: OpenAI, model_name: str, ollama_base_url: str, ollama_docker_url: str,
+) -> TestResult:
+    system_prompt = (
+        'You are a helpful assistant who never uses metaphors, slang, emojis, '
+        'or decorative characters.  You will answer only the questions asked, '
+        'and not offer to do additional work.')
+    prompt = (
+        'On a Macintosh, after running a docker container, stopping, and '
+        'removing it, is there a way to get docker desktop to release most of '
+        'its memory usage (all containers are removed) from a command line '
+        '(e.g., I am sshed into the Apple). All software is fully updated. I '
+        'am looking for a temporary release of memory, knowing that it will '
+        'grow again the next time I instantiate a container.')
+    return chat_test(client, model_name, {
+        'chat': {'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': prompt},
+        ]},
+        'present': [r'docker desktop restart'],
     })
 
 
