@@ -12,7 +12,9 @@
 #                            the Apple Silicon floor; sets the wheel platform
 #                            tag, e.g. macosx_11_0_arm64)
 #
-# Re-running this script is safe; completed steps are skipped.
+# Re-running this script is safe; completed steps are skipped. (After the
+# final sudo lockdown a re-run on the same VM cannot regain sudo; provisioning
+# via agent_tart.sh always starts from the pristine image instead.)
 
 set -euo pipefail
 
@@ -283,6 +285,25 @@ done
 
 git config --global user.name "Container"
 git config --global user.email "container@example.com"
+
+# --- revoke sudo access
+# The sandbox agent runs as this user, so it must not be able to become root.
+# Replace the NOPASSWD grant this script created above with a deny rule:
+# sudoers uses last-match-wins and includedir reads /etc/sudoers.d after
+# /etc/sudoers, so this denies every command even with a password (the admin
+# password is a well-known default). The filename must not contain a '.',
+# which includedir skips.
+# Everything runs in one root shell: once the deny rule is installed it also
+# denies this user's own follow-up sudo calls, and once NOPASSWD is gone sudo
+# would ask for a password that a non-interactive ssh session cannot enter.
+step "revoking sudo access"
+printf '%s ALL=(ALL) !ALL\n' "$USER" >/tmp/agent-nosudo
+sudo sh -c '
+    set -e
+    visudo -cf /tmp/agent-nosudo >/dev/null
+    install -m 440 /tmp/agent-nosudo /etc/sudoers.d/agent-nosudo
+    rm -f /etc/sudoers.d/agent-nopasswd /tmp/agent-nosudo
+'
 
 # --- cleanup
 

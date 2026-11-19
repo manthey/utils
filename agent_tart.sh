@@ -30,6 +30,9 @@
 # provision --no-cache pulls the base image from its registry instead of
 # using tart's cached copy (--cache, the default, uses the cached copy).
 #
+# The base revokes the agent's sudo access at the end of provisioning, so a
+# sandbox has no root even with the image's default admin password.
+#
 # cp usage: agent_tart.sh cp [--name NAME] in:<guest path>... <local path>
 #           agent_tart.sh cp [--name NAME] <local path>... in:<guest path>
 #           (like docker cp; directories are copied recursively; quote a
@@ -94,7 +97,7 @@ info() {
 usage() {
     # Print the header comment block as the help text; keep the range in sync
     # with the header above.
-    sed -n '2,44p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
