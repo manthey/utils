@@ -67,7 +67,10 @@ Common options (support varies slightly per platform):
   relative to the guest home. Folders can also be mounted `:rw`, which removes
   some isolation.
 - `--skip`: patterns of files or folders to exclude from the copy (comma
-  separated, or repeat `--skip`).
+  separated, or repeat `--skip`).  A bare name (`build`, `*.pyc`) matches at
+  any depth; a pattern starting with `./` or `/`, or containing `/`, is
+  relative to the project root (`./build` skips the top-level `build` but not
+  `node_modules/x/build`).
 - `--claude=DIR`: a local `.claude-persist` directory that contains
   `install_claude.sh`; `--claude=` with no value means the `claude`
   directory next to the script. Without `--claude`, Claude is not

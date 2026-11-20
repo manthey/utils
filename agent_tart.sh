@@ -651,20 +651,44 @@ start_vm() {
     TART_PID=$!
 }
 
+# Fill TAR_EXCLUDES with tar options for the --skip patterns. A bare name
+# matches at any depth; a pattern starting with ./ or /, or containing /, is
+# relative to the project root (./build skips build but not
+# node_modules/x/build). GNU tar anchors with --anchored; bsdtar with ^.
+TAR_EXCLUDES=()
 tar_exclude_args() {
-    local pattern item
+    local pattern item gnu=""
+    local -a items
+    TAR_EXCLUDES=()
+    if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+        gnu=1
+    fi
     for pattern in ${SKIPS[@]+"${SKIPS[@]}"}; do
-        echo "$pattern" | tr ',' '\n' | while IFS= read -r item; do
-            item="${item#/}"
-            item="${item%/}"
-            [ -n "$item" ] || continue
+        IFS=',' read -r -a items <<<"$pattern"
+        for item in ${items[@]+"${items[@]}"}; do
+            while [ "${item%/}" != "$item" ]; do
+                item="${item%/}"
+            done
             case "$item" in
             */*)
-                printf ' --exclude=%q' "$item"
+                while :; do
+                    case "$item" in
+                    /*) item="${item#/}" ;;
+                    ./*) item="${item#./}" ;;
+                    *) break ;;
+                    esac
+                done
+                [ -n "$item" ] || continue
+                if [ -n "$gnu" ]; then
+                    TAR_EXCLUDES+=(--anchored "--exclude=$CURRENT_DIR/$item" --no-anchored)
+                else
+                    TAR_EXCLUDES+=("--exclude=^$CURRENT_DIR/$item")
+                fi
                 ;;
             *)
-                printf ' --exclude=%q --exclude=*/%q --exclude=%q/* --exclude=*/%q/*' \
-                    "$item" "$item" "$item" "$item"
+                [ -n "$item" ] || continue
+                TAR_EXCLUDES+=("--exclude=$item" "--exclude=*/$item"
+                    "--exclude=$item/*" "--exclude=*/$item/*")
                 ;;
             esac
         done
@@ -673,11 +697,9 @@ tar_exclude_args() {
 
 transfer_project() {
     local vm="$1"
-    local excludes
-    excludes="$(tar_exclude_args)"
+    tar_exclude_args
     info "transferring $CURRENT_DIR to $VM_NAME"
-    # shellcheck disable=SC2086
-    tar -C "$PWD/.." -cf - $excludes "$CURRENT_DIR" | run_ssh "$vm" "tar -xf - -C ~/"
+    tar -C "$PWD/.." -cf - ${TAR_EXCLUDES[@]+"${TAR_EXCLUDES[@]}"} "$CURRENT_DIR" | run_ssh "$vm" "tar -xf - -C ~/"
     local codes=("${PIPESTATUS[@]}")
     [ "${codes[0]}" = 0 ] && [ "${codes[1]}" = 0 ] ||
         die "transferring $CURRENT_DIR to $vm failed"

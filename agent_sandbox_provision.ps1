@@ -52,9 +52,10 @@ Invoke-Checked "copying the project to $homeDir\$project" {
     $xf = @()
     foreach ($pattern in $skips) {
         if ($pattern -match '[\\/]') {
-            # A path pattern: anchored at the project root (agent_docker.py
+            # A path pattern (sent with a leading \ when it had a leading
+            # ./ or /): anchored at the project root (agent_docker.py
             # semantics), applied to directories and files alike.
-            $full = Join-Path $source ($pattern -replace '/', '\')
+            $full = Join-Path $source (($pattern -replace '/', '\').TrimStart('\'))
             $xd += $full
             $xf += $full
         } else {

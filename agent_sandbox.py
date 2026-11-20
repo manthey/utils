@@ -1097,7 +1097,15 @@ def cmd_create(args, backend: str, key: str, sandbox: Sandbox, project: str):
     mappings += extra
     skips = []
     for s in args.skips or []:
-        skips.extend(p.strip().rstrip('/').replace('/', '\\') for p in s.split(',') if p.strip())
+        for p in s.split(','):
+            # Anchored patterns (leading ./ or /, or any /) are sent with a
+            # leading backslash so the provisioner can tell them apart.
+            p = p.strip().replace('\\', '/').rstrip('/')
+            anchored = '/' in p
+            while p.startswith(('/', './')):
+                p = p[1:] if p.startswith('/') else p[2:]
+            if p:
+                skips.append(('\\' if anchored else '') + p.replace('/', '\\'))
     extra_pubkeys = []
     if args.ssh:
         ssh_path = os.path.expanduser(args.ssh)
@@ -1242,7 +1250,9 @@ def main():  # noqa
         '--skip', action='append', dest='skips',
         help='Files or folders to exclude from the copy. Use commas for '
         'multiple patterns in one --skip (e.g., ".venv,*.pyc") or repeat '
-        '--skip.')
+        '--skip. A bare name matches at any depth; a pattern starting with '
+        '"./" or "/", or containing "/", is relative to the project root '
+        '(e.g., "./build" skips build but not node_modules/x/build).')
     parser.add_argument(
         '--memory', default=max(8192, host_memory_mb() // 2), type=int,
         help='Sandbox memory in MB.  Default is the greater of 8192 and half '

@@ -29,6 +29,51 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
+def parse_skips(skips):
+    """
+    Parse --skip values into (anchored, parts) tuples.
+
+    A bare name (e.g., "build" or "*.pyc") matches at any depth.  A pattern
+    with a leading "/" or "./", or with a "/" anywhere, is relative to the
+    project root (e.g., "./build" skips only the top-level build).
+
+    :param skips: a list of --skip values, each of which can have
+        comma-separated patterns.
+    :returns: a list of (anchored, parts) tuples.
+    """
+    patterns = []
+    for s in skips or []:
+        for p in s.split(','):
+            p = p.strip().replace(os.sep, '/').rstrip('/')
+            anchored = '/' in p
+            while p.startswith(('/', './')):
+                p = p[1:] if p.startswith('/') else p[2:]
+            if p:
+                patterns.append((anchored, p.split('/')))
+    return patterns
+
+
+def is_skipped(rel, name, patterns):
+    """
+    Check if a path should be skipped.
+
+    :param rel: the list of path components of the parent directory relative
+        to the project root.
+    :param name: the file or directory name.
+    :param patterns: patterns from parse_skips.
+    :returns: True if the path matches a skip pattern.
+    """
+    path = rel + [name]
+    for anchored, parts in patterns:
+        if not anchored:
+            if fnmatch.fnmatch(name, parts[0]):
+                return True
+        elif len(parts) == len(path) and all(
+                fnmatch.fnmatch(c, p) for c, p in zip(path, parts, strict=True)):
+            return True
+    return False
+
+
 def safe_filename(name: str) -> str:
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
     name = name.rstrip(' .')
@@ -440,7 +485,9 @@ def main():  # noqa
         '--skip', action='append', dest='skips',
         help='Files or folders to exclude from the copy. Use commas for '
         'multiple patterns in one --skip (e.g., ".venv,*.pyc") or repeat '
-        '--skip.')
+        '--skip. A bare name matches at any depth; a pattern starting with '
+        '"./" or "/", or containing "/", is relative to the project root '
+        '(e.g., "./build" skips build but not node_modules/x/build).')
     parser.add_argument(
         '--config',
         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'agent_docker.yaml'),
@@ -547,10 +594,7 @@ def main():  # noqa
             logger.info(cmd)
             subprocess.run(cmd, stderr=subprocess.DEVNULL, check=False)
     if args.command in {'create', 'start'}:
-        skip_patterns = []
-        if args.skips:
-            for s in args.skips:
-                skip_patterns.extend(p.rstrip('/') for p in s.split(','))
+        skip_patterns = parse_skips(args.skips)
         gateway = 'host-gateway'
         if is_windows and docker_cmd[0] == 'wsl':
             cmd = ['wsl', 'grep', 'nameserver', '/etc/resolv.conf']
@@ -589,20 +633,10 @@ def main():  # noqa
                 for dirpath, dirs, files in os.walk(root):
                     rel = os.path.relpath(dirpath, root).split(os.sep) if dirpath != root else []
                     if skip_patterns:
-                        safe_dirs = []
-                        for d in sorted(dirs):
-                            is_skipped = False
-                            for p in skip_patterns:
-                                pp = p.replace(os.sep, '/').split('/')
-                                if fnmatch.fnmatch(d, pp[-1]) or (rel + [d])[:len(pp)] == pp:
-                                    is_skipped = True
-                                    break
-                            if not is_skipped:
-                                safe_dirs.append(d)
-                        dirs[:] = safe_dirs
+                        dirs[:] = [d for d in sorted(dirs)
+                                   if not is_skipped(rel, d, skip_patterns)]
                     for filename in files:
-                        if skip_patterns and any(
-                                fnmatch.fnmatch(filename, p) for p in skip_patterns):
+                        if skip_patterns and is_skipped(rel, filename, skip_patterns):
                             continue
                         full_path = os.path.join(dirpath, filename)
                         rel_path = os.path.relpath(full_path, root).replace(os.sep, '/')
