@@ -5,7 +5,7 @@
 #     'pillow',
 #     'openai',
 #     'pyffmpeg',
-#     'faster-whisper',
+#     'faster-whisper2',
 # ]
 # ///
 import argparse
@@ -220,8 +220,8 @@ def transcribe_audio(video_path: Path, whisper_model: str) -> list[dict[str, Any
         model = WhisperModel(whisper_model, device='cpu', compute_type='int8')
         segments, _ = model.transcribe(str(video_path), beam_size=5)
         return [{'start': s.start, 'end': s.end, 'text': s.text.strip()} for s in segments]
-    except Exception:
-        logger.info('No audio')
+    except Exception as exc:
+        logger.info('No audio (%s)', str(exc))
         return []
 
 
