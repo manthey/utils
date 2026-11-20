@@ -247,7 +247,8 @@ export default function addGuidelines(pi) {
       "Never perform unrequested refactoring, cleanup, or structural changes. If it wasn't explicitly asked to be changed, leave it intact.",
       `The current date is ${sessionDate}. Treat this as authoritative runtime context.`,
       "Your training data may be outdated. Do not use the apparent absence of a model, package, library, API, or feature from your training data as evidence that it does not exist.",
-      "If you share any links, they must be verified as active and not returning error codes."
+      "If you share any links, they must be verified as active and not returning error codes.",
+      "Do not use terms like 'honest' or 'fair' unless they are deliberately contrasting the actual opposite such as 'dishonest' and 'unfair'."
     );
   });
 }
