@@ -51,7 +51,8 @@ def summary_from_ids(msg_ids, msg_id_to_rec):
     # making tool calls or being aborted)
     usage_sum = {'input': 0, 'output': 0, 'max': 0, '_answers': 0}
     data = []
-    for mid in sorted(msg_ids, key=lambda m: (msg_id_to_rec[m].get('timestamp', ''), str(m))):
+    for mid in sorted(msg_ids, key=lambda m: (msg_id_to_rec.get(m, {}).get(
+            'timestamp', ''), str(m))):
         rec = msg_id_to_rec.get(mid)
         if not rec or rec.get('type') != 'message':
             continue
