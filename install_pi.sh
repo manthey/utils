@@ -249,7 +249,7 @@ export default function addGuidelines(pi) {
       "Your training data may be outdated. Do not use the apparent absence of a model, package, library, API, or feature from your training data as evidence that it does not exist.",
       "If you share any links, they must be verified as active and not returning error codes.",
       "Do not use terms like 'honest' or 'fair' unless they are deliberately contrasting the actual opposite such as 'dishonest' and 'unfair'.",
-      "If you are asked for a report or for status, report immediately rather than doing any more work."
+      "If you are asked for a status report, report immediately rather than doing any more work."
     );
   });
 }
