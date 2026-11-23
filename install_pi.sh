@@ -61,13 +61,21 @@ if [ "$IS_TERMUX" -eq 1 ]; then
     fi
   fi
 elif [ "$IS_WINDOWS" -eq 1 ]; then
-  # Windows: pi's node comes from PATH (portable node in the sandbox payload).
-  PI_NODE_BIN="$(dirname "$(command -v node 2>/dev/null || true)")"
+  # Windows: pi's node is the portable node the sandbox payload names in
+  # PI_NODE_DIR (kept off PATH so the command-line default node differs),
+  # else whatever node is on PATH.
+  if [ -n "${PI_NODE_DIR:-}" ]; then
+    PI_NODE_BIN="$PI_NODE_DIR"
+  else
+    PI_NODE_BIN="$(dirname "$(command -v node 2>/dev/null || true)")"
+  fi
   if [ -z "$PI_NODE_BIN" ] ||
     { [ ! -x "$PI_NODE_BIN/node" ] && [ ! -x "$PI_NODE_BIN/node.exe" ]; }; then
-    echo "ERROR: no node available for pi (on Windows the payload must provide node on PATH)" >&2
+    echo "ERROR: no node available for pi (on Windows the payload must provide node in PI_NODE_DIR or on PATH)" >&2
     exit 1
   fi
+  # npm (and the node it runs) must be pi's for the installs below.
+  PATH="$PI_NODE_BIN:$PATH"
   # The portable node directory is mapped read-only into the sandbox, so
   # global npm installs need a writable prefix.
   export NPM_CONFIG_PREFIX="$HOME/.npm-global"
@@ -182,14 +190,23 @@ npm install -g --allow-scripts=esbuild,@google/genai,protobufjs \
 PI_BIN="$PI_NODE_BIN"
 if [ "$IS_WINDOWS" -eq 1 ]; then
   # Windows: npm's own shims (pi.cmd / pi.ps1 / pi) live in
-  # NPM_CONFIG_PREFIX, which the sandbox provisioner puts on PATH. No wrapper
-  # is needed; the wrapper below would also point at the read-only node
-  # directory instead of the writable prefix where pi was installed.
+  # NPM_CONFIG_PREFIX, which the sandbox provisioner puts on PATH, but they
+  # run whatever node is first on PATH. Wrappers in BINDIR (ahead of
+  # NPM_CONFIG_PREFIX on PATH) put pi's node first for that invocation only,
+  # one for bash and one for cmd / PowerShell.
   PATH="$NPM_CONFIG_PREFIX:$PATH"
   [ -x "$NPM_CONFIG_PREFIX/pi" ] || [ -x "$NPM_CONFIG_PREFIX/pi.cmd" ] || {
     echo "ERROR: pi was not installed at $NPM_CONFIG_PREFIX/pi; review the npm output above" >&2
     exit 1
   }
+  cat > "$BINDIR/pi" <<EOF
+#!/usr/bin/env bash
+PATH="$PI_BIN:\$PATH" exec "$NPM_CONFIG_PREFIX/pi" "\$@"
+EOF
+  chmod +x "$BINDIR/pi"
+  printf '@echo off\r\nsetlocal\r\nset "PATH=%s;%%PATH%%"\r\n"%s" %%*\r\n' \
+    "$(cygpath -w "$PI_BIN")" "$(cygpath -w "$NPM_CONFIG_PREFIX/pi.cmd")" \
+    > "$BINDIR/pi.cmd"
 else
   [ -x "$PI_BIN/pi" ] || {
     echo "ERROR: pi was not installed at $PI_BIN/pi; review the npm output above" >&2

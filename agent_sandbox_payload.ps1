@@ -8,7 +8,8 @@
 #
 # Result (C:\payload):
 #   tools\git\        PortableGit (bash, vim, ssh client)
-#   tools\node\       portable node 22 (pi's runtime)
+#   tools\node\       portable node 22 (the default node on PATH)
+#   tools\node24\     portable node 24 (pi's runtime; not on PATH)
 #   tools\python\3.x\ python.org builds (NuGet packages) with pip; the
 #                     default (default.txt, else the newest) also has tox,
 #                     pre-commit and virtualenv and is first on PATH
@@ -111,18 +112,20 @@ Invoke-Checked 'PortableGit' {
     $script:versions += "git: $($asset.Tag)"
 }
 
-# --- node 22
+# --- node 22 (the command-line default) and node 24 (pi's runtime)
 Invoke-Checked 'node' {
     $index = Get-Json 'https://nodejs.org/dist/index.json'
-    $entry = $index | Where-Object { $_.version -like 'v22.*' } | Select-Object -First 1
-    if (-not $entry) { throw 'no node v22 release found' }
-    $name = "node-$($entry.version)-win-x64"
-    $file = Get-File "https://nodejs.org/dist/$($entry.version)/$name.zip" "$name.zip"
-    Expand-Zip $file (Join-Path $dl 'node')
-    $dest = Join-Path $script:Tools 'node'
-    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-    Move-Item (Join-Path $dl "node\$name") $dest
-    $script:versions += "node: $($entry.version)"
+    foreach ($node in @(@{ Major = '22'; Dir = 'node' }, @{ Major = '24'; Dir = 'node24' })) {
+        $entry = $index | Where-Object { $_.version -like "v$($node.Major).*" } | Select-Object -First 1
+        if (-not $entry) { throw "no node v$($node.Major) release found" }
+        $name = "node-$($entry.version)-win-x64"
+        $file = Get-File "https://nodejs.org/dist/$($entry.version)/$name.zip" "$name.zip"
+        Expand-Zip $file (Join-Path $dl $node.Dir)
+        $dest = Join-Path $script:Tools $node.Dir
+        if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+        Move-Item (Join-Path $dl "$($node.Dir)\$name") $dest
+        $script:versions += "node: $($entry.version)"
+    }
 }
 
 # --- single-file tools
@@ -233,7 +236,8 @@ $homeDir = $state.Home
 # --- pi, via the shared install_pi.sh
 Invoke-Checked 'install_pi.sh' {
     $script = ConvertTo-MsysPath (Join-Path $script:Payload 'scripts\install_pi.sh')
-    $code = Invoke-Bash $user "bash '$script'"
+    $piNode = ConvertTo-MsysPath (Join-Path $script:Tools 'node24')
+    $code = Invoke-Bash $user "PI_NODE_DIR='$piNode' bash '$script'"
     if ($code -ne 0) { throw "install_pi.sh exited with $code" }
 }
 
@@ -252,7 +256,9 @@ Invoke-Checked 'home directory extras' {
             '',
             '# agent sandbox: npm global installs go to the home directory',
             'export NPM_CONFIG_PREFIX="$HOME/.npm-global"',
-            'export PATH="$NPM_CONFIG_PREFIX:$PATH"',
+            '# appended: ~/.local/bin must stay ahead so its pi wrapper (which',
+            "# runs pi under node 24) wins over npm's own pi shim",
+            'export PATH="$PATH:$NPM_CONFIG_PREFIX"',
             '# Bracketed paste does not survive the sshd ConPTY layer: a right-click',
             '# paste leaves readline waiting for an end marker that never arrives.',
             "bind 'set enable-bracketed-paste off' 2>/dev/null",

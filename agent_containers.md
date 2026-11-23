@@ -300,7 +300,8 @@ mapped read-write and runs `agent_sandbox_payload.ps1` inside it, so the
 host never executes any of the downloaded tools. The sandbox fetches:
 
 - PortableGit (bash, git, vim, ssh client)
-- node 22 (pi's runtime)
+- node 22 (the default on PATH) and node 24 (pi's runtime; its wrappers in
+  `~/.local/bin` put it first on PATH only for pi)
 - python 3.11-3.15 as python.org NuGet builds (`--pythons` to change),
   with pip; the default (`--default-python`, 3.14) also gets tox,
   pre-commit and virtualenv and is first on PATH
