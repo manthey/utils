@@ -139,17 +139,29 @@ def extract_frames_at(
         for i, ts in enumerate(timestamps):
             out = Path(temp_dir) / f'frame_{i:04d}.jpg'
             ft = math.floor(ts * 1000) / 1000
-            cmd = [
-                ffmpeg_bin, '-nostdin', '-y', '-ss', f'{ft:.3f}', '-i',
-                str(video_path), '-frames:v', '1', '-q:v', '2',
-            ]
-            if max_size:
-                cmd += ['-vf',
-                        (f"scale='min(iw,{max_size})':'min(ih,{max_size})':"
-                         'force_original_aspect_ratio=decrease')]
-            cmd.append(str(out))
-            # logger.debug('Command %s', ' '.join(cmd))
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            # An input seek can land after the last keyframe, and ffmpeg will
+            # fail to read.  Retry by seeking earlier and decoding forward.
+            for preseek in (0, 10, 60, None):
+                coarse = 0 if preseek is None else max(0.0, ft - preseek)
+                cmd = [ffmpeg_bin, '-nostdin', '-y']
+                if coarse:
+                    cmd += ['-ss', f'{coarse:.3f}']
+                cmd += ['-i', str(video_path)]
+                if ft - coarse > 0:
+                    cmd += ['-ss', f'{ft - coarse:.3f}']
+                cmd += ['-frames:v', '1', '-q:v', '2']
+                if max_size:
+                    cmd += ['-vf',
+                            (f"scale='min(iw,{max_size})':'min(ih,{max_size})':"
+                             'force_original_aspect_ratio=decrease')]
+                cmd.append(str(out))
+                # logger.debug('Command %s', ' '.join(cmd))
+                result = subprocess.run(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if result.returncode == 0 and out.exists():
+                    break
+                if not coarse:
+                    result.check_returncode()
             if out.exists():
                 frames.append((ts, out.read_bytes()))
     return frames
